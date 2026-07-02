@@ -96,6 +96,16 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
         preamble.push_str("\n\n---\n\n");
         preamble.push_str(context_prompt);
     }
+
+    // Skills XML block (available skills listed for the model).
+    {
+        let skills_xml = crate::context::skills::format_skills_xml(&context.skills);
+        if !skills_xml.is_empty() {
+            preamble.push_str("\n\n");
+            preamble.push_str(&skills_xml);
+        }
+    }
+
     if !cwd.is_empty() {
         preamble.push_str("\n\nCurrent working directory: ");
         preamble.push_str(&cwd);

@@ -531,6 +531,43 @@ pub async fn handle_slash(
         "/compress" | "/compact" | "/loop" | "/worktree" | "/wt-merge" | "/wt-exit" => {
             features::handle(&parts, &mut ctx).await
         }
+        cmd if cmd.starts_with("/skill:") => {
+            // /skill:name — load and show a skill's content.
+            let skill_name = cmd.strip_prefix("/skill:").unwrap();
+            let args = if parts.len() > 1 {
+                text[parts[0].len()..].trim().to_string()
+            } else {
+                String::new()
+            };
+            if let Some(skill) = ctx.context.skills.get(skill_name) {
+                let header = format!(
+                    "## Skill: {} — {}\n",
+                    skill.meta.name, skill.meta.description
+                );
+                ctx.renderer.write(&header, crate::ui::C_TOOL)?;
+                ctx.renderer.write(
+                    &format!("Location: {}\n", skill.dir.display()),
+                    crate::ui::C_BTW,
+                )?;
+                ctx.renderer.write("\n", crate::ui::C_AGENT)?;
+                ctx.renderer.write(&skill.content, crate::ui::C_AGENT)?;
+                ctx.renderer.write("\n", crate::ui::C_AGENT)?;
+                if !args.is_empty() {
+                    // Append user arguments as a follow-up to the skill.
+                    let follow = format!("\n---\n[User] /skill:{} {} — \n", skill_name, args);
+                    ctx.renderer.write(&follow, crate::ui::C_TOOL)?;
+                }
+            } else {
+                write_error(
+                    ctx.renderer,
+                    format!(
+                        "unknown skill: '{}'. Use /help to see available skills.",
+                        skill_name
+                    ),
+                );
+            }
+            Ok(())
+        }
         _ => {
             // Try extension commands first.
             #[cfg(feature = "extensions")]
