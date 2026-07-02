@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/extension-api", "tests/extensions/test-echo", "tests/extensions/btw"]
+members = [".", "crates/extension-api", "tests/extensions/test-echo"]
 default-members = [".", "crates/extension-api"]
 resolver = "3"
 
