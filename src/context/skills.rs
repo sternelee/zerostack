@@ -92,7 +92,14 @@ pub fn parse_frontmatter(raw: &str) -> Result<(SkillFrontmatter, String), String
         .ok_or_else(|| "missing closing frontmatter delimiter '---'".to_string())?;
 
     let fm_text = after_first[..end].trim();
-    let body = after_first[end + 4..].trim().to_string(); // skip "\n---" (4 chars)
+
+    // Skip the closing delimiter: "\n---" (4 bytes) or "\r\n---" (5 bytes).
+    let delimiter_len = if after_first[end..].starts_with("\r\n---") {
+        5
+    } else {
+        4
+    };
+    let body = after_first[end + delimiter_len..].trim().to_string();
 
     let fm: SkillFrontmatter =
         serde_yaml_ng::from_str(fm_text).map_err(|e| format!("invalid frontmatter: {e}"))?;
@@ -238,7 +245,9 @@ pub fn format_skills_xml(skills: &HashMap<String, Skill>) -> String {
     }
 
     let mut xml = String::from("<available_skills>\n");
-    for skill in skills.values() {
+    let mut sorted: Vec<&Skill> = skills.values().collect();
+    sorted.sort_by(|a, b| a.meta.name.cmp(&b.meta.name));
+    for skill in sorted {
         // Only list skills that allow model invocation.
         if skill.meta.disable_model_invocation.unwrap_or(false) {
             continue;
@@ -326,5 +335,14 @@ Instructions...
         assert!(!is_valid_skill_name(
             "very-long-name-that-exceeds-the-sixty-four-character-limit-xxxxxxxx"
         ));
+    }
+
+    #[test]
+    fn test_parse_crlf_frontmatter() {
+        let raw =
+            "---\r\nname: crlf-skill\r\ndescription: CRLF test\r\n---\r\n\r\n# Body\r\nContent\r\n";
+        let (fm, body) = parse_frontmatter(raw).unwrap();
+        assert_eq!(fm.name, "crlf-skill");
+        assert_eq!(body, "# Body\r\nContent");
     }
 }
