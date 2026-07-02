@@ -1,0 +1,10 @@
+[build]
+target = "wasm32-unknown-unknown"
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "-C", "link-arg=--allow-undefined",
+    "-C", "panic=abort",
+    "-A", "static_mut_refs",
+    "-A", "rust_2024_compatibility",
+]

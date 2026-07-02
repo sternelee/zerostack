@@ -67,6 +67,14 @@ pub struct Cli {
     #[arg(long = "no-color", help = "Disable colored TUI output")]
     pub no_color: bool,
 
+    #[cfg(feature = "extensions")]
+    #[arg(
+        short = 'E',
+        long = "extension",
+        help = "Load an extension from a .wasm file (repeatable)"
+    )]
+    pub extension: Vec<std::path::PathBuf>,
+
     #[arg(long = "restrictive", short = 'R', help = "Ask for all operations")]
     pub restrictive: bool,
 

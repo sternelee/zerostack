@@ -1,0 +1,112 @@
+/// zerostack Extension API v0.1.0
+///
+/// WIT contract between zerostack host and Wasm extensions.
+
+package zerostack:extension@0.1.0;
+
+/// ── shared types ────────────────────────────────────────────
+
+interface types {
+    /// Result of an extension tool execution.
+    record tool-output {
+        content: string,
+        details: string,
+        is-error: bool,
+    }
+
+    /// Extension's decision on a tool call.
+    variant tool-action {
+        allow,
+        block(string),
+        modify(string),
+    }
+
+    /// UI notification severity.
+    variant notify-level {
+        info,
+        warning,
+        error,
+        success,
+    }
+
+    /// Shell command result.
+    record exec-output {
+        stdout: string,
+        stderr: string,
+        exit-code: s32,
+    }
+
+    /// HTTP response.
+    record http-response {
+        status: u16,
+        body: string,
+    }
+}
+
+/// ── host exports (extension calls into host) ───────────────────
+
+interface tool-registry {
+    use types.{tool-output};
+
+    record tool-definition {
+        name: string,
+        label: string,
+        description: string,
+        parameters-schema: string,
+        prompt-snippet: option<string>,
+        prompt-guidelines: list<string>,
+    }
+
+    register-tool: func(def: tool-definition) -> result<_, string>;
+    unregister-tool: func(name: string) -> result<_, string>;
+}
+
+interface event-subscription {
+    subscribe: func(event-names: list<string>);
+}
+
+interface ui {
+    use types.{notify-level};
+
+    notify: func(level: notify-level, message: string);
+    confirm: func(title: string, message: string) -> result<bool, string>;
+    select: func(title: string, options: list<string>) -> result<option<u32>, string>;
+    input: func(prompt: string) -> result<option<string>, string>;
+    set-status: func(key: string, text: string);
+    clear-status: func(key: string);
+}
+
+interface session {
+    get-entries-json: func() -> result<string, string>;
+    get-leaf-id: func() -> result<string, string>;
+    append-entry: func(custom-type: string, content: string, details: string) -> result<_, string>;
+    get-system-prompt: func() -> result<string, string>;
+}
+
+interface host-calls {
+    use types.{exec-output, http-response};
+
+    exec: func(cmd: string, args: list<string>) -> result<exec-output, string>;
+    http-get: func(url: string) -> result<http-response, string>;
+    http-post: func(url: string, body: string) -> result<http-response, string>;
+}
+
+/// ── world: the complete extension contract ─────────────────────
+
+world extension {
+    import event-subscription;
+    import tool-registry;
+    import ui;
+    import session;
+    import host-calls;
+
+    use types.{tool-output};
+
+    export init: func() -> result<_, string>;
+
+    /// Called when the LLM invokes a tool registered by this extension.
+    export tool-execute: func(
+        name: string,
+        params-json: string,
+    ) -> result<tool-output, string>;
+}

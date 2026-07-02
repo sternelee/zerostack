@@ -532,6 +532,24 @@ pub async fn handle_slash(
             features::handle(&parts, &mut ctx).await
         }
         _ => {
+            // Try extension commands first.
+            #[cfg(feature = "extensions")]
+            {
+                let cmd_name = parts[0].strip_prefix('/').unwrap_or(parts[0]);
+                let full_args = if parts.len() > 1 {
+                    text[parts[0].len()..].trim().to_string()
+                } else {
+                    String::new()
+                };
+                if let Some(output) =
+                    crate::extension::registry::dispatch_command(cmd_name, &full_args)
+                {
+                    let mut out = output;
+                    out.push('\n');
+                    ctx.renderer.write(&out, crate::ui::C_TOOL)?;
+                    return Ok(());
+                }
+            }
             write_error(
                 ctx.renderer,
                 format!("unknown command: {} (try /help)", parts[0]),

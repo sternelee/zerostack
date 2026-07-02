@@ -7,6 +7,8 @@ mod config;
 mod context;
 mod docs;
 mod event;
+#[cfg(feature = "extensions")]
+mod extension;
 mod extras;
 mod fs;
 mod logging;
@@ -791,6 +793,18 @@ async fn main() -> anyhow::Result<()> {
         if !initial_msg.is_empty() {
             session.add_message(MessageRole::User, &initial_msg);
         }
+
+        // Initialize plugin system.
+        #[cfg(feature = "extensions")]
+        {
+            let extension_paths: Vec<std::path::PathBuf> = cli.extension.clone();
+            if !extension_paths.is_empty() {
+                crate::extension::registry::init_from_paths(&extension_paths)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                tracing::info!("extensions initialized");
+            }
+        }
+
         ui::run_interactive(
             client,
             None,

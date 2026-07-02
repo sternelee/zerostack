@@ -251,6 +251,15 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
             builder = builder.tool(AdvisorTool::new());
         }
 
+        // Append extension-registered tools.
+        #[cfg(feature = "extensions")]
+        {
+            let extension_tools = crate::extension::registry::collect_tools();
+            if !extension_tools.is_empty() {
+                builder = builder.tools(extension_tools);
+            }
+        }
+
         builder.build()
     }
 }
