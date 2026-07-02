@@ -197,12 +197,13 @@ pub fn reload_skills() -> HashMap<String, Skill> {
 }
 
 /// Ensure the global skills directory exists with embedded defaults.
+///
+/// Individual embedded skills are copied/updated even if the directory already
+/// exists, so updates to bundled skills are propagated to existing installs.
 pub fn ensure_global() -> anyhow::Result<()> {
     let dir = global_skills_dir();
-    if !dir.exists() {
-        std::fs::create_dir_all(&dir)?;
-        copy_embedded_skills_to(&dir)?;
-    }
+    std::fs::create_dir_all(&dir)?;
+    copy_embedded_skills_to(&dir)?;
     Ok(())
 }
 
@@ -230,7 +231,14 @@ fn copy_embedded_skills_to(dest: &Path) -> anyhow::Result<()> {
             for file in dir.files() {
                 if let Some(fname) = file.path().file_name().and_then(|s| s.to_str()) {
                     if let Some(content) = file.contents_utf8() {
-                        std::fs::write(dest_dir.join(fname), content)?;
+                        let dest_path = dest_dir.join(fname);
+                        let should_write = match std::fs::read_to_string(&dest_path) {
+                            Ok(existing) => existing != content,
+                            Err(_) => true,
+                        };
+                        if should_write {
+                            std::fs::write(&dest_path, content)?;
+                        }
                     }
                 }
             }
@@ -295,6 +303,22 @@ fn load_embedded_skill(dir: &Dir, name: &str) -> Option<Skill> {
     })
 }
 
+/// Escape a string for use as XML text content.
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Format skills as XML for the system prompt (per agentskills.io spec).
 pub fn format_skills_xml(skills: &HashMap<String, Skill>) -> String {
     if skills.is_empty() {
@@ -309,16 +333,17 @@ pub fn format_skills_xml(skills: &HashMap<String, Skill>) -> String {
         if skill.meta.disable_model_invocation.unwrap_or(false) {
             continue;
         }
-        let desc = skill.meta.description.replace('\n', " ");
-        xml.push_str(&format!("  <skill>\n"));
-        xml.push_str(&format!("    <name>{}</name>\n", skill.meta.name));
+        let name = xml_escape(&skill.meta.name);
+        let desc = xml_escape(&skill.meta.description.replace('\n', " "));
+        xml.push_str("  <skill>\n");
+        xml.push_str(&format!("    <name>{name}</name>\n"));
         xml.push_str(&format!("    <description>{desc}</description>\n"));
         if let Some(ref license) = skill.meta.license {
-            xml.push_str(&format!("    <license>{license}</license>\n"));
+            xml.push_str(&format!("    <license>{}</license>\n", xml_escape(license)));
         }
         xml.push_str(&format!(
             "    <location>{}</location>\n",
-            skill.dir.display()
+            xml_escape(&skill.dir.display().to_string())
         ));
         xml.push_str("  </skill>\n");
     }
@@ -401,5 +426,29 @@ Instructions...
         let (fm, body) = parse_frontmatter(raw).unwrap();
         assert_eq!(fm.name, "crlf-skill");
         assert_eq!(body, "# Body\r\nContent");
+    }
+
+    #[test]
+    fn test_format_skills_xml_escapes_special_chars() {
+        let skill = Skill {
+            meta: SkillFrontmatter {
+                name: "xss&skill".into(),
+                description: "Use <script> carefully.".into(),
+                license: Some("MIT & friends".into()),
+                compatibility: None,
+                allowed_tools: None,
+                metadata: None,
+                disable_model_invocation: None,
+            },
+            dir: std::path::PathBuf::from("/tmp/<skills>"),
+            content: "body".into(),
+        };
+        let mut skills = HashMap::new();
+        skills.insert(skill.meta.name.clone(), skill);
+        let xml = format_skills_xml(&skills);
+        assert!(xml.contains("<name>xss&amp;skill</name>"));
+        assert!(xml.contains("<description>Use &lt;script&gt; carefully.</description>"));
+        assert!(xml.contains("<license>MIT &amp; friends</license>"));
+        assert!(xml.contains("<location>/tmp/&lt;skills&gt;</location>"));
     }
 }

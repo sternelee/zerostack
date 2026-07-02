@@ -819,7 +819,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-            skills::reload_skills(); // refresh cache with CLI-loaded skills
+            // Note: we intentionally do NOT call skills::reload_skills() here.
+            // CLI-loaded skills are only added to context.skills for this run;
+            // the global cache continues to reflect disk-loaded skills.
         }
 
         // Initialize plugin system.
