@@ -10,6 +10,8 @@
 //! ```
 
 #![allow(dead_code)]
+// wasmtime::component::bindgen! generates unsafe blocks internally.
+#![allow(unsafe_code)]
 
 mod host;
 mod loader;

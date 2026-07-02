@@ -66,20 +66,19 @@ impl ToolDyn for ExtensionToolWrapper {
             .map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
 
             match result {
-                Ok((content, _details, is_error)) => {
-                    if is_error {
-                        Err(ToolError::ToolCallError(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            content,
-                        ))))
+                Ok((content, details, is_error)) => {
+                    let output = if details.is_empty() || details == "{}" {
+                        content
                     } else {
-                        Ok(content)
+                        format!("{content}\n\n<details>\n{details}\n</details>")
+                    };
+                    if is_error {
+                        Err(ToolError::ToolCallError(anyhow::anyhow!(output).into()))
+                    } else {
+                        Ok(output)
                     }
                 }
-                Err(e) => Err(ToolError::ToolCallError(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e,
-                )))),
+                Err(e) => Err(ToolError::ToolCallError(anyhow::anyhow!(e).into())),
             }
         })
     }

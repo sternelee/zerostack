@@ -1,7 +1,12 @@
-# Plugin System Design — zerostack
+# Extension System Design — zerostack
 
 > **设计原则：** API 设计借鉴 pi 的 `ExtensionAPI`（事件驱动 + 工具/命令注册），
 > 开发与打包模型借鉴 Zed（Rust → Wasm 编译、`extension.toml` 清单、registry 分发）。
+>
+> **Current status (MVP):** The runtime implements the smaller `extension-world`
+> WIT contract (tool/command registration + execution). Richer lifecycle events,
+> UI/session/host-calls imports, and provider registration are planned for future
+> iterations and documented here as the roadmap.
 
 ## 目录
 
@@ -87,7 +92,7 @@ Plugin API borders (WIT contracts):
 
 ### 2.1 完整 WIT 文件
 
-文件: `crates/plugin-api/wit/plugin-v0.1.0.wit`
+文件: `crates/extension-api/wit/extension-v0.1.0.wit` (world: `extension-world`)
 
 ```wit
 /// zerostack Plugin API v0.1.0
@@ -95,7 +100,7 @@ Plugin API borders (WIT contracts):
 /// 这个 WIT 文件定义了插件（guest）与宿主（host）之间的双向接口。
 /// Host 为插件提供注册工具/命令/UI 等能力；
 /// Guest（插件）导出生命周期回调，由 Host 在适当时机调用。
-package zerostack:plugin-api@0.1.0;
+package zerostack:extension@0.1.0;
 
 // ═══════════════════════════════════════════════
 // 基础类型
@@ -353,7 +358,7 @@ interface event-subscription {
 // World: 定义完整的插件契约
 // ═══════════════════════════════════════════════
 
-world extension {
+world extension-world {
     // Host 提供给插件的接口
     import event-subscription;
     import tool-registry;
@@ -940,7 +945,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # 由 zerostack 提供的 plugin API crate
-zerostack-plugin-api = "0.1"
+zerostack-extension-api = "0.1"
 # WIT bindings
 wit-bindgen = "0.42"
 
@@ -1166,11 +1171,11 @@ zerostack plugin info sternelee/protected-paths
 
 **任务清单：**
 
-1. **创建 `crates/plugin-api/` crate**
-   - 编写完整 WIT 文件（`plugin-v0.1.0.wit`）
+1. **创建 `crates/extension-api/` crate**
+   - 编写完整 WIT 文件（`extension-v0.1.0.wit`）
    - 配置 `wit-bindgen` 代码生成
    - 定义 Rust 侧的 `Extension` trait 和 `ExtensionContext`
-   - 导出 `zerostack-plugin-api` crate 供插件作者使用
+   - 导出 `zerostack-extension-api` crate 供扩展作者使用
 
 2. **创建 `src/plugin/` 模块** (feature-gated: `feature = "plugins"`)
    - `src/plugin/host.rs` — `PluginHost`: 管理 wasmtime Engine + 实例生命周期
