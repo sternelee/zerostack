@@ -127,6 +127,14 @@ pub fn handle(_parts: &[&str], ctx: &mut SlashCtx<'_>) {
     write_result(ctx.renderer, "  /prompt default        clear active prompt");
     write_result(
         ctx.renderer,
+        "  /skill:<name>          load a skill's instructions",
+    );
+    write_result(
+        ctx.renderer,
+        "  /skills                list available skills",
+    );
+    write_result(
+        ctx.renderer,
         "  /theme                 list available themes",
     );
     write_result(ctx.renderer, "  /theme <name>          activate a theme");

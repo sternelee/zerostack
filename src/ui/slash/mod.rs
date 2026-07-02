@@ -528,6 +528,30 @@ pub async fn handle_slash(
         "/init" => init::handle(&parts, &mut ctx).await,
         "/review" => review::handle(&parts, &mut ctx).await,
         "/memory" => memory::handle(&parts, &mut ctx).await,
+        "/skills" => {
+            let skills = &ctx.context.skills;
+            if skills.is_empty() {
+                write_result(
+                    ctx.renderer,
+                    "No skills loaded. Add skills to ~/.local/share/zerostack/skills/ or .zerostack/skills/",
+                );
+            } else {
+                write_ok(ctx.renderer, "Available skills:");
+                let mut names: Vec<&str> = skills.keys().map(|s| s.as_str()).collect();
+                names.sort();
+                for name in names {
+                    if let Some(s) = skills.get(name) {
+                        write_result(
+                            ctx.renderer,
+                            &format!("  /skill:{name: <30} — {}", s.meta.description),
+                        );
+                    }
+                }
+                write_result(ctx.renderer, "");
+                write_result(ctx.renderer, "Use /skill:<name> to load full instructions.");
+            }
+            Ok(())
+        }
         "/compress" | "/compact" | "/loop" | "/worktree" | "/wt-merge" | "/wt-exit" => {
             features::handle(&parts, &mut ctx).await
         }
