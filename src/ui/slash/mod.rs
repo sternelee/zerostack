@@ -568,7 +568,8 @@ pub async fn handle_slash(
             features::handle(&parts, &mut ctx).await
         }
         cmd if cmd.starts_with("/skill:") => {
-            // /skill:name — load and show a skill's content.
+            // /skill:name — activate a skill as the system prompt.
+            // Per pi's progressive disclosure: full instructions load on-demand.
             let skill_name = cmd.strip_prefix("/skill:").unwrap();
             let args = if parts.len() > 1 {
                 text[parts[0].len()..].trim().to_string()
@@ -576,28 +577,25 @@ pub async fn handle_slash(
                 String::new()
             };
             if let Some(skill) = ctx.context.skills.get(skill_name) {
-                let header = format!(
-                    "## Skill: {} — {}\n",
-                    skill.meta.name, skill.meta.description
-                );
-                ctx.renderer.write(&header, crate::ui::C_TOOL)?;
-                ctx.renderer.write(
-                    &format!("Location: {}\n", skill.dir.display()),
-                    crate::ui::C_BTW,
-                )?;
-                ctx.renderer.write("\n", crate::ui::C_AGENT)?;
-                ctx.renderer.write(&skill.content, crate::ui::C_AGENT)?;
-                ctx.renderer.write("\n", crate::ui::C_AGENT)?;
+                // Build prompt: skill content + optional user args.
+                let mut prompt = skill.content.clone();
                 if !args.is_empty() {
-                    // Append user arguments as a follow-up to the skill.
-                    let follow = format!("\n---\n[User] /skill:{} {} — \n", skill_name, args);
-                    ctx.renderer.write(&follow, crate::ui::C_TOOL)?;
+                    prompt.push_str(&format!("\n\nUser: {args}"));
                 }
+                ctx.context.current_prompt = Some(prompt);
+                ctx.context.current_prompt_name = Some(format!("skill:{skill_name}"));
+                write_ok(
+                    ctx.renderer,
+                    format!(
+                        "Skill activated: {skill_name} — {} (use /prompt default to clear)",
+                        skill.meta.description
+                    ),
+                );
             } else {
                 write_error(
                     ctx.renderer,
                     format!(
-                        "unknown skill: '{}'. Use /help to see available skills.",
+                        "unknown skill: '{}'. Use /skills to see available skills.",
                         skill_name
                     ),
                 );
