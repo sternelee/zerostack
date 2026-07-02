@@ -97,6 +97,7 @@ impl ContextFiles {
 pub fn load(no_context_files: bool) -> ContextFiles {
     let _ = prompts::ensure_global();
     let _ = themes::ensure_global();
+    let _ = skills::ensure_global();
     let (agents, arch_candidate) = if no_context_files {
         (None, None)
     } else {

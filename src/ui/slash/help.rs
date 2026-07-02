@@ -147,6 +147,10 @@ pub fn handle(_parts: &[&str], ctx: &mut SlashCtx<'_>) {
         ctx.renderer,
         "  /regen-themes         restore built-in themes to config dir",
     );
+    write_result(
+        ctx.renderer,
+        "  /regen-skills         restore built-in skills to global dir",
+    );
     #[cfg(feature = "git-worktree")]
     {
         write_result(

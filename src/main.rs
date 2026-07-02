@@ -794,6 +794,34 @@ async fn main() -> anyhow::Result<()> {
             session.add_message(MessageRole::User, &initial_msg);
         }
 
+        // Load skills from CLI --skill flags.
+        if !cli.skill.is_empty() {
+            use crate::context::skills;
+            for path in &cli.skill {
+                let skill = if path.is_dir() {
+                    skills::load_skill(path)
+                } else if path.is_file() && path.ends_with("SKILL.md") {
+                    // Load from parent directory.
+                    if let Some(parent) = path.parent() {
+                        skills::load_skill(parent)
+                    } else {
+                        Err("invalid skill path".into())
+                    }
+                } else {
+                    Err(format!("not a skill directory or SKILL.md file: {path:?}"))
+                };
+                match skill {
+                    Ok(s) => {
+                        context.skills.insert(s.meta.name.clone(), s);
+                    }
+                    Err(e) => {
+                        tracing::warn!(?path, error = %e, "failed to load skill from CLI");
+                    }
+                }
+            }
+            skills::reload_skills(); // refresh cache with CLI-loaded skills
+        }
+
         // Initialize plugin system.
         #[cfg(feature = "extensions")]
         {

@@ -75,6 +75,12 @@ pub struct Cli {
     )]
     pub extension: Vec<std::path::PathBuf>,
 
+    #[arg(
+        long = "skill",
+        help = "Load a skill directory or single SKILL.md file (repeatable)"
+    )]
+    pub skill: Vec<std::path::PathBuf>,
+
     #[arg(long = "restrictive", short = 'R', help = "Ask for all operations")]
     pub restrictive: bool,
 

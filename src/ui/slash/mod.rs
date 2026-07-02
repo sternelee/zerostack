@@ -528,6 +528,18 @@ pub async fn handle_slash(
         "/init" => init::handle(&parts, &mut ctx).await,
         "/review" => review::handle(&parts, &mut ctx).await,
         "/memory" => memory::handle(&parts, &mut ctx).await,
+        "/regen-skills" => {
+            match crate::context::skills::regen() {
+                Ok(()) => {
+                    ctx.context.skills = crate::context::skills::reload_skills();
+                    write_ok(ctx.renderer, "Skills regenerated. Use /skills to see them.");
+                }
+                Err(e) => {
+                    write_error(ctx.renderer, format!("failed to regenerate skills: {e}"));
+                }
+            }
+            Ok(())
+        }
         "/skills" => {
             let skills = &ctx.context.skills;
             if skills.is_empty() {

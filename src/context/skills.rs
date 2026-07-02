@@ -27,6 +27,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use include_dir::{Dir, include_dir};
 use serde::Deserialize;
@@ -180,9 +181,65 @@ pub fn load_skill(dir: &Path) -> Result<Skill, String> {
 
 // ── Collection loading ──────────────────────────────────────
 
-/// Load all skills from standard locations.
+static SKILLS_CACHE: OnceLock<HashMap<String, Skill>> = OnceLock::new();
+
+/// Load all skills from standard locations (cached after first call).
 /// Returns a map of skill name → Skill.
 pub fn load_all() -> HashMap<String, Skill> {
+    SKILLS_CACHE.get_or_init(|| load_all_uncached()).clone()
+}
+
+/// Force reload skills from disk (bypasses cache).
+pub fn reload_skills() -> HashMap<String, Skill> {
+    let skills = load_all_uncached();
+    let _ = SKILLS_CACHE.set(skills.clone());
+    skills
+}
+
+/// Ensure the global skills directory exists with embedded defaults.
+pub fn ensure_global() -> anyhow::Result<()> {
+    let dir = global_skills_dir();
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)?;
+        copy_embedded_skills_to(&dir)?;
+    }
+    Ok(())
+}
+
+/// Re-copy embedded skills to the global directory (overwrites existing).
+pub fn regen() -> anyhow::Result<()> {
+    let dir = global_skills_dir();
+    std::fs::create_dir_all(&dir)?;
+    copy_embedded_skills_to(&dir)?;
+    reload_skills();
+    Ok(())
+}
+
+fn global_skills_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("zerostack")
+        .join("skills")
+}
+
+fn copy_embedded_skills_to(dest: &Path) -> anyhow::Result<()> {
+    for dir in EMBEDDED_SKILLS.dirs() {
+        if let Some(name) = dir.path().file_name().and_then(|s| s.to_str()) {
+            let dest_dir = dest.join(name);
+            std::fs::create_dir_all(&dest_dir)?;
+            for file in dir.files() {
+                if let Some(fname) = file.path().file_name().and_then(|s| s.to_str()) {
+                    if let Some(content) = file.contents_utf8() {
+                        std::fs::write(dest_dir.join(fname), content)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_all_uncached() -> HashMap<String, Skill> {
     let mut skills = HashMap::new();
 
     // 1. Embedded skills (lowest priority).
