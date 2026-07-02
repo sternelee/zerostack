@@ -106,6 +106,28 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
         }
     }
 
+    // Ponytail mode (active intensity level).
+    if let Some(ref mode) = context.ponytail_mode {
+        if let Some(skill) = context.skills.get("ponytail") {
+            let intensity = match mode.as_str() {
+                "lite" => {
+                    "**Intensity: LITE** — Build what's asked, then name the lazier alternative in one line starting with '💡 Could have:'."
+                }
+                "ultra" => {
+                    "**Intensity: ULTRA** — YAGNI extremist. Challenge every requirement. Prefer deletion. Ask 'does this really need to exist?' before writing anything. Delete code to solve problems."
+                }
+                _ => {
+                    "**Intensity: FULL** — Enforce the complete decision ladder: YAGNI → Reuse → Stdlib → Crate → Native → One-line → Minimum."
+                }
+            };
+            preamble.push_str("\n\n---\n\n");
+            preamble.push_str("# PONYTAIL MODE ACTIVE\n\n");
+            preamble.push_str(intensity);
+            preamble.push_str("\n\n");
+            preamble.push_str(&skill.content);
+        }
+    }
+
     if !cwd.is_empty() {
         preamble.push_str("\n\nCurrent working directory: ");
         preamble.push_str(&cwd);
