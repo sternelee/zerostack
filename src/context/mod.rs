@@ -71,8 +71,6 @@ pub struct ContextFiles {
     pub architecture: Option<String>,
     /// Loaded skills (name → Skill).
     pub skills: HashMap<String, skills::Skill>,
-    /// Ponytail intensity mode: None (off), "lite", "full", "ultra".
-    pub ponytail_mode: Option<String>,
 }
 
 impl ContextFiles {
@@ -130,7 +128,6 @@ pub fn load(no_context_files: bool) -> ContextFiles {
         #[cfg(feature = "archmd")]
         architecture,
         skills,
-        ponytail_mode: None,
     }
 }
 
