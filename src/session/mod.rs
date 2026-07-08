@@ -69,6 +69,10 @@ pub struct Session {
     pub total_input_tokens: u64,
     #[serde(default)]
     pub total_output_tokens: u64,
+    #[serde(default)]
+    pub total_cached_input_tokens: u64,
+    #[serde(default)]
+    pub total_cache_creation_input_tokens: u64,
     pub total_cost: f64,
     pub total_estimated_tokens: u64,
     #[serde(default)]
@@ -163,17 +167,19 @@ impl Session {
         )
     }
 
-    pub fn new(provider: &str, model: &str, context_window: u64) -> Self {
+    pub fn new(provider: &str, model: &str, context_window: u64, name: &str) -> Self {
         let now = CompactString::new(chrono::Utc::now().to_rfc3339());
         Session {
             id: CompactString::new(Uuid::new_v4().to_string()),
-            name: CompactString::new(""),
+            name: CompactString::new(name),
             messages: Vec::new(),
             compactions: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_cached_input_tokens: 0,
+            total_cache_creation_input_tokens: 0,
             total_cost: 0.0,
             total_estimated_tokens: 0,
             calibrated_tokens: 0,
@@ -224,8 +230,12 @@ impl Session {
                 r.strip_prefix("refs/heads/").unwrap_or(r),
             ))
         } else if !head.is_empty() {
-            // Detached HEAD: show a short commit hash.
-            Some(CompactString::new(&head[..head.len().min(8)]))
+            // Detached HEAD: show a short commit hash (char-boundary-safe).
+            let mut end = head.len().min(8);
+            while end > 0 && !head.is_char_boundary(end) {
+                end -= 1;
+            }
+            Some(CompactString::new(&head[..end]))
         } else {
             None
         }

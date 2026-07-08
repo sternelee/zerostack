@@ -3,9 +3,9 @@ use std::path::PathBuf;
 
 use include_dir::{Dir, include_dir};
 
-use crate::config::ColorsConfig;
+use crate::config::{ColorsConfig, SchemeType};
 use crate::ui::renderer::Renderer;
-use crate::ui::utils::parse_color;
+use crate::ui::utils::{parse_color, to_ansi_256};
 
 static EMBEDDED: Dir = include_dir!("$CARGO_MANIFEST_DIR/data/themes");
 
@@ -47,6 +47,14 @@ pub fn apply(content: &str, renderer: &mut Renderer) {
         let chat_bg = colors.chat_background.as_deref().and_then(parse_color);
         let input_bg = colors.input_background.as_deref().and_then(parse_color);
         let status_bg = colors.status_background.as_deref().and_then(parse_color);
-        renderer.set_background_colors(chat_bg, input_bg, status_bg);
+        if matches!(colors.scheme_type, SchemeType::Ansi) {
+            renderer.set_background_colors(
+                chat_bg.map(to_ansi_256),
+                input_bg.map(to_ansi_256),
+                status_bg.map(to_ansi_256),
+            );
+        } else {
+            renderer.set_background_colors(chat_bg, input_bg, status_bg);
+        }
     }
 }

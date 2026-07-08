@@ -447,9 +447,21 @@ when one of them is used). All other items are read from the session.
 
 ## Colors
 
-The `colors` object accepts three optional string fields, each of which can be a
-named color or hex color (e.g. `"#1e1e2e"`). Named colors are case-insensitive.
-Accepted values:
+The `colors` object accepts an optional `scheme_type` field and three optional
+string fields for background colors, each of which can be a named color or hex
+color (e.g. `"#1e1e2e"`). Named colors are case-insensitive.
+
+### `scheme_type`
+
+Controls the terminal color escape sequences emitted. Two values:
+
+- `"full"` (default) — 24-bit true color via RGB escape sequences. Best for
+  modern terminals.
+- `"ansi"` — 256-color palette via ANSI escape sequences. Maps RGB colors to
+  the nearest 256-color match (16 standard + 216 color cube + 24 grayscale).
+  Use this for older terminals or multiplexers that don't support true color.
+
+### Background fields
 
 - `chat_background` — background color for the main conversation buffer.
 - `input_background` — background color for the text input area.
@@ -463,6 +475,7 @@ Example:
 ```json
 {
   "colors": {
+    "scheme_type": "full",
     "chat_background": "#1e1e2e",
     "input_background": "#181825",
     "status_background": "#11111b"

@@ -47,9 +47,34 @@ _zerostack_ is one of the smallest and most performant coding agents on the mark
  </picture>
 </a>
 
+## (NEW) Get Started
+
+You can now read a complete *Get Started* guide for zerostack [here](https://github.com/gi-dellav/zerostack/blob/main/docs/GET_STARTED.md)!
+
 ## Installation
 
-### Homebrew (recommended)
+### Script (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gi-dellav/zerostack/main/install.sh | bash
+```
+
+Or pick a tarball manually from [GitHub Releases](https://github.com/gi-dellav/zerostack/releases).
+
+### Cargo
+
+```bash
+# Default: loop, git-worktree, mcp, subagents, archmd
+cargo install zerostack
+
+# With all features
+cargo install zerostack --all-features
+
+# With specific features
+cargo install zerostack --features acp,memory,multithread
+```
+
+### Homebrew
 
 ```bash
 brew tap gi-dellav/tap
@@ -57,14 +82,6 @@ brew trust gi-dellav/tap   # required for Homebrew 6.0.0+
 brew install zerostack
 # brew install multistack   # Run this to also install multistack (parallel agent manager)
 ```
-
-### Script
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/gi-dellav/zerostack/main/install.sh | bash
-```
-
-Or pick a tarball manually from [GitHub Releases](https://github.com/gi-dellav/zerostack/releases).
 
 ### Nix
 
@@ -94,18 +111,6 @@ in
 pkgs.zerostack
 ```
 
-### Cargo
-
-```bash
-# Default: loop, git-worktree, mcp, subagents, archmd
-cargo install zerostack
-
-# With all features
-cargo install zerostack --all-features
-
-# With specific features
-cargo install zerostack --features acp,memory,multithread
-```
 
 Once installed, run `/prompt autoconfig` inside zerostack to explore the documentation and configure the tool interactively.
 

@@ -156,16 +156,52 @@ fn catalog_context_window_none_for_unknown() {
 #[test]
 fn resolve_context_window_prefers_config_pin_over_catalog() {
     let cfg: Config = serde_json::from_str(r#"{ "context_window": 128000 }"#).unwrap();
+    let qm = std::collections::HashMap::new();
     assert_eq!(
-        cfg.resolve_context_window("openrouter", "deepseek/deepseek-v4-pro"),
+        cfg.resolve_context_window("openrouter", "deepseek/deepseek-v4-pro", &qm),
         128_000
     );
     // Without a pin, the catalog's 1M wins.
     let cfg = Config::default();
     assert_eq!(
-        cfg.resolve_context_window("openrouter", "deepseek/deepseek-v4-pro"),
+        cfg.resolve_context_window("openrouter", "deepseek/deepseek-v4-pro", &qm),
         1_048_576
     );
+}
+
+#[test]
+fn resolve_context_window_from_quick_model() {
+    let mut qm = std::collections::HashMap::new();
+    qm.insert(
+        "test".to_string(),
+        crate::config::types::QuickModelConfig {
+            provider: compact_str::CompactString::new("openrouter"),
+            model: compact_str::CompactString::new("deepseek/deepseek-chat"),
+            input_token_cost: 0.0,
+            output_token_cost: 0.0,
+            reserve_tokens: None,
+            temperature: None,
+            extra_body: None,
+            context_window: Some(64_000),
+        },
+    );
+    let cfg = Config::default();
+    // Quick model's 64k wins over the catalog's 128k for deepseek-chat.
+    assert_eq!(
+        cfg.resolve_context_window("openrouter", "deepseek/deepseek-chat", &qm),
+        64_000
+    );
+    // Global config pin still wins over quick model.
+    let cfg: Config = serde_json::from_str(r#"{ "context_window": 32000 }"#).unwrap();
+    assert_eq!(
+        cfg.resolve_context_window("openrouter", "deepseek/deepseek-chat", &qm),
+        32_000
+    );
+    // Quick model with context_window: None falls through to catalog (128k).
+    qm.get_mut("test").unwrap().context_window = None;
+    let cfg = Config::default();
+    let cw = cfg.resolve_context_window("openrouter", "deepseek/deepseek-chat", &qm);
+    assert_eq!(cw, 128_000);
 }
 
 // ── YAML config reader (replaces the former JSON reader) ───────────────

@@ -191,10 +191,12 @@ impl SlashCtx<'_> {
 
         self.session.input_token_cost = qmc.input_token_cost;
         self.session.output_token_cost = qmc.output_token_cost;
-        self.session.update_context_window(
-            self.cfg
-                .resolve_context_window(&self.session.provider, &self.session.model),
-        );
+        self.session
+            .update_context_window(self.cfg.resolve_context_window(
+                &self.session.provider,
+                &self.session.model,
+                &crate::config::quick_models_map(self.cfg),
+            ));
 
         let _ = self.renderer.write_line(
             &format!(
@@ -294,7 +296,11 @@ pub(crate) async fn apply_prompt_model(
 
     session.input_token_cost = qmc.input_token_cost;
     session.output_token_cost = qmc.output_token_cost;
-    session.update_context_window(cfg.resolve_context_window(&session.provider, &session.model));
+    session.update_context_window(cfg.resolve_context_window(
+        &session.provider,
+        &session.model,
+        &qm,
+    ));
 
     let _ = renderer.write_line(
         &format!(
@@ -514,8 +520,8 @@ pub async fn handle_slash(
         "/reasoning" | "/thinking" | "/mode" | "/toggle" | "/mcp" | "/editsys" | "/advisor" => {
             settings::handle(&parts, &mut ctx).await
         }
-        "/sessions" | "/clear" | "/new" | "/undo" | "/redo" | "/rewind" | "/retry" | "/quit"
-        | "/exit" | "/history" => session::handle(&parts, &mut ctx).await,
+        "/sessions" | "/rename" | "/clear" | "/new" | "/undo" | "/redo" | "/rewind" | "/retry"
+        | "/quit" | "/exit" | "/history" => session::handle(&parts, &mut ctx).await,
         "/help" => {
             help::handle(&parts, &mut ctx);
             Ok(())

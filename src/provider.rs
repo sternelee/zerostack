@@ -355,7 +355,12 @@ pub async fn list_models_manual(
         .resolve()
         .ok();
     let custom = custom_providers.get(provider_name);
-    let http = build_http_client(provider_name, config.danger_accept_invalid_certs, custom)?;
+    let http = build_http_client(
+        provider_name,
+        config.danger_accept_invalid_certs,
+        custom,
+        Some(&base),
+    )?;
     let url = format!("{}/models", base.trim_end_matches('/'));
     let mut req = http.get(url);
     if let Some(k) = key.as_deref().filter(|k| !k.is_empty()) {
@@ -384,11 +389,18 @@ pub async fn list_models_manual(
         .collect())
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct OpenRouterModelInfo {
+    pub input_cost: f64,
+    pub output_cost: f64,
+    pub context_length: Option<u64>,
+}
+
 pub async fn fetch_openrouter_pricing(
     api_key: Option<&str>,
     custom_providers: &HashMap<String, CustomProviderConfig>,
     config_api_keys: Option<&HashMap<String, String>>,
-) -> anyhow::Result<HashMap<String, (f64, f64)>> {
+) -> anyhow::Result<HashMap<String, OpenRouterModelInfo>> {
     let config = resolve_provider_config("openrouter", custom_providers)?;
     let key = AuthResolver::new(config.kind)
         .with_cli_key(api_key)
@@ -398,7 +410,12 @@ pub async fn fetch_openrouter_pricing(
         .resolve()
         .ok();
     let custom = custom_providers.get("openrouter");
-    let http = build_http_client("openrouter", config.danger_accept_invalid_certs, custom)?;
+    let http = build_http_client(
+        "openrouter",
+        config.danger_accept_invalid_certs,
+        custom,
+        None,
+    )?;
     let url = "https://openrouter.ai/api/v1/models";
     let mut req = http.get(url);
     if let Some(k) = key.as_deref().filter(|k| !k.is_empty()) {
@@ -413,6 +430,7 @@ pub async fn fetch_openrouter_pricing(
     struct PricingEntry {
         id: String,
         pricing: Option<PricingResp>,
+        context_length: Option<u64>,
     }
     #[derive(serde::Deserialize)]
     struct PricingList {
@@ -421,12 +439,22 @@ pub async fn fetch_openrouter_pricing(
     let resp: PricingList = req.send().await?.error_for_status()?.json().await?;
     let mut map = HashMap::new();
     for entry in resp.data {
-        if let Some(p) = entry.pricing {
-            let input: f64 = p.prompt.parse().unwrap_or(0.0);
-            let output: f64 = p.completion.parse().unwrap_or(0.0);
-            if input > 0.0 || output > 0.0 {
-                map.insert(entry.id, (input * 1_000_000.0, output * 1_000_000.0));
-            }
+        let (input, output) = match entry.pricing.as_ref() {
+            Some(p) => (
+                p.prompt.parse().unwrap_or(0.0),
+                p.completion.parse().unwrap_or(0.0),
+            ),
+            None => (0.0, 0.0),
+        };
+        if input > 0.0 || output > 0.0 || entry.context_length.is_some() {
+            map.insert(
+                entry.id,
+                OpenRouterModelInfo {
+                    input_cost: input * 1_000_000.0,
+                    output_cost: output * 1_000_000.0,
+                    context_length: entry.context_length,
+                },
+            );
         }
     }
     Ok(map)
@@ -544,7 +572,7 @@ impl AnyAgent {
         max_turns: usize,
         pure_stdout: bool,
         retry_config: &RetryConfig,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<(String, rig::completion::Usage)> {
         match self {
             AnyAgent::OpenRouter(a) => {
                 runner::run_print(a, prompt, max_turns, pure_stdout, retry_config).await
@@ -680,16 +708,16 @@ pub(crate) fn build_http_client(
     provider_name: &str,
     danger_accept_invalid_certs: bool,
     custom: Option<&CustomProviderConfig>,
+    base_url: Option<&str>,
 ) -> anyhow::Result<reqwest::Client> {
-    // Disable connection pooling. Local LLM servers (notably llama.cpp's
-    // cpp-httplib) close idle keep-alive connections far faster than
-    // reqwest's default 90s pool_idle_timeout, leaving stale half-closed
-    // sockets in the pool. Reusing one of those manifests as
-    // "error sending request" with no corresponding entry server-side
-    // because no request actually reaches the server. TCP setup time is
-    // negligible compared to inference time, so fresh connections per
-    // request are a strict win for this workload.
-    let mut builder = reqwest::Client::builder().pool_max_idle_per_host(0);
+    let mut builder = reqwest::Client::builder();
+    if is_localhost(base_url) {
+        // Disable connection pooling for local LLM servers (notably
+        // llama.cpp's cpp-httplib) which close idle keep-alive
+        // connections far faster than reqwest's default 90s
+        // pool_idle_timeout, leaving stale half-closed sockets.
+        builder = builder.pool_max_idle_per_host(0);
+    }
 
     if let Some(cfg) = custom {
         if !cfg.headers.is_empty() {
@@ -719,6 +747,14 @@ pub(crate) fn build_http_client(
     }
 
     builder.build().map_err(Into::into)
+}
+
+fn is_localhost(url: Option<&str>) -> bool {
+    url.map_or(false, |u| {
+        u.starts_with("http://localhost")
+            || u.starts_with("http://127.")
+            || u.starts_with("http://[::1]")
+    })
 }
 
 /// Determines which API style the OpenAI family should use:
@@ -799,8 +835,12 @@ pub fn create_client(
     match config.kind {
         ProviderKind::OpenAI => {
             let custom = custom_providers.get(provider_name);
-            let http_client =
-                build_http_client(provider_name, config.danger_accept_invalid_certs, custom)?;
+            let http_client = build_http_client(
+                provider_name,
+                config.danger_accept_invalid_certs,
+                custom,
+                base_url.as_deref(),
+            )?;
             Ok(AnyClient::OpenAI(build_openai_client(
                 &key,
                 base_url.as_deref(),

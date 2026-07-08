@@ -5,7 +5,7 @@ use compact_str::CompactString;
 use rig::completion::ToolDefinition;
 use rig::tool::{ToolDyn, ToolError};
 use rig::wasm_compat::WasmBoxedFuture;
-use rmcp::model::{CallToolRequestParams, JsonObject, RawContent};
+use rmcp::model::{CallToolRequestParams, ContentBlock, JsonObject};
 use rmcp::service::{Peer, RoleClient};
 
 use crate::agent::tools::check_perm;
@@ -86,8 +86,8 @@ impl ToolDyn for McpTool {
                 let error_msg = result
                     .content
                     .iter()
-                    .filter_map(|c| match &c.raw {
-                        RawContent::Text(t) => Some(t.text.clone()),
+                    .filter_map(|c| match c {
+                        ContentBlock::Text(t) => Some(t.text.clone()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -104,18 +104,19 @@ impl ToolDyn for McpTool {
 
             let mut content = String::new();
             for item in result.content {
-                match item.raw {
-                    RawContent::Text(t) => content.push_str(&t.text),
-                    RawContent::Image(img) => {
+                match item {
+                    ContentBlock::Text(t) => content.push_str(&t.text),
+                    ContentBlock::Image(img) => {
                         content.push_str(&format!("data:{};base64,{}", img.mime_type, img.data));
                     }
-                    RawContent::Resource(r) => match r.resource {
+                    ContentBlock::Resource(r) => match &r.resource {
                         rmcp::model::ResourceContents::TextResourceContents { text, .. } => {
-                            content.push_str(&text);
+                            content.push_str(text);
                         }
                         rmcp::model::ResourceContents::BlobResourceContents { blob, .. } => {
-                            content.push_str(&blob);
+                            content.push_str(blob);
                         }
+                        _ => {}
                     },
                     _ => {}
                 }

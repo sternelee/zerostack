@@ -44,7 +44,7 @@ use crate::ui::renderer::{Renderer, copy_to_clipboard};
 use crate::ui::slash::{apply_prompt_model, handle_compress, handle_slash};
 use crate::ui::terminal::TerminalGuard;
 
-use self::utils::parse_color;
+use self::utils::{parse_color, to_ansi_256};
 
 pub(crate) fn apply_current_prompt_mode(
     context: &mut ContextFiles,
@@ -773,7 +773,15 @@ pub async fn run_interactive(
         let chat_bg = colors.chat_background.as_deref().and_then(parse_color);
         let input_bg = colors.input_background.as_deref().and_then(parse_color);
         let status_bg = colors.status_background.as_deref().and_then(parse_color);
-        renderer.set_background_colors(chat_bg, input_bg, status_bg);
+        if matches!(colors.scheme_type, config::SchemeType::Ansi) {
+            renderer.set_background_colors(
+                chat_bg.map(to_ansi_256),
+                input_bg.map(to_ansi_256),
+                status_bg.map(to_ansi_256),
+            );
+        } else {
+            renderer.set_background_colors(chat_bg, input_bg, status_bg);
+        }
     }
     let mut input = InputEditor::new();
     input.set_monochrome(cli.no_color);
@@ -2127,6 +2135,9 @@ pub async fn run_interactive(
                                     renderer.write_line(&format!("> {}", safe_line), Color::Green)?;
                                 }
                                 renderer.write_line("", Color::White)?;
+                                // Flush the user message to screen immediately so
+                                // there is no visible gap while the agent is built.
+                                refresh_display(&mut renderer, &mut input, session, is_running, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), chain_label_msg.as_deref(), btw_total_cost, btw_total_in, btw_total_out)?;
 
                                 // Guaranteed not running here (the is_running gate
                                 // above returns early), so this never orphans a run.
@@ -2405,6 +2416,7 @@ pub async fn run_interactive(
             else => {
                 // Poll the background prebuild; if it just completed, stash it.
                 if let Some(rx) = prebuild_rx.as_mut()
+                    && agent.is_none()
                     && let Ok(payload) = rx.try_recv() {
                         #[cfg(feature = "mcp")]
                         {

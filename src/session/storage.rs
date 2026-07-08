@@ -39,13 +39,26 @@ pub(crate) fn config_path() -> PathBuf {
     data_dir()
 }
 
+/// Write `content` to `path` atomically: write to a temp file in the same
+/// directory, then rename. On POSIX this is atomic; a crash mid-write leaves
+/// the previous version intact.
+pub fn atomic_write(path: &std::path::Path, content: &str) -> anyhow::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 pub fn save_session(session: &Session) -> anyhow::Result<()> {
     let dir = session_dir();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.json", session.id));
     let json = serde_json::to_string(session)?;
     let json_len = json.len();
-    std::fs::write(path, json)?;
+    atomic_write(&path, &json)?;
     tracing::debug!(
         "session saved: id={}, msgs={}, size={}",
         session.id,
@@ -108,26 +121,50 @@ pub fn find_sessions_by_prefix(prefix: &str) -> anyhow::Result<Vec<Session>> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
+    let lower = prefix.to_lowercase();
     let mut sessions: Vec<Session> = Vec::new();
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "json")
             && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-            && stem.starts_with(prefix)
             && let Ok(json) = std::fs::read_to_string(&path)
             && let Ok(session) = serde_json::from_str::<Session>(&json)
         {
-            sessions.push(session);
+            if stem.starts_with(prefix) || session.name.to_lowercase().contains(&lower) {
+                sessions.push(session);
+            }
         }
     }
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sessions.dedup_by(|a, b| a.id == b.id);
     tracing::debug!(
         "find_sessions_by_prefix('{}'): {} results",
         prefix,
         sessions.len(),
     );
     Ok(sessions)
+}
+
+pub fn find_session_by_name(name: &str) -> anyhow::Result<Option<Session>> {
+    let dir = session_dir();
+    if !dir.exists() {
+        return Ok(None);
+    }
+    let lower = name.to_lowercase();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "json")
+            && let Ok(json) = std::fs::read_to_string(&path)
+            && let Ok(session) = serde_json::from_str::<Session>(&json)
+        {
+            if session.name.to_lowercase() == lower {
+                return Ok(Some(session));
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub fn find_recent_sessions(limit: usize) -> anyhow::Result<Vec<Session>> {

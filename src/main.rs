@@ -117,7 +117,30 @@ fn apply_startup_prompt_model(
     session.provider = qmc.provider.clone();
     session.input_token_cost = qmc.input_token_cost;
     session.output_token_cost = qmc.output_token_cost;
-    session.update_context_window(cfg.resolve_context_window(&session.provider, &session.model));
+    session.update_context_window(cfg.resolve_context_window(
+        &session.provider,
+        &session.model,
+        &qm,
+    ));
+}
+
+/// Connect configured MCP servers for a headless (`-p`/`--loop`) run. Unlike
+/// the TUI (`ui::ensure_mcp_manager`), headless has no alt-screen to protect,
+/// so connection failures are printed to stderr instead of staying silent
+/// until surfaced by the renderer.
+#[cfg(feature = "mcp")]
+async fn connect_headless_mcp(
+    cfg: &config::Config,
+) -> Option<crate::extras::mcp::McpClientManager> {
+    let servers = cfg.mcp_servers.as_ref()?;
+    if servers.is_empty() {
+        return None;
+    }
+    let manager = crate::extras::mcp::McpClientManager::connect_all(servers).await;
+    for notice in &manager.notices {
+        eprintln!("{}", notice);
+    }
+    Some(manager)
 }
 
 #[cfg_attr(
@@ -161,14 +184,16 @@ async fn main() -> anyhow::Result<()> {
         model = qm.model.clone();
     }
 
+    let name = cli.name.as_deref().unwrap_or("");
+    let qm_map = config::quick_models_map(&cfg);
     let mut session = session::Session::new(
         &provider,
         &model,
-        cfg.resolve_context_window(&provider, &model),
+        cfg.resolve_context_window(&provider, &model, &qm_map),
+        name,
     );
 
     // Resolve input/output token costs from quick models or defaults
-    let qm_map = config::quick_models_map(&cfg);
     if let Some(qm) = cli.resolve_quick_model(&cfg) {
         session.input_token_cost = qm.input_token_cost;
         session.output_token_cost = qm.output_token_cost;
@@ -179,6 +204,11 @@ async fn main() -> anyhow::Result<()> {
     {
         session.input_token_cost = qm.input_token_cost;
         session.output_token_cost = qm.output_token_cost;
+    } else if let Some((input_cost, output_cost)) =
+        config::Config::catalog_input_output_cost(&provider, &model)
+    {
+        session.input_token_cost = input_cost;
+        session.output_token_cost = output_cost;
     }
 
     if cli.continue_session
@@ -192,7 +222,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(session_id) = &cli.session {
         let sessions = session::storage::find_sessions_by_prefix(session_id)?;
         if sessions.is_empty() {
-            anyhow::bail!("no session matching '{}'", session_id);
+            // try exact name match as fallback
+            if let Some(s) = session::storage::find_session_by_name(session_id)? {
+                session = s;
+            } else {
+                anyhow::bail!("no session matching '{}'", session_id);
+            }
         } else if sessions.len() == 1 {
             session = sessions.into_iter().next().unwrap();
         } else {
@@ -207,13 +242,19 @@ async fn main() -> anyhow::Result<()> {
                     })
                     .unwrap_or_default();
                 let time = crate::ui::events::format_time(&s.updated_at);
+                let name_part = if s.name.is_empty() {
+                    String::new()
+                } else {
+                    format!("  [{}]", s.name)
+                };
                 eprintln!(
-                    "  {}  {}  {}msgs  {}  {}",
+                    "  {}  {}  {}msgs  {}  {}{}",
                     &s.id[..8],
                     time,
                     s.messages.len(),
                     s.model,
-                    preview
+                    preview,
+                    name_part
                 );
             }
             anyhow::bail!("be more specific with the session ID prefix");
@@ -303,21 +344,31 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Fetch OpenRouter pricing at startup so cost tracking works from the first turn
-    if provider == "openrouter"
-        && session.input_token_cost == 0.0
-        && session.output_token_cost == 0.0
-    {
-        if let Ok(prices) = provider::fetch_openrouter_pricing(
-            cli.api_key.as_deref(),
-            &cfg.custom_providers_map(),
-            cfg.api_keys.as_ref(),
-        )
-        .await
-        {
-            if let Some((input, output)) = prices.get(model.as_str()) {
-                session.input_token_cost = *input;
-                session.output_token_cost = *output;
+    // Fetch OpenRouter pricing and context window at startup so cost tracking
+    // and the context meter work from the first turn. The static catalog only
+    // covers a handful of models; models like z-ai/glm-5.2 fall through to the
+    // 128k default, which silently breaks compaction and the context meter.
+    if provider == "openrouter" {
+        let need_pricing = session.input_token_cost == 0.0 && session.output_token_cost == 0.0;
+        let need_ctx = cfg.context_window.is_none()
+            && config::Config::catalog_context_window("openrouter", model.as_str()).is_none();
+        if need_pricing || need_ctx {
+            if let Ok(infos) = provider::fetch_openrouter_pricing(
+                cli.api_key.as_deref(),
+                &cfg.custom_providers_map(),
+                cfg.api_keys.as_ref(),
+            )
+            .await
+            {
+                if let Some(info) = infos.get(model.as_str()) {
+                    if need_pricing {
+                        session.input_token_cost = info.input_cost;
+                        session.output_token_cost = info.output_cost;
+                    }
+                    if need_ctx && let Some(cw) = info.context_length {
+                        session.update_context_window(cw);
+                    }
+                }
             }
         }
     }
@@ -332,6 +383,12 @@ async fn main() -> anyhow::Result<()> {
         &cli.resolve_sandbox_backend(&cfg),
     )
     .with_shell(&cli.resolve_shell(&cfg));
+    if cli.resolve_sandbox(&cfg) && !sandbox.is_effectively_sandboxed() {
+        tracing::warn!(
+            "sandbox is enabled but backend '{}' was not found — commands will run unsandboxed",
+            cli.resolve_sandbox_backend(&cfg)
+        );
+    }
     let edit_system = cli.resolve_edit_system(&cfg);
     tools::set_edit_system(edit_system);
     tools::set_deny_repeated_reads(cfg.deny_repeated_reads.unwrap_or(true));
@@ -705,6 +762,8 @@ async fn main() -> anyhow::Result<()> {
         } else {
             let temperature = config::resolve_temperature(&cli, &cfg, &model);
             let extra_body = config::resolve_extra_body(&cfg, &model);
+            #[cfg(feature = "mcp")]
+            let mcp_manager = connect_headless_mcp(&cfg).await;
             let agent = provider::build_agent(
                 completion_model,
                 &cli,
@@ -717,7 +776,7 @@ async fn main() -> anyhow::Result<()> {
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
-                None,
+                mcp_manager.as_ref(),
             )
             .await;
             #[cfg(feature = "advisor")]
@@ -744,10 +803,28 @@ async fn main() -> anyhow::Result<()> {
             if let Some(ss) = status_signals.as_ref() {
                 ss.send_stop();
             }
-            let response = response_result?;
+            let (response, usage) = response_result?;
             if !cli.no_session {
                 session.add_message(MessageRole::User, &msg);
                 session.add_message(MessageRole::Assistant, &response);
+                session.total_input_tokens = session
+                    .total_input_tokens
+                    .saturating_add(usage.input_tokens);
+                session.total_output_tokens = session
+                    .total_output_tokens
+                    .saturating_add(usage.output_tokens);
+                session.total_cached_input_tokens = session
+                    .total_cached_input_tokens
+                    .saturating_add(usage.cached_input_tokens);
+                session.total_cache_creation_input_tokens = session
+                    .total_cache_creation_input_tokens
+                    .saturating_add(usage.cache_creation_input_tokens);
+                session.total_cost += crate::pricing::estimate_cost(
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    session.input_token_cost,
+                    session.output_token_cost,
+                );
                 session::storage::save_session(&session)?;
                 let _ =
                     session::chat_history::append_entry(&session::chat_history::ChatHistoryEntry {
@@ -762,6 +839,8 @@ async fn main() -> anyhow::Result<()> {
             let model_completion = client.completion_model(model.to_string());
             let temperature = config::resolve_temperature(&cli, &cfg, &model);
             let extra_body = config::resolve_extra_body(&cfg, &model);
+            #[cfg(feature = "mcp")]
+            let mcp_manager = connect_headless_mcp(&cfg).await;
             let agent = provider::build_agent(
                 model_completion,
                 &cli,
@@ -774,7 +853,7 @@ async fn main() -> anyhow::Result<()> {
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
-                None,
+                mcp_manager.as_ref(),
             )
             .await;
             return run_headless_loop(agent, &cli, &cfg, &context, status_signals).await;
@@ -888,17 +967,23 @@ fn print_sessions() {
                 })
                 .unwrap_or_default();
             let time = crate::ui::events::format_time(&s.updated_at);
+            let name_col = if s.name.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}]", s.name)
+            };
             println!(
-                "  {}  {}  {}msgs  {}  {}",
+                "  {}  {}  {}msgs  {}  {}{}",
                 &s.id[..8],
                 time,
                 s.messages.len(),
                 s.model,
-                last
+                last,
+                name_col
             );
         }
         println!();
-        println!("Use --session <id> to load a session by its ID prefix.");
+        println!("Use --session <id-or-name> to load a session by its ID prefix or name.");
     }
 }
 
@@ -913,7 +998,7 @@ fn print_config(cli: &cli::Cli, cfg: &config::Config) {
     let qm_map = config::quick_models_map(cfg);
     let max_tokens = cli.resolve_max_tokens(cfg);
     let max_agent_turns = cli.resolve_max_agent_turns(cfg);
-    let context_window = cfg.resolve_context_window(&provider, &model);
+    let context_window = cfg.resolve_context_window(&provider, &model, &qm_map);
     let temperature = config::resolve_temperature(cli, cfg, &model);
     let no_tools = cli.resolve_no_tools(cfg);
     let no_context_files = cli.resolve_no_context_files(cfg);
@@ -1119,7 +1204,7 @@ async fn run_headless_loop(
             )
             .await
         {
-            Ok(r) => {
+            Ok((r, _usage)) => {
                 if let Some(ss) = status_signals.as_ref() {
                     ss.send_stop();
                 }

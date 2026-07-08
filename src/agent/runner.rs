@@ -223,7 +223,10 @@ fn image_media_type(mime: &str) -> ImageMediaType {
         "image/jpeg" => ImageMediaType::JPEG,
         "image/gif" => ImageMediaType::GIF,
         "image/webp" => ImageMediaType::WEBP,
-        _ => unreachable!("unknown image mime type: {mime}"),
+        other => {
+            tracing::warn!("unknown image mime type: {other}, defaulting to PNG");
+            ImageMediaType::PNG
+        }
     }
 }
 
@@ -236,7 +239,10 @@ fn audio_media_type(mime: &str) -> AudioMediaType {
         "audio/flac" => AudioMediaType::FLAC,
         "audio/mp4" => AudioMediaType::M4A,
         "audio/aac" => AudioMediaType::AAC,
-        _ => unreachable!("unknown audio mime type: {mime}"),
+        other => {
+            tracing::warn!("unknown audio mime type: {other}, defaulting to MP3");
+            AudioMediaType::MP3
+        }
     }
 }
 
@@ -244,7 +250,10 @@ fn audio_media_type(mime: &str) -> AudioMediaType {
 fn document_media_type(mime: &str) -> DocumentMediaType {
     match mime {
         "application/pdf" => DocumentMediaType::PDF,
-        _ => unreachable!("unknown document mime type: {mime}"),
+        other => {
+            tracing::warn!("unknown document mime type: {other}, defaulting to PDF");
+            DocumentMediaType::PDF
+        }
     }
 }
 
@@ -324,6 +333,8 @@ where
         let retry_history: Vec<Message> = history.clone();
         let mut tool_interactions: Vec<Message> = Vec::new();
         let mut last_tool_name: Option<String> = None;
+        let mut empty_response_count: u32 = 0;
+        const MAX_EMPTY_RESPONSES: u32 = 3;
 
         let mut stream: StreamingResult<M::StreamingResponse> = {
             let mut attempt: usize = 0;
@@ -453,6 +464,18 @@ where
                                 .await;
                             return;
                         }
+                        empty_response_count += 1;
+                        if empty_response_count >= MAX_EMPTY_RESPONSES {
+                            tracing::warn!(
+                                "agent: {MAX_EMPTY_RESPONSES} consecutive empty responses, aborting"
+                            );
+                            let _ = event_tx
+                                .send(AgentEvent::Error(CompactString::from(
+                                    "Agent returned empty response too many times, aborting.",
+                                )))
+                                .await;
+                            return;
+                        }
                         break;
                     }
                     Ok(MultiTurnStreamItem::CompletionCall(call)) => {
@@ -509,7 +532,7 @@ pub async fn run_print<M, P>(
     max_turns: usize,
     pure_stdout: bool,
     retry_config: &RetryConfig,
-) -> anyhow::Result<String>
+) -> anyhow::Result<(String, rig::completion::Usage)>
 where
     M: CompletionModel + 'static,
     M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
@@ -529,6 +552,7 @@ where
 
     let mut full_response = String::new();
     let mut last_tool_name: Option<String> = None;
+    let mut usage = rig::completion::Usage::new();
 
     while let Some(item) = stream.next().await {
         match item {
@@ -580,7 +604,10 @@ where
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
             }
-            Ok(MultiTurnStreamItem::FinalResponse(_)) => break,
+            Ok(MultiTurnStreamItem::FinalResponse(res)) => {
+                usage = res.usage();
+                break;
+            }
             Ok(_) => {}
             Err(e) => {
                 eprintln!("Error: {}", e);
@@ -590,7 +617,7 @@ where
     }
 
     println!();
-    Ok(full_response)
+    Ok((full_response, usage))
 }
 
 fn format_tool_args_summary(args_json: &serde_json::Value) -> String {
@@ -614,7 +641,12 @@ fn format_tool_args_summary(args_json: &serde_json::Value) -> String {
                         other => other.to_string(),
                     };
                     let truncated: String = if s.len() > 120 {
-                        format!("{}...", &s[..117])
+                        // char-boundary-safe truncation for non-ASCII
+                        let mut end = 117;
+                        while !s.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}...", &s[..end])
                     } else {
                         s
                     };

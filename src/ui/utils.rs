@@ -37,6 +37,64 @@ pub(crate) fn resolve_color(color: Color, monochrome: bool) -> Color {
     }
 }
 
+/// Converts an RGB color to the nearest ANSI 256 color index (16-255).
+fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
+    let r = r as f32;
+    let g = g as f32;
+    let b = b as f32;
+    // Check if grayscale: all channels within ~10% of each other
+    let mean = (r + g + b) / 3.0;
+    let spread = (r - mean).abs().max((g - mean).abs()).max((b - mean).abs());
+    if spread < 15.0 {
+        // 24 grayscale steps from 232-255
+        let gs = ((mean / 255.0) * 23.0).round() as u8;
+        return 232 + gs.min(23);
+    }
+    // 216-color cube: 6 levels per channel (0, 95, 135, 175, 215, 255)
+    let levels: [f32; 6] = [0.0, 95.0, 135.0, 175.0, 215.0, 255.0];
+    let nearest = |v: f32| -> u8 {
+        let mut best = 0u8;
+        let mut best_dist = f32::MAX;
+        for (i, &l) in levels.iter().enumerate() {
+            let dist = (l - v).abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best = i as u8;
+            }
+        }
+        best
+    };
+    let ri = nearest(r);
+    let gi = nearest(g);
+    let bi = nearest(b);
+    16 + 36 * ri + 6 * gi + bi
+}
+
+/// Converts any Color to its nearest ANSI 256-color equivalent.
+pub(crate) fn to_ansi_256(color: Color) -> Color {
+    match color {
+        Color::Reset => Color::Reset,
+        Color::Black => Color::AnsiValue(0),
+        Color::Red => Color::AnsiValue(1),
+        Color::Green => Color::AnsiValue(2),
+        Color::Yellow => Color::AnsiValue(3),
+        Color::Blue => Color::AnsiValue(4),
+        Color::Magenta => Color::AnsiValue(5),
+        Color::Cyan => Color::AnsiValue(6),
+        Color::White => Color::AnsiValue(7),
+        Color::Grey => Color::AnsiValue(7),
+        Color::DarkGrey => Color::AnsiValue(8),
+        Color::DarkRed => Color::AnsiValue(9),
+        Color::DarkGreen => Color::AnsiValue(10),
+        Color::DarkYellow => Color::AnsiValue(11),
+        Color::DarkBlue => Color::AnsiValue(12),
+        Color::DarkMagenta => Color::AnsiValue(13),
+        Color::DarkCyan => Color::AnsiValue(14),
+        Color::Rgb { r, g, b } => Color::AnsiValue(rgb_to_ansi256(r, g, b)),
+        Color::AnsiValue(v) => Color::AnsiValue(v),
+    }
+}
+
 /// Parses a color name or hex string into a crossterm Color.
 pub(crate) fn parse_color(s: &str) -> Option<Color> {
     let s = s.trim().to_lowercase();

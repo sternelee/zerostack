@@ -158,6 +158,15 @@ pub async fn handle_agent_event(
                 return Ok(());
             }
 
+            // Throttle markdown re-parsing: only re-parse when the buffer
+            // ends with a newline (markdown structure changes at line
+            // boundaries) or when the buffer is small. This avoids O(n²)
+            // re-parsing on every token. The final parse happens in
+            // handle_agent_done.
+            if response_buf.len() >= 200 && !response_buf.ends_with('\n') {
+                return Ok(());
+            }
+
             let max_width = renderer.line_width();
             let mut styled = crate::ui::markdown::markdown_to_styled(response_buf, max_width);
 
@@ -337,6 +346,17 @@ pub async fn handle_agent_event(
             if real > session.total_estimated_tokens {
                 session.total_estimated_tokens = real;
             }
+            // Accumulate cost for intermediate calls (tool-use turns). The Done
+            // event only carries the final call's usage, so without this every
+            // tool-call round-trip would go uncosted.
+            session.total_input_tokens = session.total_input_tokens.saturating_add(input_tokens);
+            session.total_output_tokens = session.total_output_tokens.saturating_add(output_tokens);
+            session.total_cost += crate::pricing::estimate_cost(
+                input_tokens,
+                output_tokens,
+                session.input_token_cost,
+                session.output_token_cost,
+            );
         }
         AgentEvent::Retrying { attempt, max } => {
             *was_reasoning = false;

@@ -22,6 +22,10 @@ pub struct QuickModelConfig {
     /// `extra_body` for this model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
+    /// Per-model context window override. Takes precedence over the static
+    /// model catalog but is overridden by the global `context_window` setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 }
 
 /// Status-bar statusline layout. Up to 3 lines, each an ordered list of segments.
@@ -127,11 +131,21 @@ impl std::str::FromStr for EditSystem {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SchemeType {
+    #[default]
+    Full,
+    Ansi,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ColorsConfig {
     pub chat_background: Option<CompactString>,
     pub input_background: Option<CompactString>,
     pub status_background: Option<CompactString>,
+    #[serde(default)]
+    pub scheme_type: SchemeType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use agent_client_protocol::on_receive_request;
-use agent_client_protocol::schema::*;
+use agent_client_protocol::schema::v1::*;
 use agent_client_protocol::{
     Agent, ByteStreams, Client, ConnectTo, ConnectionTo, Dispatch, Responder, Role, Stdio,
 };
@@ -405,8 +405,20 @@ async fn run_prompt(
             AgentEvent::Done { .. } => {
                 break;
             }
-            AgentEvent::Error(_) => {
-                break;
+            AgentEvent::Error(err) => {
+                // Surface the error to the client instead of silently
+                // reporting EndTurn.
+                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(format!(
+                    "[error: {}]",
+                    err
+                ))));
+                let notif = SessionNotification::new(
+                    session_id.clone(),
+                    SessionUpdate::AgentMessageChunk(chunk),
+                );
+                let _ = cx.send_notification(notif);
+                let _ = responder.respond(PromptResponse::new(StopReason::Refusal));
+                return Ok(());
             }
         }
     }
@@ -441,7 +453,22 @@ fn build_acp_permission(state: &AcpState) -> (Option<PermCheck>, Option<AskSende
     let checker = PermissionChecker::new(&perm_config, mode, None, permission_modes);
     let perm: PermCheck = Arc::new(StdMutex::new(checker));
 
-    let (ask_tx, _ask_rx) = tokio::sync::mpsc::channel(64);
+    let (ask_tx, mut ask_rx) = tokio::sync::mpsc::channel::<crate::permission::ask::AskRequest>(64);
+    // ACP is headless — there is no interactive user to prompt. Auto-approve
+    // Ask requests so tools don't fail with "Permission system unavailable".
+    // Log a warning so the auto-approval is visible in logs.
+    tokio::spawn(async move {
+        while let Some(req) = ask_rx.recv().await {
+            tracing::warn!(
+                "ACP auto-approving tool call: tool={}, input_len={}",
+                req.tool,
+                req.input.len()
+            );
+            let _ = req
+                .reply
+                .send(crate::permission::ask::UserDecision::AllowOnce);
+        }
+    });
 
     (Some(perm), Some(ask_tx))
 }

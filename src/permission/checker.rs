@@ -320,6 +320,11 @@ impl PermissionChecker {
         if tool == "todo_write" {
             return CheckResult::Allowed;
         }
+        // Deny rules are the security baseline — evaluate before the session
+        // allowlist and allow_all_mcp_calls so neither can bypass a deny.
+        if self.matches_deny_rule(tool, &[input]) {
+            return CheckResult::Denied("Blocked by deny rule".to_string());
+        }
         if self.allow_all_mcp_calls && tool == "mcp_tool" {
             return CheckResult::Allowed;
         }
@@ -357,6 +362,10 @@ impl PermissionChecker {
         let expanded = crate::fs::expand_tilde(path);
         let abs_path = resolve_absolute(&expanded, &self.working_dir);
 
+        // Deny rules first — security baseline, cannot be bypassed.
+        if self.matches_deny_rule(tool, &[&abs_path, &expanded]) {
+            return CheckResult::Denied("Blocked by deny rule".to_string());
+        }
         if self.is_session_allowed(tool, &expanded) || self.is_session_allowed(tool, &abs_path) {
             return CheckResult::Allowed;
         }
@@ -374,6 +383,23 @@ impl PermissionChecker {
 
         let action = self.resolve_path_action(tool, &matched, &abs_path);
         self.doom_loop_check(tool, &expanded, action)
+    }
+
+    /// Check whether any deny rule matches the given inputs. Deny rules are
+    /// the security baseline and must be evaluated before the session
+    /// allowlist to prevent `AllowAlways` from bypassing them.
+    fn matches_deny_rule(&self, tool: &str, inputs: &[&str]) -> bool {
+        if !self.apply_rules() {
+            return false;
+        }
+        if let Some(rules) = self.rules.get(tool) {
+            for (pattern, action) in rules {
+                if *action == Action::Deny && inputs.iter().any(|inp| pattern.matches(inp)) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn is_session_allowed(&self, tool: &str, input: &str) -> bool {
@@ -446,8 +472,11 @@ impl PermissionChecker {
             Path::new(&self.working_dir).join(p)
         };
         let cwd = Path::new(&self.working_dir);
-        let normalized = normalize_path(&p);
-        let normalized_cwd = normalize_path(cwd);
+        // Canonicalize to resolve symlinks before checking. If canonicalization
+        // fails (e.g. path doesn't exist yet), fall back to syntactic normalize
+        // so we still catch `..` traversal.
+        let normalized = p.canonicalize().unwrap_or_else(|_| normalize_path(&p));
+        let normalized_cwd = cwd.canonicalize().unwrap_or_else(|_| normalize_path(cwd));
         !normalized.starts_with(&normalized_cwd)
     }
 

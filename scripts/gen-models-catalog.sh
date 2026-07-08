@@ -42,6 +42,13 @@ api="$(curl -fsSL --max-time 120 "$SRC")"
 
 # jq program:
 #  - `entry`  : project a models.dev model into our compact {id,name,context}.
+#  - `priced_entry` : `entry` plus input_price/output_price (USD per million
+#               tokens) straight from models.dev's `cost.input`/`cost.output`,
+#               when present. Used for the direct-API providers (anthropic,
+#               openai, gemini), which have no other source of pricing at
+#               runtime. OpenRouter keeps plain `entry`: it has its own live
+#               pricing fetch (`fetch_openrouter_pricing`), and models.dev's
+#               marketplace-wide OpenRouter cost data is less reliable.
 #  - `denied` : drop non-chat models (embeddings/audio/image/etc.) by id substring,
 #               mirroring crate::provider::is_agent_model's denylist, and keep only
 #               models that can output text.
@@ -60,11 +67,15 @@ echo "$api" | jq --argjson orv "$OPENROUTER_VENDORS" --argjson cut "$CUTOFFS" '
     | select((.key | ascii_downcase) as $id | (deny | any(. as $d | $id | contains($d))) | not)
     | recent($c);
   def entry: {id: .value.id, name: .value.name, context: (.value.limit.context // null)};
-  def models_of($p; $c): ($p.models // {}) | to_entries | map(chat($c) | entry) | sort_by(.id);
+  def priced_entry: entry + {
+    input_price: (.value.cost.input // null),
+    output_price: (.value.cost.output // null)
+  };
+  def models_of($p; $c; e): ($p.models // {}) | to_entries | map(chat($c) | e) | sort_by(.id);
   {
-    anthropic:  models_of(.anthropic; ($cut.anthropic  // "0000-00-00")),
-    openai:     models_of(.openai;    ($cut.openai     // "0000-00-00")),
-    gemini:     models_of(.google;    ($cut.gemini     // "0000-00-00")),
+    anthropic:  models_of(.anthropic; ($cut.anthropic  // "0000-00-00"); priced_entry),
+    openai:     models_of(.openai;    ($cut.openai     // "0000-00-00"); priced_entry),
+    gemini:     models_of(.google;    ($cut.gemini     // "0000-00-00"); priced_entry),
     openrouter: (
       (.openrouter.models // {})
       | to_entries
