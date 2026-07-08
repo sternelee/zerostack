@@ -75,7 +75,7 @@ impl Default for Capabilities {
     fn default() -> Self {
         Self {
             tools: true,
-            commands: false,
+            commands: true,
             lifecycle: false,
             provider: false,
             ui: false,

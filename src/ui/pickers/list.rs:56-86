@@ -1,0 +1,42 @@
+fn available_commands() -> Vec<&'static str> {
+    #[allow(unused_mut)]
+    let mut cmds: Vec<&'static str> = BASE_COMMANDS.to_vec();
+
+    #[cfg(feature = "advisor")]
+    cmds.push("/advisor");
+
+    #[cfg(feature = "git-worktree")]
+    {
+        cmds.push("/worktree");
+        cmds.push("/wt-exit");
+        cmds.push("/wt-merge");
+    }
+
+    #[cfg(feature = "loop")]
+    cmds.push("/loop");
+
+    #[cfg(feature = "mcp")]
+    cmds.push("/mcp");
+
+    #[cfg(feature = "memory")]
+    cmds.push("/memory");
+
+    #[cfg(feature = "subagents")]
+    {
+        cmds.push("/model-subagent");
+        cmds.push("/models-subagent");
+    }
+
+    cmds
+}
+
+/// Get dynamic extension-registered command names.
+#[cfg(feature = "extensions")]
+fn extension_commands() -> Vec<String> {
+    crate::extension::registry::extension_command_names()
+}
+
+#[cfg(not(feature = "extensions"))]
+fn extension_commands() -> Vec<String> {
+    Vec::new()
+}

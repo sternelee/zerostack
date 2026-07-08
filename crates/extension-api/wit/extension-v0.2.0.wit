@@ -1,18 +1,17 @@
-/// zerostack Extension API v0.2.0
+/// zerostack Extension API v0.3.0
 ///
 /// WIT contract between zerostack host and Wasm extensions.
+///
+/// ## v0.3.0 changes (from v0.2.0)
+/// - Added `trigger-prompt` host import for extensions to inject agent prompts
 ///
 /// ## v0.2.0 changes (from v0.1.0)
 /// - Added `extension-context` host import (cwd, session_id, model_name)
 /// - Added optional `session-start` and `session-shutdown` exports
 /// - Tool/command names are now auto-namespaced as `ext_id__name`
-///
-/// ## v0.1.0 (MVP)
-/// - Tool registration/unregistration
-/// - Command registration/unregistration
-/// - `init` / `tool-execute` / `on-command` exports
 
-package zerostack:extension@0.2.0;
+package zerostack:extension@0.3.0;
+
 
 /// ── shared types ────────────────────────────────────────────
 
@@ -66,6 +65,15 @@ interface command-registry {
     unregister-command: func(name: string) -> result<_, string>;
 }
 
+
+interface trigger-prompt {
+    /// Inject a prompt into the agent input queue. The prompt will be
+    /// processed as a follow-up message on the next agent turn.
+    /// Returns an error string if the prompt couldn't be queued
+    /// (e.g., no active session).
+    trigger-prompt: func(prompt: string, deliver-as: string) -> result<_, string>;
+}
+
 interface extension-context {
     use types.{extension-info};
 
@@ -80,6 +88,7 @@ world extension-world {
     import tool-registry;
     import command-registry;
     import extension-context;
+    import trigger-prompt;
 
     use types.{tool-output};
 

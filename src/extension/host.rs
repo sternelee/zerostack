@@ -49,6 +49,8 @@ pub(crate) struct ExtGuestState {
     pub ns_prefix: String,
     /// Host-side context (cwd, session state, etc.) — updated per-call.
     pub host_context: ExtensionInfo,
+    /// Queued prompts from trigger-prompt calls (drained after command dispatch).
+    pub queued_prompts: Vec<String>,
     wasi_ctx: wasmtime_wasi::WasiCtx,
     wasi_table: wasmtime_wasi::ResourceTable,
 }
@@ -70,6 +72,7 @@ impl ExtGuestState {
                 model_name: String::new(),
                 project_trusted: false,
             },
+            queued_prompts: Vec::new(),
             wasi_ctx,
             wasi_table: wasmtime_wasi::ResourceTable::new(),
         }
@@ -163,6 +166,19 @@ impl self::zerostack::extension::command_registry::Host for ExtGuestState {
 impl self::zerostack::extension::extension_context::Host for ExtGuestState {
     fn get_context(&mut self) -> self::zerostack::extension::extension_context::ExtensionInfo {
         self.host_context.clone()
+    }
+}
+
+// ── Host impl: trigger_prompt ──────────────────────────────────
+
+impl self::zerostack::extension::trigger_prompt::Host for ExtGuestState {
+    fn trigger_prompt(
+        &mut self,
+        prompt: wasmtime::component::__internal::String,
+        _deliver_as: wasmtime::component::__internal::String,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        self.queued_prompts.push(prompt.into());
+        Ok(())
     }
 }
 
@@ -434,7 +450,7 @@ impl ExtensionHost {
             for (cmd_name, _) in &state.commands {
                 let bare = cmd_name
                     .rsplitn(2, NAMESPACE_SEPARATOR)
-                    .last()
+                    .next()
                     .unwrap_or(cmd_name);
                 if bare == command_name && !candidates.iter().any(|(eid, _)| eid == id) {
                     candidates.push((id.clone(), cmd_name.clone()));
@@ -468,6 +484,15 @@ impl ExtensionHost {
             cmds.extend(inst.store.data().commands.values().cloned());
         }
         cmds
+    }
+
+    /// Drain queued prompts from all extensions (called after command dispatch).
+    pub fn take_queued_prompts(&mut self) -> Vec<String> {
+        let mut prompts = Vec::new();
+        for inst in self.instances.values_mut() {
+            prompts.append(&mut inst.store.data_mut().queued_prompts);
+        }
+        prompts
     }
 
     pub fn unload_extension(&mut self, extension_id: &str) -> Option<ExtensionMeta> {

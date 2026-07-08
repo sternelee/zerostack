@@ -75,10 +75,31 @@ pub fn collect_tools() -> Vec<Box<dyn ToolDyn>> {
         .collect()
 }
 
-/// Try to dispatch a slash command to a loaded extension.
+/// Dispatch a slash command and return (output_text, queued_prompts).
+pub fn dispatch_with_prompts(name: &str, args: &str) -> (Option<String>, Vec<String>) {
+    let Some(manager) = EXT_MANAGER.get() else {
+        return (None, Vec::new());
+    };
+    let mut mgr = manager.lock().unwrap_or_else(|e| e.into_inner());
+    let output = mgr.dispatch_command(name, args).ok().flatten();
+    let prompts = mgr.take_queued_prompts();
+    (output, prompts)
+}
+
+/// Try to dispatch a slash command to a loaded extension (legacy API).
 pub fn dispatch_command(name: &str, args: &str) -> Option<String> {
-    EXT_MANAGER.get().and_then(|manager| {
-        let mut mgr = manager.lock().unwrap_or_else(|e| e.into_inner());
-        mgr.dispatch_command(name, args).ok().flatten()
-    })
+    dispatch_with_prompts(name, args).0
+}
+
+/// Get slash-command names registered by loaded extensions (without "/" prefix).
+pub fn extension_command_names() -> Vec<String> {
+    let Some(manager) = EXT_MANAGER.get() else {
+        return Vec::new();
+    };
+    let mgr = manager.lock().unwrap_or_else(|e| e.into_inner());
+    mgr.list()
+        .iter()
+        .flat_map(|meta| meta.command_names.iter().cloned())
+        .map(|name| format!("/{}", name.rsplitn(2, "__").next().unwrap_or(&name)))
+        .collect()
 }

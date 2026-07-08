@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/extension-api", "tests/extensions/test-echo"]
+members = [".", "crates/extension-api", "tests/extensions/test-echo", "tests/extensions/pi-simplify"]
 default-members = [".", "crates/extension-api"]
 resolver = "3"
 
@@ -23,7 +23,7 @@ readme = "README.md"
 keywords = ["ai", "cli", "dev"]
 
 [features]
-default = ['loop', 'git-worktree', 'mcp', 'subagents', 'archmd', 'status-signals', 'multithread']
+default = ['loop', 'git-worktree', 'mcp', 'subagents', 'archmd', 'status-signals', 'multithread', 'extensions']
 status-signals = []
 loop = []
 git-worktree = []

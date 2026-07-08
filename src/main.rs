@@ -724,6 +724,17 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "archmd"))]
     let arch_msg: Option<String> = None;
 
+    // Initialize extension manager (for both headless and interactive).
+    #[cfg(feature = "extensions")]
+    {
+        let extension_paths: Vec<std::path::PathBuf> = cli.extension.clone();
+        if !extension_paths.is_empty() {
+            crate::extension::registry::init_from_paths(&extension_paths)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            tracing::info!("extensions initialized");
+        }
+    }
+
     if cli.print {
         let msg = cli.message.join(" ");
         if msg.starts_with('!') {
@@ -901,17 +912,6 @@ async fn main() -> anyhow::Result<()> {
             // Note: we intentionally do NOT call skills::reload_skills() here.
             // CLI-loaded skills are only added to context.skills for this run;
             // the global cache continues to reflect disk-loaded skills.
-        }
-
-        // Initialize plugin system.
-        #[cfg(feature = "extensions")]
-        {
-            let extension_paths: Vec<std::path::PathBuf> = cli.extension.clone();
-            if !extension_paths.is_empty() {
-                crate::extension::registry::init_from_paths(&extension_paths)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                tracing::info!("extensions initialized");
-            }
         }
 
         ui::run_interactive(

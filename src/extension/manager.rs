@@ -179,6 +179,11 @@ impl ExtensionManager {
         Ok((output.content, output.details, output.is_error))
     }
 
+    /// Drain queued prompts from all extensions (called after command dispatch).
+    pub fn take_queued_prompts(&mut self) -> Vec<String> {
+        self.host.take_queued_prompts()
+    }
+
     /// Dispatch a slash command to the extension that registered it.
     /// Returns Some(output) if a extension handled the command, None otherwise.
     pub fn dispatch_command(&mut self, name: &str, args: &str) -> Result<Option<String>, String> {

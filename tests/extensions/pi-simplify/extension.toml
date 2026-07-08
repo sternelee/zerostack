@@ -1,0 +1,13 @@
+id = "pi/simplify"
+name = "Simplify"
+version = "0.1.0"
+schema_version = 2
+authors = ["zerostack contributors"]
+description = "Review recently changed files for clarity, consistency, and maintainability improvements. Ported from the pi extension of the same name."
+
+[extension]
+entrypoint = "target/wasm32-wasip2/debug/pi_simplify.wasm"
+
+[capabilities]
+tools = false
+commands = true
