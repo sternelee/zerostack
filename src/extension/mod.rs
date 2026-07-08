@@ -15,7 +15,7 @@
 
 mod host;
 mod loader;
-mod manager;
+pub(crate) mod manager;
 pub(crate) mod registry;
 mod wrapper;
 

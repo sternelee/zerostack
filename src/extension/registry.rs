@@ -1,7 +1,8 @@
-//! Global extension registry — allows the agent builder to access extension tools
-//! without threading ExtensionManager through every function signature.
+//! Extension registry — per-session extension manager, stored in a static
+//! for access by the agent builder and slash-command dispatcher without
+//! threading through every function signature.
 //!
-//! Uses `std::sync::OnceLock` for one-time initialization at startup.
+//! Set once at startup from CLI `--extension` flags, cleared on shutdown.
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -10,13 +11,18 @@ use rig::tool::ToolDyn;
 use crate::extension::manager::ExtensionManager;
 use crate::extension::wrapper::ExtensionToolWrapper;
 
-static EXTENSION_MANAGER: OnceLock<Arc<Mutex<ExtensionManager>>> = OnceLock::new();
+/// The per-session extension manager. Set once at startup.
+static EXT_MANAGER: OnceLock<Arc<Mutex<ExtensionManager>>> = OnceLock::new();
 
-/// Initialize the global extension registry from CLI --extension paths.
-pub fn init_from_paths(extension_paths: &[std::path::PathBuf]) -> Result<Vec<String>, String> {
+/// Create an extension manager from CLI `--extension` paths, then discover and
+/// load extensions from standard directories. Stores the result in the static
+/// registry for later access.
+///
+/// Errors are returned eagerly for explicit CLI paths; auto-discovered
+/// extensions log warnings but do not fail startup.
+pub fn init_from_paths(extension_paths: &[std::path::PathBuf]) -> Result<(), String> {
     let mut manager = ExtensionManager::new()?;
 
-    let mut loaded = Vec::new();
     for path in extension_paths {
         match manager.load_standalone(path) {
             Ok(meta) => {
@@ -25,7 +31,6 @@ pub fn init_from_paths(extension_paths: &[std::path::PathBuf]) -> Result<Vec<Str
                     tools = ?meta.tool_names,
                     "extension loaded from CLI"
                 );
-                loaded.push(meta.id.clone());
             }
             Err(e) => {
                 tracing::error!(?path, error = %e, "failed to load extension");
@@ -34,14 +39,26 @@ pub fn init_from_paths(extension_paths: &[std::path::PathBuf]) -> Result<Vec<Str
         }
     }
 
-    let _ = manager.load_all();
-    let _ = EXTENSION_MANAGER.set(Arc::new(Mutex::new(manager)));
-    Ok(loaded)
+    let discovered = manager.load_all();
+    if !discovered.is_empty() {
+        tracing::info!(
+            count = discovered.len(),
+            "auto-discovered extensions loaded"
+        );
+    }
+    for (path, error) in manager.errors().iter() {
+        tracing::warn!(?path, error = %error, "extension discovery error");
+    }
+
+    EXT_MANAGER
+        .set(Arc::new(Mutex::new(manager)))
+        .map_err(|_| "extension manager already initialized".to_string())?;
+    Ok(())
 }
 
-/// Collect all extension tools as `Box<dyn ToolDyn>` for the agent builder.
+/// Collect all extension tools as `Box<dyn ToolDyn>` from the registry.
 pub fn collect_tools() -> Vec<Box<dyn ToolDyn>> {
-    let Some(manager) = EXTENSION_MANAGER.get() else {
+    let Some(manager) = EXT_MANAGER.get() else {
         return Vec::new();
     };
 
@@ -60,7 +77,7 @@ pub fn collect_tools() -> Vec<Box<dyn ToolDyn>> {
 
 /// Try to dispatch a slash command to a loaded extension.
 pub fn dispatch_command(name: &str, args: &str) -> Option<String> {
-    EXTENSION_MANAGER.get().and_then(|manager| {
+    EXT_MANAGER.get().and_then(|manager| {
         let mut mgr = manager.lock().unwrap_or_else(|e| e.into_inner());
         mgr.dispatch_command(name, args).ok().flatten()
     })

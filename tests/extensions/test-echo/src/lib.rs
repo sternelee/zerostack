@@ -1,6 +1,7 @@
 //! Test echo extension — compiled to wasm32-wasip2 as a zerostack component.
 //!
-//! Registers a single tool, `echo`, that returns the JSON parameters it received.
+//! Registers a single tool, `echo`, that returns the JSON parameters it received
+//! plus the current extension context.
 
 wit_bindgen::generate!({
     world: "extension-world",
@@ -25,8 +26,12 @@ impl Guest for EchoExtension {
     }
 
     fn tool_execute(_name: String, params_json: String) -> Result<ToolOutput, String> {
+        let ctx = crate::zerostack::extension::extension_context::get_context();
         Ok(ToolOutput {
-            content: format!("echo: {params_json}"),
+            content: format!(
+                "echo: {params_json}\ncwd: {}\nsession: {}\nmodel: {}\ntrusted: {}",
+                ctx.cwd, ctx.session_id, ctx.model_name, ctx.project_trusted,
+            ),
             details: "{}".into(),
             is_error: false,
         })
@@ -34,6 +39,14 @@ impl Guest for EchoExtension {
 
     fn on_command(_name: String, _args: String) -> Result<String, String> {
         Ok("".into())
+    }
+
+    fn session_start() -> Result<(), String> {
+        Ok(())
+    }
+
+    fn session_shutdown() -> Result<(), String> {
+        Ok(())
     }
 }
 

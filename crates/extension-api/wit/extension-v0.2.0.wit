@@ -1,12 +1,18 @@
-/// zerostack Extension API v0.1.0
+/// zerostack Extension API v0.2.0
 ///
 /// WIT contract between zerostack host and Wasm extensions.
-/// This is the MVP contract: tool registration, command registration,
-/// and execution callbacks. Additional host capabilities (UI, session,
-/// HTTP, etc.) will be added in later versions once host implementations
-/// are ready.
+///
+/// ## v0.2.0 changes (from v0.1.0)
+/// - Added `extension-context` host import (cwd, session_id, model_name)
+/// - Added optional `session-start` and `session-shutdown` exports
+/// - Tool/command names are now auto-namespaced as `ext_id__name`
+///
+/// ## v0.1.0 (MVP)
+/// - Tool registration/unregistration
+/// - Command registration/unregistration
+/// - `init` / `tool-execute` / `on-command` exports
 
-package zerostack:extension@0.1.0;
+package zerostack:extension@0.2.0;
 
 /// ── shared types ────────────────────────────────────────────
 
@@ -18,6 +24,17 @@ interface types {
         is-error: bool,
     }
 
+    /// Context information available to tools and event handlers.
+    record extension-info {
+        /// Current working directory.
+        cwd: string,
+        /// Active session identifier (empty string if not in a session).
+        session-id: string,
+        /// Name of the active model.
+        model-name: string,
+        /// Whether the current project is trusted.
+        project-trusted: bool,
+    }
 }
 
 /// ── host exports (extension calls into host) ───────────────────
@@ -49,15 +66,25 @@ interface command-registry {
     unregister-command: func(name: string) -> result<_, string>;
 }
 
+interface extension-context {
+    use types.{extension-info};
+
+    /// Retrieve the current extension context. Returns the same data every call
+    /// within a single tool execution or event handler.
+    get-context: func() -> extension-info;
+}
+
 /// ── world: the complete extension contract ─────────────────────
 
 world extension-world {
     import tool-registry;
     import command-registry;
+    import extension-context;
 
     use types.{tool-output};
 
-    /// Called once when the extension is loaded.
+    /// Called once when the extension is loaded. Must return Ok.
+    /// May register tools/commands via the host imports.
     export init: func() -> result<_, string>;
 
     /// Called when the LLM invokes a tool registered by this extension.
@@ -71,4 +98,10 @@ world extension-world {
         name: string,
         args: string,
     ) -> result<string, string>;
+
+    /// Optional. Called when a new session starts (interactive mode only).
+    export session-start: func() -> result<_, string>;
+
+    /// Optional. Called when the session is about to shut down (quit, reload, crash).
+    export session-shutdown: func() -> result<_, string>;
 }

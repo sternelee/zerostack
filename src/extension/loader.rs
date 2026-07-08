@@ -51,9 +51,9 @@ fn default_entrypoint() -> String {
     "extension.wasm".to_string()
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Capabilities {
-    #[serde(default)]
+    #[serde(default = "Capabilities::tools_default")]
     pub tools: bool,
     #[serde(default)]
     pub commands: bool,
@@ -69,6 +69,27 @@ pub struct Capabilities {
     pub http: bool,
     #[serde(default)]
     pub session: bool,
+}
+
+impl Default for Capabilities {
+    fn default() -> Self {
+        Self {
+            tools: true,
+            commands: false,
+            lifecycle: false,
+            provider: false,
+            ui: false,
+            exec: false,
+            http: false,
+            session: false,
+        }
+    }
+}
+
+impl Capabilities {
+    fn tools_default() -> bool {
+        true
+    }
 }
 
 /// Discovered extension on disk.
