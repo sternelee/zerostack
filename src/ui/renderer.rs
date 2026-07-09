@@ -1,4 +1,5 @@
 use std::io::{self, Write};
+use std::sync::LazyLock;
 
 use compact_str::CompactString;
 use crossterm::ExecutableCommand;
@@ -7,11 +8,31 @@ use crossterm::style::{
     Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
 use crossterm::terminal::{Clear, ClearType, ScrollUp};
+use regex::Regex;
 use smallvec::{SmallVec, smallvec};
 
 use super::markdown::word_wrap;
 use super::statusline::StatusSpan;
 use super::utils::{char_display_width, display_width, resolve_color};
+
+static URL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"https?://[^\x00-\x1f\x7f\s<>]+").expect("compile URL regex"));
+
+fn wrap_urls_osc8(text: &str) -> String {
+    let mut result = String::with_capacity(text.len() + 64);
+    let mut last = 0;
+    for m in URL_RE.find_iter(text) {
+        result.push_str(&text[last..m.start()]);
+        result.push_str("\x1b]8;;");
+        result.push_str(m.as_str());
+        result.push_str("\x1b\\");
+        result.push_str(m.as_str());
+        result.push_str("\x1b]8;;\x1b\\");
+        last = m.end();
+    }
+    result.push_str(&text[last..]);
+    result
+}
 
 #[derive(Clone)]
 pub struct LineEntry {
@@ -232,11 +253,13 @@ impl Renderer {
         }
 
         let auto_scroll = self.scroll_offset == 0;
-        if auto_scroll && total < visible {
-            let pad = visible - total;
-            if (row as usize) < pad {
-                return None;
-            }
+        let pad = if auto_scroll && total < visible {
+            visible - total
+        } else {
+            0
+        };
+        if (row as usize) < pad {
+            return None;
         }
 
         let start = if auto_scroll {
@@ -246,7 +269,7 @@ impl Renderer {
         };
         let start = start.min(total.saturating_sub(visible));
 
-        let mut visual_row: u16 = 0;
+        let mut visual_row: u16 = pad as u16;
         let mut buf_idx = start;
 
         while buf_idx < total {
@@ -274,6 +297,21 @@ impl Renderer {
         self.selection_active = false;
         self.selection_start = None;
         self.selection_end = None;
+    }
+
+    pub fn link_url_at(&self, buf_idx: usize, col: u16) -> Option<&str> {
+        let entry = self.buffer.get(buf_idx)?;
+        let text: &str = &entry.text;
+        let click_col = col.saturating_sub(self.chat_margin) as usize;
+        for m in URL_RE.find_iter(text) {
+            let prefix = &text[..m.start()];
+            let url_start = display_width(prefix);
+            let url_end = url_start + display_width(m.as_str());
+            if click_col >= url_start && click_col < url_end {
+                return Some(m.as_str());
+            }
+        }
+        None
     }
 
     pub fn selected_text(&self) -> Option<String> {
@@ -499,7 +537,7 @@ impl Renderer {
                     write!(stdout, "{}", SetAttribute(Attribute::Reverse))?;
                 }
                 write!(stdout, "{}", SetForegroundColor(self.color(entry.color)))?;
-                write!(stdout, "{}", chunk)?;
+                write!(stdout, "{}", wrap_urls_osc8(chunk))?;
                 if is_selected {
                     write!(stdout, "{}", SetAttribute(Attribute::NoReverse))?;
                 }
@@ -712,7 +750,7 @@ impl Renderer {
                             write!(stdout, "{}", SetBackgroundColor(self.color(bg)))?;
                         }
                         write!(stdout, "{}", SetForegroundColor(self.color(color)))?;
-                        write!(stdout, "{}", chunk)?;
+                        write!(stdout, "{}", wrap_urls_osc8(&chunk))?;
                         write!(stdout, "{}", ResetColor)?;
 
                         self.col = self.col.saturating_add(w as u16);
@@ -1180,6 +1218,25 @@ impl Renderer {
         write!(stdout, "{}", Show)?;
         stdout.flush()?;
         Ok(())
+    }
+}
+
+pub fn open_url(url: &str) {
+    let openers: &[(&str, &[&str])] = &[
+        ("xdg-open", &[url]),
+        ("open", &[url]),               // macOS
+        ("cmd", &["/c", "start", url]), // Windows
+    ];
+    for &(cmd, args) in openers {
+        if std::process::Command::new(cmd)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            return;
+        }
     }
 }
 
