@@ -16,10 +16,42 @@ pub fn normalize_whitespace(s: &str) -> String {
         }
     }
 
-    if blank_count == 0 && !out.ends_with('\n') && s.ends_with('\n') {
+    out
+}
+
+pub fn normalize_unicode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\u{2010}'..='\u{2015}' | '\u{2212}' => out.push('-'),
+            '\u{2018}'..='\u{201B}' => out.push('\''),
+            '\u{201C}'..='\u{201F}' => out.push('"'),
+            '\u{00A0}' | '\u{2002}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}' => {
+                out.push(' ')
+            }
+            '\u{200B}'..='\u{200D}' | '\u{FEFF}' => {}
+            '\u{2260}' => out.push_str("!="),
+            '\u{00BD}' => out.push_str("1/2"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+pub fn strip_comment_prefixes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for line in s.lines() {
+        let trimmed = line.trim();
+        let mut stripped = trimmed;
+        for p in ["//", "-- ", "# ", "; ", "% "] {
+            if stripped.starts_with(p) {
+                stripped = stripped[p.len()..].trim_start();
+                break;
+            }
+        }
+        out.push_str(stripped);
         out.push('\n');
     }
-
     out
 }
 

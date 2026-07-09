@@ -4,7 +4,7 @@ use rig::tool::Tool;
 use crate::agent::tools::crc::crc32_hex;
 use crate::agent::tools::{
     AskSender, EditArgs, EditBlock, EditOp, PermCheck, ToolError, check_perm_path, edit_system,
-    levenshtein_similarity, normalize_whitespace,
+    levenshtein_similarity, normalize_unicode, normalize_whitespace, strip_comment_prefixes,
 };
 use crate::config::types::EditSystem;
 
@@ -21,30 +21,33 @@ impl EditTool {
 
 // ── V1: Similarity (SEARCH/REPLACE) ──────────────────────────────────────
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Outside,
+    Search,
+    Replace,
+}
+
 fn parse_blocks(raw: &str) -> Result<Vec<EditBlock>, ToolError> {
     let mut blocks = Vec::new();
-    let mut in_block = false;
     let mut search_lines: Vec<String> = Vec::new();
     let mut replace_lines: Vec<String> = Vec::new();
-    let mut phase: u8 = 0;
+    let mut phase = Phase::Outside;
 
     for line in raw.lines() {
-        match line.trim() {
-            "<<<<<<< SEARCH" => {
-                if in_block {
-                    return Err(ToolError::Msg(
-                        "Nested SEARCH/REPLACE block detected. Close each block with >>>>>>> REPLACE before starting a new one.".to_string(),
-                    ));
-                }
-                in_block = true;
+        match (phase, line.trim()) {
+            (Phase::Search | Phase::Replace, "<<<<<<< SEARCH") => {
+                return Err(ToolError::Msg(
+                    "Nested SEARCH/REPLACE block detected. Close each block with >>>>>>> REPLACE before starting a new one.".to_string(),
+                ));
+            }
+            (Phase::Outside, "<<<<<<< SEARCH") => {
+                phase = Phase::Search;
                 search_lines.clear();
                 replace_lines.clear();
-                phase = 1;
             }
-            "=======" if phase == 1 => {
-                phase = 2;
-            }
-            ">>>>>>> REPLACE" if phase == 2 => {
+            (Phase::Search, "=======") => phase = Phase::Replace,
+            (Phase::Replace, ">>>>>>> REPLACE") => {
                 let search = search_lines.join("\n");
                 if search.is_empty() {
                     return Err(ToolError::Msg(format!(
@@ -56,20 +59,15 @@ fn parse_blocks(raw: &str) -> Result<Vec<EditBlock>, ToolError> {
                     search,
                     replace: replace_lines.join("\n"),
                 });
-                in_block = false;
-                phase = 0;
+                phase = Phase::Outside;
             }
-            _ if phase == 1 => {
-                search_lines.push(line.to_string());
-            }
-            _ if phase == 2 => {
-                replace_lines.push(line.to_string());
-            }
-            _ => {}
+            (Phase::Search, _) => search_lines.push(line.to_string()),
+            (Phase::Replace, _) => replace_lines.push(line.to_string()),
+            (Phase::Outside, _) => {}
         }
     }
 
-    if in_block {
+    if phase != Phase::Outside {
         return Err(ToolError::Msg(
             "Unclosed SEARCH/REPLACE block. Each block must end with >>>>>>> REPLACE.".to_string(),
         ));
@@ -164,7 +162,27 @@ fn find_best_match(content: &str, search: &str) -> MatchResult {
         return MatchResult::Normalized(byte_start, byte_end);
     }
 
-    // Step 3: fuzzy line-level matching
+    // Step 3: unicode-normalized match
+    let content_uni = normalize_unicode(&content_norm);
+    let search_uni = normalize_unicode(&search_norm);
+    if content_uni != content_norm || search_uni != search_norm {
+        if let Some(uni_pos) = content_uni.find(&search_uni) {
+            let (byte_start, byte_end) = compute_byte_range(content, uni_pos, search_uni.len());
+            return MatchResult::Normalized(byte_start, byte_end);
+        }
+    }
+
+    // Step 4: comment-prefix-stripped match
+    let content_nocmt = strip_comment_prefixes(&content_norm);
+    let search_nocmt = strip_comment_prefixes(&search_norm);
+    if content_nocmt != content_norm || search_nocmt != search_norm {
+        if let Some(cmt_pos) = content_nocmt.find(&search_nocmt) {
+            let (byte_start, byte_end) = compute_byte_range(content, cmt_pos, search_nocmt.len());
+            return MatchResult::Normalized(byte_start, byte_end);
+        }
+    }
+
+    // Step 5: fuzzy line-level matching
     let search_lines: Vec<&str> = search.lines().collect();
     let content_lines: Vec<&str> = content.lines().collect();
 
@@ -197,7 +215,7 @@ fn find_best_match(content: &str, search: &str) -> MatchResult {
         }
     }
 
-    if best_sim >= 0.85 {
+    if best_sim >= 0.90 {
         let byte_start: usize = content_lines[..best_start]
             .iter()
             .map(|l| l.len() + 1)
@@ -233,14 +251,8 @@ async fn handle_similarity(
 ) -> Result<(Vec<String>, Vec<(usize, usize, String)>), ToolError> {
     let blocks = parse_blocks(block)?;
 
-    struct ResolvedSim {
-        byte_start: usize,
-        byte_end: usize,
-        replace: String,
-        note: String,
-    }
-
-    let mut resolved: Vec<ResolvedSim> = Vec::new();
+    let mut notes = Vec::new();
+    let mut ranges = Vec::new();
 
     for (i, blk) in blocks.iter().enumerate() {
         let label = if blocks.len() > 1 {
@@ -279,28 +291,15 @@ async fn handle_similarity(
                         match_info.join("\n"),
                     )));
                 }
-                resolved.push(ResolvedSim {
-                    byte_start: pos,
-                    byte_end: pos + blk.search.len(),
-                    replace: blk.replace.clone(),
-                    note: String::new(),
-                });
+                ranges.push((pos, pos + blk.search.len(), blk.replace.clone()));
             }
             MatchResult::Normalized(start, end) => {
-                resolved.push(ResolvedSim {
-                    byte_start: start,
-                    byte_end: end,
-                    replace: blk.replace.clone(),
-                    note: "matched after whitespace normalization".to_string(),
-                });
+                ranges.push((start, end, blk.replace.clone()));
+                notes.push("matched after whitespace normalization".to_string());
             }
             MatchResult::FuzzyApply(start, end, sim) => {
-                resolved.push(ResolvedSim {
-                    byte_start: start,
-                    byte_end: end,
-                    replace: blk.replace.clone(),
-                    note: format!("fuzzy match, {:.0}% similarity", sim * 100.0),
-                });
+                ranges.push((start, end, blk.replace.clone()));
+                notes.push(format!("fuzzy match, {:.0}% similarity", sim * 100.0));
             }
             MatchResult::FuzzySuggest(line, sim, preview) => {
                 return Err(ToolError::Msg(format!(
@@ -318,16 +317,6 @@ async fn handle_similarity(
                 )));
             }
         }
-    }
-
-    let mut notes = Vec::new();
-    let mut ranges = Vec::new();
-
-    for rb in &resolved {
-        if !rb.note.is_empty() {
-            notes.push(rb.note.clone());
-        }
-        ranges.push((rb.byte_start, rb.byte_end, rb.replace.clone()));
     }
 
     Ok((notes, ranges))
@@ -432,7 +421,6 @@ async fn handle_hashedit(
     }
 
     let content_lines: Vec<&str> = content.lines().collect();
-    let notes = Vec::new();
     let mut ranges = Vec::new();
 
     for (i, op) in edits.iter().enumerate() {
@@ -484,7 +472,7 @@ async fn handle_hashedit(
         }
     }
 
-    Ok((notes, ranges))
+    Ok((Vec::new(), ranges))
 }
 
 // ── Tool implementation ──────────────────────────────────────────────────
@@ -554,7 +542,11 @@ impl Tool for EditTool {
         );
         let coaching = check_perm_path(&self.permission, &self.ask_tx, "edit", &path).await?;
 
-        let bytes = tokio::fs::read(&path).await?;
+        let mut bytes = tokio::fs::read(&path).await?;
+        // Strip BOM if present
+        if bytes.len() >= 3 && bytes[..3] == [0xEF, 0xBB, 0xBF] {
+            bytes.drain(..3);
+        }
         let has_crlf = bytes.windows(2).any(|w| w == b"\r\n");
         let content = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
 
@@ -563,9 +555,6 @@ impl Tool for EditTool {
             handle_similarity(&path, block, &content).await?
         } else if let (Some(file_crc), Some(edits)) = (&args.file_crc, &args.edits) {
             handle_hashedit(&path, file_crc, edits, &content).await?
-        } else if args.block.is_some() {
-            // block was Some but empty or parse failed — handle_similarity already errored
-            unreachable!()
         } else {
             return Err(ToolError::Msg(
                 "Provide either 'block' (SEARCH/REPLACE) or 'file_crc'+'edits' (hashedit). Use /editsys to check the current mode."
