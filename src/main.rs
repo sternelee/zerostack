@@ -831,7 +831,12 @@ async fn main() -> anyhow::Result<()> {
                     .total_cache_creation_input_tokens
                     .saturating_add(usage.cache_creation_input_tokens);
                 session.total_cost += crate::pricing::estimate_cost(
-                    usage.input_tokens,
+                    crate::pricing::billable_input_tokens(
+                        cfg.is_anthropic_native(&session.provider),
+                        usage.input_tokens,
+                        usage.cached_input_tokens,
+                        usage.cache_creation_input_tokens,
+                    ),
                     usage.output_tokens,
                     session.input_token_cost,
                     session.output_token_cost,
@@ -1199,7 +1204,7 @@ async fn run_headless_loop(
             .run_print(
                 &iteration_prompt,
                 cli.resolve_max_agent_turns(cfg),
-                false,
+                cli.pure_stdout,
                 &cfg.retry,
             )
             .await

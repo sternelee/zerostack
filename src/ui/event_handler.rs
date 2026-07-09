@@ -352,7 +352,12 @@ pub async fn handle_agent_event(
             session.total_input_tokens = session.total_input_tokens.saturating_add(input_tokens);
             session.total_output_tokens = session.total_output_tokens.saturating_add(output_tokens);
             session.total_cost += crate::pricing::estimate_cost(
-                input_tokens,
+                crate::pricing::billable_input_tokens(
+                    cfg.is_anthropic_native(&session.provider),
+                    input_tokens,
+                    cached_input_tokens,
+                    cache_creation_input_tokens,
+                ),
                 output_tokens,
                 session.input_token_cost,
                 session.output_token_cost,
@@ -447,12 +452,19 @@ async fn handle_agent_done(
     renderer.write_line("", Color::White)?;
     renderer.write_line("", Color::White)?;
     session.add_message(MessageRole::Assistant, &response);
-    // Cost tracking uses the raw reported `input_tokens` (for Anthropic this is
-    // the billed uncached portion; cache reads are billed separately/cheaper).
+    // `total_input_tokens`/`total_output_tokens` keep the raw provider-reported
+    // counts (that's what those fields mean), but cost prices the *billable*
+    // input — for Anthropic that folds in cache reads/writes, which the raw
+    // `input_tokens` excludes yet are still billed (see `billable_input_tokens`).
     session.total_input_tokens = session.total_input_tokens.saturating_add(input_tokens);
     session.total_output_tokens = session.total_output_tokens.saturating_add(output_tokens);
     session.total_cost += crate::pricing::estimate_cost(
-        input_tokens,
+        crate::pricing::billable_input_tokens(
+            cfg.is_anthropic_native(&session.provider),
+            input_tokens,
+            cached_input_tokens,
+            cache_creation_input_tokens,
+        ),
         output_tokens,
         session.input_token_cost,
         session.output_token_cost,

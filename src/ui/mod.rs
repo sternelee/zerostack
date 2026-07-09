@@ -2387,9 +2387,13 @@ pub async fn run_interactive(
                 // Parallel side-question result. Rendered as a single block; it is
                 // NEVER written to the session (cost is tracked separately).
                 match bev {
-                    crate::event::BtwEvent::Done { id, response, input_tokens, output_tokens } => {
+                    crate::event::BtwEvent::Done { id, response, input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens } => {
                         btw_total_cost += crate::pricing::estimate_cost(
-                            input_tokens, output_tokens,
+                            crate::pricing::billable_input_tokens(
+                                cfg.is_anthropic_native(&session.provider),
+                                input_tokens, cached_input_tokens, cache_creation_input_tokens,
+                            ),
+                            output_tokens,
                             session.input_token_cost, session.output_token_cost,
                         );
                         btw_total_in = btw_total_in.saturating_add(input_tokens);

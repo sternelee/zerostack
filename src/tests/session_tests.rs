@@ -101,6 +101,27 @@ fn real_input_tokens_non_native_uses_input_only() {
     assert_eq!(Session::real_input_tokens(false, 7000, 5600, 0), 7000);
 }
 
+#[test]
+fn billable_input_tokens_native_prices_cache_tiers() {
+    use crate::pricing::billable_input_tokens;
+    // Cost sibling of real_input_tokens: Anthropic bills cache writes at 1.25×
+    // and cache reads at 0.10× the base input rate, on top of raw input_tokens.
+    // write only: 100 + 6000*1.25 = 7600
+    assert_eq!(billable_input_tokens(true, 100, 0, 6000), 7600);
+    // read only: 100 + 7000*0.10 = 800
+    assert_eq!(billable_input_tokens(true, 100, 7000, 0), 800);
+    // both, with rounding: 4 + 6003*0.10 + 6089*1.25 = 4 + 600.3 + 7611.25 = 8215.55 -> 8216
+    assert_eq!(billable_input_tokens(true, 4, 6003, 6089), 8216);
+}
+
+#[test]
+fn billable_input_tokens_non_native_uses_input_only() {
+    use crate::pricing::billable_input_tokens;
+    // Non-Anthropic providers have no separate cache tiers to price — input_tokens
+    // is already the full billable amount, so the cache fields are ignored.
+    assert_eq!(billable_input_tokens(false, 7000, 5600, 4000), 7000);
+}
+
 // Helper: a session with `n` ASCII messages of `len` chars each, so every
 // message has a predictable estimated_tokens == len/4.
 fn session_with_messages(n: usize, len: usize) -> Session {
