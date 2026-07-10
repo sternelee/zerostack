@@ -179,7 +179,7 @@ script_mod! {
                                 input_field := TextInput {
                                     width: Fill, height: 36.0
                                     empty_text: "Type a message... (Enter to send)"
-                                    enter_emits_returned: true
+                                    submit_on_enter: true
                                     draw_bg.color: #2D2E3F
                                     draw_bg.radius: 8.0
                                     draw_text.color: #CDD6F4
