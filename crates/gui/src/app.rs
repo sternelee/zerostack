@@ -5,12 +5,8 @@ app_main!(App);
 script_mod! {
     use mod.prelude.widgets.*
 
-    let App = startup() do #(App::script_component(vm)) {
+    let app = startup() do #(App::script_component(vm)) {
         ui: Root {
-            on_startup: || {
-                crate::app::on_startup(vm)
-            }
-
             main_window := Window {
                 window.inner_size: vec2(1024, 700)
                 window.title: "zerostack"
@@ -86,15 +82,12 @@ script_mod! {
                         // Chat area
                         <PortalList> {
                             width: Fill, height: Fill
-                            show_bg: false
                             padding: {left: 16.0, right: 16.0, top: 12.0, bottom: 12.0}
 
                             chat_content := <View> {
                                 width: Fill, height: Fit
                                 flow: Down
                                 spacing: 8.0
-                                show_bg: true
-                                draw_bg.color: #1A1B26
 
                                 <Label> {
                                     text: "Welcome to zerostack GUI"
@@ -138,7 +131,7 @@ script_mod! {
                                     on_click: || {
                                         let text = input_field.text()
                                         if text != "" {
-                                            crate::app::send_message(text)
+                                            log("Send: " + text)
                                             input_field.set_text("")
                                             input_field.set_key_focus()
                                         }
@@ -176,6 +169,7 @@ script_mod! {
             }
         }
     }
+    app
 }
 
 #[derive(Script, ScriptHook)]
@@ -184,24 +178,13 @@ pub struct App {
     ui: WidgetRef,
 }
 
-pub fn on_startup(_vm: &mut ScriptVm) {}
-
-pub fn send_message(text: String) {
-    // Will be wired to GuiBridge in next iteration
-}
-
-impl MatchEvent for App {
-    fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {}
-}
-
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-        crate::makepad_widgets::script_mod(vm);
+        makepad_widgets::script_mod(vm);
         self::script_mod(vm)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
