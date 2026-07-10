@@ -1,10 +1,10 @@
 use std::sync::Mutex;
 use std::thread;
 
+use compact_str::CompactString;
 use makepad_widgets::*;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use zerostack_core::config;
 use zerostack_core::engine::CoreEngine;
 use zerostack_core::events::{CoreEvent, UserAction};
 use zerostack_core::permission::SecurityMode;
@@ -25,7 +25,7 @@ pub struct GuiBridge {
 impl GuiBridge {
     pub fn new(model: &str, provider: &str) -> Self {
         let (action_tx, mut action_rx) = unbounded_channel();
-        let (event_tx, event_rx) = unbounded_channel();
+        let (gui_tx, gui_rx) = unbounded_channel::<CoreEvent>();
         let m = model.to_string();
         let p = provider.to_string();
 
@@ -36,23 +36,46 @@ impl GuiBridge {
                 .expect("tokio runtime");
 
             rt.block_on(async move {
-                let (cfg, _) = config::load();
-                let mut engine = CoreEngine::new(
-                    cfg,
+                let (mut engine, mut engine_event_rx) = match CoreEngine::build_default(
                     m.as_str().into(),
                     p.as_str().into(),
                     SecurityMode::Yolo,
-                );
+                )
+                .await
+                {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        eprintln!("Failed to build CoreEngine: {e}");
+                        let _ = gui_tx.send(CoreEvent::Error {
+                            message: CompactString::new(format!("Engine init failed: {e}")),
+                        });
+                        return;
+                    }
+                };
 
-                while let Some(action) = action_rx.recv().await {
-                    let events = engine.handle_action(action).await;
-                    for event in events {
-                        if matches!(&event, CoreEvent::Error { message } if message.as_str() == "quit")
-                        {
-                            let _ = event_tx.send(event);
-                            return;
+                loop {
+                    tokio::select! {
+                        // Action from GUI
+                        action = action_rx.recv() => {
+                            let Some(action) = action else { break };
+                            let is_quit = matches!(action, UserAction::Quit);
+                            let events = engine.handle_action(action).await;
+                            // For synchronous actions (session mgmt), forward
+                            // returned events to the GUI.
+                            for event in events {
+                                let _ = gui_tx.send(event);
+                            }
+                            if is_quit {
+                                return;
+                            }
                         }
-                        let _ = event_tx.send(event);
+                        // Agent event from engine (async, for SendMessage)
+                        event = engine_event_rx.recv() => {
+                            match event {
+                                Some(event) => { let _ = gui_tx.send(event); }
+                                None => break,
+                            }
+                        }
                     }
                 }
             });
@@ -60,7 +83,7 @@ impl GuiBridge {
 
         Self {
             action_tx,
-            event_rx,
+            event_rx: gui_rx,
             tokens_used: 0,
             _runtime_thread: runtime_thread,
         }
@@ -232,6 +255,8 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     frame_count: u64,
+    #[rust]
+    accumulated_text: String,
 }
 
 impl App {
@@ -254,6 +279,9 @@ impl App {
         }
         input.set_text(cx, "");
         input.set_key_focus(cx);
+        // Show user message and clear for new response
+        self.accumulated_text
+            .push_str(&format!("## You\n\n{}\n\n## Assistant\n\n", text));
         Self::ensure_bridge();
         if let Ok(guard) = BRIDGE.lock() {
             if let Some(ref bridge) = *guard {
@@ -283,15 +311,21 @@ impl App {
             return;
         }
 
-        // Build display
-        let mut lines = Vec::new();
+        let mut needs_redraw = false;
         for event in &events {
             match event {
                 CoreEvent::StreamingDelta { text } => {
-                    lines.push(text.to_string());
+                    self.accumulated_text.push_str(text);
+                    needs_redraw = true;
+                }
+                CoreEvent::ReasoningDelta { text } => {
+                    self.accumulated_text.push_str(text);
+                    needs_redraw = true;
                 }
                 CoreEvent::ToolCall { name, args } => {
-                    lines.push(format!("\n## 🔧 {}\n{}", name, args));
+                    self.accumulated_text
+                        .push_str(&format!("\n\n## 🔧 {}\n```\n{}\n```\n", name, args));
+                    needs_redraw = true;
                 }
                 CoreEvent::ToolResult { name, output } => {
                     let out = if output.len() > 500 {
@@ -299,7 +333,9 @@ impl App {
                     } else {
                         output.to_string()
                     };
-                    lines.push(format!("\n```\n{}: {}\n```\n", name, out));
+                    self.accumulated_text
+                        .push_str(&format!("\n``\u{200b}`\n{}: {}\n``\u{200b}`\n", name, out));
+                    needs_redraw = true;
                 }
                 CoreEvent::MessageComplete {
                     input_tokens,
@@ -311,26 +347,42 @@ impl App {
                             bridge.tokens_used += input_tokens + output_tokens;
                         }
                     }
+                    // Update token count in status bar
+                    let status = self.ui.widget(
+                        cx,
+                        &[
+                            live_id!(main_window),
+                            live_id!(body),
+                            live_id!(status_tokens),
+                        ],
+                    );
+                    if !status.is_empty() {
+                        if let Ok(guard) = BRIDGE.lock() {
+                            if let Some(ref bridge) = *guard {
+                                status.set_text(cx, &format!("{} tokens", bridge.tokens_used));
+                            }
+                        }
+                    }
                 }
                 CoreEvent::Error { message } => {
                     if message.as_str() != "quit" {
-                        lines.push(format!("\n❌ {}", message));
+                        self.accumulated_text
+                            .push_str(&format!("\n\n❌ {}\n", message));
+                        needs_redraw = true;
                     }
                 }
                 _ => {}
             }
         }
 
-        if lines.is_empty() {
-            return;
-        }
-
-        let display = lines.join("\n");
-        let path = &[live_id!(main_window), live_id!(body), live_id!(chat_text)];
-
-        let chat = self.ui.widget(cx, path);
-        if !chat.is_empty() {
-            chat.set_text(cx, &display);
+        if needs_redraw {
+            let chat = self.ui.widget(
+                cx,
+                &[live_id!(main_window), live_id!(body), live_id!(chat_text)],
+            );
+            if !chat.is_empty() {
+                chat.set_text(cx, &self.accumulated_text);
+            }
         }
     }
 }

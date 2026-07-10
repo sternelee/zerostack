@@ -9,3 +9,4 @@ description = "Makepad GUI frontend for zerostack"
 zerostack-core = { path = "../core" }
 makepad-widgets = { git = "https://github.com/makepad/makepad", version = "2.0.0" }
 tokio = { version = "1", features = ["rt", "sync"] }
+compact_str = { version = "0.9", features = ["serde"] }
