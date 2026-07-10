@@ -87,7 +87,7 @@ script_mod! {
                 window.inner_size: vec2(1024, 700)
                 window.title: "zerostack"
 
-                body <View> {
+                body +: {
                     width: Fill, height: Fill
                     flow: Right
                     spacing: 0.0
@@ -95,7 +95,7 @@ script_mod! {
                     draw_bg.color: #1A1B26
 
                     // ── Sidebar ──────────────────────────────────────
-                    <RoundedView> {
+                    RoundedView {
                         width: 220.0, height: Fill
                         draw_bg.color: #1F2030
                         draw_bg.radius: 0.0
@@ -103,18 +103,18 @@ script_mod! {
                         padding: {top: 8.0, bottom: 8.0}
                         spacing: 4.0
 
-                        <View> {
+                        View {
                             width: Fill, height: Fit
                             padding: {left: 12.0, right: 12.0, top: 4.0, bottom: 4.0}
                             flow: Right
                             align: {y: 0.5}
-                            <Label> {
+                            Label {
                                 text: "Sessions"
                                 draw_text.color: #6C7086
                                 draw_text.text_style.font_size: 11.0
                             }
-                            <View> { width: Fill, height: 0.0 }
-                            <Button> {
+                            View { width: Fill, height: 0.0 }
+                            Button {
                                 text: "+"
                                 width: 28.0, height: 28.0
                                 draw_bg.color: #7C6FF0
@@ -124,38 +124,38 @@ script_mod! {
                     }
 
                     // ── Main Content ─────────────────────────────────
-                    <View> {
+                    View {
                         width: Fill, height: Fill
                         flow: Down
                         spacing: 0.0
 
-                        <View> {
+                        View {
                             width: Fill, height: 40.0
                             show_bg: true
                             draw_bg.color: #1A1B26
                             padding: {left: 16.0, right: 16.0}
                             flow: Right
                             align: {y: 0.5}
-                            <Label> {
+                            Label {
                                 text: "zerostack"
                                 draw_text.color: #CDD6F4
                                 draw_text.text_style.font_size: 14.0
                             }
-                            <View> { width: Fill, height: 0.0 }
-                            header_model := <Label> {
+                            View { width: Fill, height: 0.0 }
+                            header_model := Label {
                                 text: "claude-sonnet"
                                 draw_text.color: #6C7086
                                 draw_text.text_style.font_size: 12.0
                             }
                         }
 
-                        chat_area := <View> {
+                        chat_area := View {
                             width: Fill, height: Fill
                             flow: Down
                             spacing: 4.0
                             padding: {left: 16.0, right: 16.0, top: 12.0, bottom: 12.0}
 
-                            chat_text := <Markdown> {
+                            chat_text := Markdown {
                                 width: Fill, height: Fit
                                 selectable: false
                                 body: "# Welcome to zerostack GUI\n\nType a message below to get started."
@@ -163,21 +163,21 @@ script_mod! {
                         }
 
                         // ── Input Bar ─────────────────────────────
-                        <View> {
+                        View {
                             width: Fill, height: Fit
                             show_bg: true
                             draw_bg.color: #1F2030
                             flow: Down
                             spacing: 0.0
 
-                            <View> {
+                            View {
                                 width: Fill, height: 60.0
                                 padding: {left: 16.0, right: 16.0, top: 12.0, bottom: 12.0}
                                 flow: Right
                                 spacing: 8.0
                                 align: {y: 0.5}
 
-                                input_field := <TextInput> {
+                                input_field := TextInput {
                                     width: Fill, height: 36.0
                                     empty_text: "Type a message... (Enter to send)"
                                     draw_bg.color: #2D2E3F
@@ -186,7 +186,7 @@ script_mod! {
                                     draw_text.text_style.font_size: 14.0
                                 }
 
-                                send_btn := <Button> {
+                                send_btn := Button {
                                     text: "Send"
                                     width: 72.0, height: 36.0
                                     draw_bg.color: #7C6FF0
@@ -204,7 +204,7 @@ script_mod! {
                                 }
                             }
 
-                            <View> {
+                            View {
                                 width: Fill, height: 28.0
                                 padding: {left: 16.0, right: 16.0}
                                 flow: Right
@@ -213,13 +213,13 @@ script_mod! {
                                 show_bg: true
                                 draw_bg.color: #1A1B26
 
-                                status_model := <Label> {
+                                status_model := Label {
                                     text: "claude-sonnet"
                                     draw_text.color: #6C7086
                                     draw_text.text_style.font_size: 11.0
                                 }
-                                <View> { width: Fill, height: 0.0 }
-                                status_tokens := <Label> {
+                                View { width: Fill, height: 0.0 }
+                                status_tokens := Label {
                                     text: "0 tokens"
                                     draw_text.color: #6C7086
                                     draw_text.text_style.font_size: 11.0
