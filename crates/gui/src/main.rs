@@ -14,7 +14,6 @@ app_main!(App);
 // ─── Global Bridge ─────────────────────────────────────────────────────────
 
 static BRIDGE: Mutex<Option<GuiBridge>> = Mutex::new(None);
-static PENDING_SEND: Mutex<Option<String>> = Mutex::new(None);
 
 pub struct GuiBridge {
     pub action_tx: UnboundedSender<UserAction>,
@@ -194,14 +193,6 @@ script_mod! {
                                     draw_bg.radius: 8.0
                                     draw_text.color: #FFFFFF
                                     draw_text.text_style.font_size: 13.0
-                                    on_click: || {
-                                        let text = input_field.text()
-                                        if text != "" {
-                                            std.log("zerostack-send: " + text)
-                                            input_field.set_text("")
-                                            input_field.set_key_focus()
-                                        }
-                                    }
                                 }
                             }
 
@@ -251,23 +242,32 @@ impl App {
         }
     }
 
+    fn send_input_to_engine(&mut self, cx: &mut Cx) {
+        let input_path = &[live_id!(main_window), live_id!(body), live_id!(input_field)];
+        let input = self.ui.widget(cx, input_path);
+        if input.is_empty() {
+            return;
+        }
+        let text = input.text();
+        if text.is_empty() {
+            return;
+        }
+        input.set_text(cx, "");
+        input.set_key_focus(cx);
+        Self::ensure_bridge();
+        if let Ok(guard) = BRIDGE.lock() {
+            if let Some(ref bridge) = *guard {
+                let _ = bridge.action_tx.send(UserAction::SendMessage {
+                    text: text.as_str().into(),
+                });
+            }
+        }
+    }
+
     fn poll_and_render(&mut self, cx: &mut Cx) {
         self.frame_count += 1;
         if self.frame_count == 1 {
             Self::ensure_bridge();
-        }
-
-        // Send pending message
-        if let Ok(mut pending) = PENDING_SEND.lock() {
-            if let Some(text) = pending.take() {
-                if let Ok(guard) = BRIDGE.lock() {
-                    if let Some(ref bridge) = *guard {
-                        let _ = bridge.action_tx.send(UserAction::SendMessage {
-                            text: text.as_str().into(),
-                        });
-                    }
-                }
-            }
         }
 
         // Poll events
@@ -336,7 +336,25 @@ impl App {
 }
 
 impl MatchEvent for App {
-    fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {}
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        let send_path = &[live_id!(main_window), live_id!(body), live_id!(send_btn)];
+        let send_btn = self.ui.widget(cx, send_path);
+        if matches!(
+            actions.find_widget_action_cast::<ButtonAction>(send_btn.widget_uid()),
+            ButtonAction::Clicked(_)
+        ) {
+            self.send_input_to_engine(cx);
+        }
+
+        let input_path = &[live_id!(main_window), live_id!(body), live_id!(input_field)];
+        let input = self.ui.widget(cx, input_path);
+        if matches!(
+            actions.find_widget_action_cast::<TextInputAction>(input.widget_uid()),
+            TextInputAction::Returned(..)
+        ) {
+            self.send_input_to_engine(cx);
+        }
+    }
 }
 
 impl AppMain for App {
@@ -351,13 +369,5 @@ impl AppMain for App {
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
-    }
-}
-
-// ─── Script helpers ────────────────────────────────────────────────────────
-
-pub fn set_pending(text: String) {
-    if let Ok(mut guard) = PENDING_SEND.lock() {
-        *guard = Some(text);
     }
 }
