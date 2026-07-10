@@ -100,14 +100,14 @@ script_mod! {
                         draw_bg.color: #1F2030
                         draw_bg.radius: 0.0
                         flow: Down
-                        padding: {top: 8.0, bottom: 8.0}
+                        padding: Inset { top: 8.0, bottom: 8.0 }
                         spacing: 4.0
 
                         View {
                             width: Fill, height: Fit
-                            padding: {left: 12.0, right: 12.0, top: 4.0, bottom: 4.0}
+                            padding: Inset { left: 12.0, right: 12.0 }
                             flow: Right
-                            align: {y: 0.5}
+                            align: Align { y: 0.5 }
                             Label {
                                 text: "Sessions"
                                 draw_text.color: #6C7086
@@ -133,9 +133,9 @@ script_mod! {
                             width: Fill, height: 40.0
                             show_bg: true
                             draw_bg.color: #1A1B26
-                            padding: {left: 16.0, right: 16.0}
+                            padding: Inset { left: 16.0, right: 16.0 }
                             flow: Right
-                            align: {y: 0.5}
+                            align: Align { y: 0.5 }
                             Label {
                                 text: "zerostack"
                                 draw_text.color: #CDD6F4
@@ -153,7 +153,7 @@ script_mod! {
                             width: Fill, height: Fill
                             flow: Down
                             spacing: 4.0
-                            padding: {left: 16.0, right: 16.0, top: 12.0, bottom: 12.0}
+                            padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
 
                             chat_text := Markdown {
                                 width: Fill, height: Fit
@@ -172,14 +172,15 @@ script_mod! {
 
                             View {
                                 width: Fill, height: 60.0
-                                padding: {left: 16.0, right: 16.0, top: 12.0, bottom: 12.0}
+                                padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
                                 flow: Right
                                 spacing: 8.0
-                                align: {y: 0.5}
+                                align: Align { y: 0.5 }
 
                                 input_field := TextInput {
                                     width: Fill, height: 36.0
                                     empty_text: "Type a message... (Enter to send)"
+                                    enter_emits_returned: true
                                     draw_bg.color: #2D2E3F
                                     draw_bg.radius: 8.0
                                     draw_text.color: #CDD6F4
@@ -196,7 +197,7 @@ script_mod! {
                                     on_click: || {
                                         let text = input_field.text()
                                         if text != "" {
-                                            crate::app::set_pending(text)
+                                            std.log("zerostack-send: " + text)
                                             input_field.set_text("")
                                             input_field.set_key_focus()
                                         }
@@ -206,10 +207,10 @@ script_mod! {
 
                             View {
                                 width: Fill, height: 28.0
-                                padding: {left: 16.0, right: 16.0}
+                                padding: Inset { left: 16.0, right: 16.0 }
                                 flow: Right
                                 spacing: 16.0
-                                align: {y: 0.5}
+                                align: Align { y: 0.5 }
                                 show_bg: true
                                 draw_bg.color: #1A1B26
 
