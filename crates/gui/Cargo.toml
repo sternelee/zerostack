@@ -1,0 +1,10 @@
+[package]
+name = "zerostack-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Makepad GUI frontend for zerostack"
+
+[dependencies]
+zerostack-core = { path = "../core" }
+makepad-widgets = "1.0"

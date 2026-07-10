@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/extension-api", "crates/core", "tests/extensions/test-echo", "tests/extensions/pi-simplify"]
+members = [".", "crates/extension-api", "crates/core", "crates/gui", "tests/extensions/test-echo", "tests/extensions/pi-simplify"]
 default-members = [".", "crates/extension-api"]
 resolver = "3"
 

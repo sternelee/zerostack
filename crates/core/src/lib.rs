@@ -6,6 +6,7 @@ pub mod cli;
 pub mod config;
 pub mod context;
 pub mod docs;
+pub mod engine;
 pub mod event;
 pub mod events;
 #[cfg(feature = "extensions")]
