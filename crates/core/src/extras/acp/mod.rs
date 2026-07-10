@@ -473,7 +473,7 @@ fn build_acp_permission(state: &AcpState) -> (Option<PermCheck>, Option<AskSende
     (Some(perm), Some(ask_tx))
 }
 
-pub(crate) fn resolve_acp_mode(cli: &Cli, cfg: &Config) -> SecurityMode {
+pub fn resolve_acp_mode(cli: &Cli, cfg: &Config) -> SecurityMode {
     if cli.dangerously_skip_permissions {
         SecurityMode::Standard
     } else if cli.yolo || cfg.yolo.unwrap_or(false) {

@@ -38,7 +38,7 @@ with the full picture. Keep the document under ~300 lines
 // Public API (uses global asked_path)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn record_asked_dir(dir: &Path) -> anyhow::Result<()> {
+pub fn record_asked_dir(dir: &Path) -> anyhow::Result<()> {
     record_asked_dir_with_path(dir, &dirs_asked_path())
 }
 
@@ -46,7 +46,7 @@ pub fn should_ask(dir: &Path) -> bool {
     should_ask_with_path(dir, &dirs_asked_path())
 }
 
-pub(crate) fn should_ask_with_path(dir: &Path, asked_path: &Path) -> bool {
+pub fn should_ask_with_path(dir: &Path, asked_path: &Path) -> bool {
     let arch_path = dir.join("ARCHITECTURE.md");
     !arch_path.exists() && !has_been_asked_with_path(dir, asked_path)
 }
@@ -85,7 +85,7 @@ pub fn ask_and_create(dir: &Path) -> anyhow::Result<bool> {
 // Inner functions with explicit asked_path (testable)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn has_been_asked_with_path(dir: &Path, asked_path: &Path) -> bool {
+pub fn has_been_asked_with_path(dir: &Path, asked_path: &Path) -> bool {
     let canonical = dir.canonicalize().ok();
     let target = canonical.as_deref().unwrap_or(dir);
     if !asked_path.exists() {
@@ -102,7 +102,7 @@ pub(crate) fn has_been_asked_with_path(dir: &Path, asked_path: &Path) -> bool {
     false
 }
 
-pub(crate) fn record_asked_dir_with_path(dir: &Path, asked_path: &Path) -> anyhow::Result<()> {
+pub fn record_asked_dir_with_path(dir: &Path, asked_path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = asked_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -122,7 +122,7 @@ pub(crate) fn record_asked_dir_with_path(dir: &Path, asked_path: &Path) -> anyho
     Ok(())
 }
 
-pub(crate) fn create_architecture_template(dir: &Path) -> anyhow::Result<()> {
+pub fn create_architecture_template(dir: &Path) -> anyhow::Result<()> {
     let path = dir.join("ARCHITECTURE.md");
     if path.exists() {
         return Ok(());

@@ -60,7 +60,7 @@ fn build_explore_agent_inner<M: CompletionModel + 'static>(
     builder.build()
 }
 
-pub(crate) async fn build_explore_agent(
+pub async fn build_explore_agent(
     model: AnyModel,
     max_turns: usize,
     cfg: &crate::config::Config,

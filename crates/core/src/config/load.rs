@@ -34,7 +34,7 @@ const CONFIG_CANDIDATES: [&str; 4] = ["config.toml", "config.yaml", "config.yml"
 
 /// Pick the first existing candidate in `dir`, falling back to the preferred
 /// `config.toml` path when none exist (so a fresh install seeds a TOML file).
-pub(crate) fn pick_existing(dir: &Path) -> PathBuf {
+pub fn pick_existing(dir: &Path) -> PathBuf {
     for name in CONFIG_CANDIDATES {
         let p = dir.join(name);
         if p.exists() {

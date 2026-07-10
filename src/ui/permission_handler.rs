@@ -1,11 +1,11 @@
 use crossterm::style::Color;
 use tokio::sync::mpsc;
 
-use crate::cli::Cli;
 use crate::event::UserEvent;
 use crate::session::Session;
 use crate::ui::renderer::Renderer;
 use crate::ui::utils::suggest_pattern;
+use zerostack_core::cli::Cli;
 
 use super::C_PERM;
 

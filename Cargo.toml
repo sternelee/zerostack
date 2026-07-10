@@ -45,6 +45,7 @@ advisor = []
 extensions = ["dep:wasmtime", "dep:wasmtime-wasi", "zerostack-extension-api"]
 
 [dependencies]
+zerostack-core = { path = "crates/core" }
 rig = { version = "0.39", features = ["rmcp"] }
 rmcp = { version = "2.0", optional = true, default-features = false, features = [
     "client",

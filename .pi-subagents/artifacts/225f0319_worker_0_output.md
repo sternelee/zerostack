@@ -1,0 +1,1 @@
+Now extract `format_tool_call_summary` to core. Let me read the full function

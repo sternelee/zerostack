@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
-    use crate::cli::Cli;
     use crate::config::Config;
     use crate::extras::acp::config::AcpServerConfig;
     use crate::extras::acp::resolve_acp_mode;
     use crate::permission::SecurityMode;
+    use zerostack_core::cli::Cli;
 
     #[test]
     fn test_acp_config_tcp_deserialization() {

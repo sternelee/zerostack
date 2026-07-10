@@ -9691,6 +9691,44 @@ dependencies = [
  "uuid",
  "wasmtime",
  "wasmtime-wasi",
+ "zerostack-core",
+ "zerostack-extension-api",
+]
+
+[[package]]
+name = "zerostack-core"
+version = "1.6.2"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "blocking",
+ "chrono",
+ "clap",
+ "compact_str",
+ "dirs",
+ "futures",
+ "http 1.4.2",
+ "ignore",
+ "include_dir",
+ "mimalloc",
+ "pulldown-cmark",
+ "regex",
+ "reqwest 0.13.4",
+ "rig",
+ "rmcp 2.2.0",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "smallvec",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-width",
+ "uuid",
+ "wasmtime",
+ "wasmtime-wasi",
  "zerostack-extension-api",
 ]
 

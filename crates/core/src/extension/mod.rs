@@ -15,8 +15,8 @@
 
 mod host;
 mod loader;
-pub(crate) mod manager;
-pub(crate) mod registry;
+pub mod manager;
+pub mod registry;
 mod wrapper;
 
 #[cfg(test)]

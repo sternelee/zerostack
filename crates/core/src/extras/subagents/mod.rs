@@ -5,11 +5,11 @@ use tokio::sync::mpsc;
 use crate::event::AgentEvent;
 use crate::provider::AnyClient;
 
-pub(crate) mod builder;
-pub(crate) mod prompt;
-pub(crate) mod task_tool;
+pub mod builder;
+pub mod prompt;
+pub mod task_tool;
 
-pub(crate) struct SubagentConfig {
+pub struct SubagentConfig {
     pub client: AnyClient,
     pub model_name: String,
     pub max_turns: usize,
@@ -22,17 +22,17 @@ static CONFIG: Mutex<Option<SubagentConfig>> = Mutex::new(None);
 
 static SUBAGENT_EVENT_TX: Mutex<Option<mpsc::Sender<AgentEvent>>> = Mutex::new(None);
 
-pub(crate) fn set_subagent_event_tx(tx: mpsc::Sender<AgentEvent>) {
+pub fn set_subagent_event_tx(tx: mpsc::Sender<AgentEvent>) {
     let mut guard = SUBAGENT_EVENT_TX.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(tx);
 }
 
-pub(crate) fn clone_subagent_event_tx() -> Option<mpsc::Sender<AgentEvent>> {
+pub fn clone_subagent_event_tx() -> Option<mpsc::Sender<AgentEvent>> {
     let guard = SUBAGENT_EVENT_TX.lock().unwrap_or_else(|e| e.into_inner());
     guard.clone()
 }
 
-pub(crate) fn with_config<F, R>(f: F) -> R
+pub fn with_config<F, R>(f: F) -> R
 where
     F: FnOnce(&SubagentConfig) -> R,
 {

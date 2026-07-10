@@ -28,4 +28,4 @@ pub mod multimodal;
 
 pub mod status_signals;
 
-pub(crate) mod truncate;
+pub mod truncate;

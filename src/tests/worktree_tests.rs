@@ -2,9 +2,9 @@
 mod tests {
     use std::path::PathBuf;
 
-    use crate::cli::Cli;
     use crate::config::Config;
     use crate::extras::git_worktree::*;
+    use zerostack_core::cli::Cli;
 
     #[test]
     fn test_worktree_info_clone() {

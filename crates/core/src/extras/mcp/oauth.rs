@@ -25,7 +25,7 @@ fn oauth_dir() -> PathBuf {
 }
 
 /// Sanitize a server name into a single safe filename component.
-pub(crate) fn token_filename(server_name: &str) -> String {
+pub fn token_filename(server_name: &str) -> String {
     let sanitized: String = server_name
         .chars()
         .map(|c| {
@@ -290,7 +290,7 @@ fn read_request_line(stream: &mut std::net::TcpStream) -> anyhow::Result<String>
 }
 
 /// Parse `GET /callback?code=...&state=... HTTP/1.1` and return (code, state).
-pub(crate) fn parse_callback(request_line: &str) -> anyhow::Result<(String, String)> {
+pub fn parse_callback(request_line: &str) -> anyhow::Result<(String, String)> {
     let target = request_line
         .split_whitespace()
         .nth(1)
@@ -323,7 +323,7 @@ pub(crate) fn parse_callback(request_line: &str) -> anyhow::Result<(String, Stri
 }
 
 /// Minimal percent-decoding for query values (handles `%XX` and `+`).
-pub(crate) fn percent_decode(s: &str) -> String {
+pub fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

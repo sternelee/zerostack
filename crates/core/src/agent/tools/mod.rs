@@ -1,15 +1,15 @@
-pub(crate) mod bash;
-pub(crate) mod crc;
-pub(crate) mod edit;
-pub(crate) mod find_files;
-pub(crate) mod grep;
-pub(crate) mod list_dir;
-pub(crate) mod normalize;
-pub(crate) mod read;
-pub(crate) mod todo;
-pub(crate) mod write;
+pub mod bash;
+pub mod crc;
+pub mod edit;
+pub mod find_files;
+pub mod grep;
+pub mod list_dir;
+pub mod normalize;
+pub mod read;
+pub mod todo;
+pub mod write;
 
-pub(crate) use normalize::{
+pub use normalize::{
     levenshtein_similarity, normalize_unicode, normalize_whitespace, strip_comment_prefixes,
 };
 
@@ -19,23 +19,23 @@ use crate::config::types::EditSystem;
 
 static EDIT_SYSTEM: Mutex<EditSystem> = Mutex::new(EditSystem::Similarity);
 
-pub(crate) fn set_edit_system(es: EditSystem) {
+pub fn set_edit_system(es: EditSystem) {
     *EDIT_SYSTEM.lock().unwrap_or_else(|e| e.into_inner()) = es;
 }
 
-pub(crate) fn edit_system() -> EditSystem {
+pub fn edit_system() -> EditSystem {
     *EDIT_SYSTEM.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 static DENY_REPEATED_READS: Mutex<bool> = Mutex::new(true);
 
-pub(crate) fn set_deny_repeated_reads(v: bool) {
+pub fn set_deny_repeated_reads(v: bool) {
     *DENY_REPEATED_READS
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = v;
 }
 
-pub(crate) fn deny_repeated_reads() -> bool {
+pub fn deny_repeated_reads() -> bool {
     *DENY_REPEATED_READS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -43,7 +43,7 @@ pub(crate) fn deny_repeated_reads() -> bool {
 
 static READ_TRACKER: Mutex<Vec<(String, usize, usize)>> = Mutex::new(Vec::new());
 
-pub(crate) fn track_read(path: &str, offset: usize, limit: usize) -> Option<String> {
+pub fn track_read(path: &str, offset: usize, limit: usize) -> Option<String> {
     if !deny_repeated_reads() {
         return None;
     }
@@ -62,7 +62,7 @@ pub(crate) fn track_read(path: &str, offset: usize, limit: usize) -> Option<Stri
     }
 }
 
-pub(crate) fn untrack_read_path(path: &str) {
+pub fn untrack_read_path(path: &str) {
     let mut tracker = READ_TRACKER.lock().unwrap_or_else(|e| e.into_inner());
     tracker.retain(|(p, _, _)| p != path);
 }
@@ -131,13 +131,13 @@ pub struct EditArgs {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct EditBlock {
+pub struct EditBlock {
     pub search: String,
     pub replace: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct EditOp {
+pub struct EditOp {
     pub line: Option<String>,
     pub lines: Option<String>,
     pub text: String,

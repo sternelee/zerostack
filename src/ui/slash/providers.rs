@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use crate::cli::Cli;
 use crate::config::{self, Config};
 use crate::provider::{AnyClient, ModelEntry, list_models_manual};
 use crate::ui::slash::{SlashCtx, write_error, write_ok, write_result};
+use zerostack_core::cli::Cli;
 
 pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
     match parts[0] {

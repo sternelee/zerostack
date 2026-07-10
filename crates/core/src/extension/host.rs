@@ -14,7 +14,7 @@ use crate::extension::{ExtensionId, ExtensionMeta, RegisteredCommand, Registered
 
 // Generate host bindings from the WIT world.
 wasmtime::component::bindgen!({
-    path: "crates/extension-api/wit/extension-v0.2.0.wit",
+    path: "../extension-api/wit/extension-v0.2.0.wit",
     world: "extension-world",
 });
 
@@ -30,7 +30,7 @@ const NAMESPACE_SEPARATOR: &str = "__";
 
 // ── ExtensionHost ──────────────────────────────────────────────
 
-pub(crate) struct ExtensionHost {
+pub struct ExtensionHost {
     engine: Engine,
     instances: HashMap<ExtensionId, LoadedExtension>,
 }
@@ -41,7 +41,7 @@ struct LoadedExtension {
     meta: ExtensionMeta,
 }
 
-pub(crate) struct ExtGuestState {
+pub struct ExtGuestState {
     pub extension_id: ExtensionId,
     pub tools: Vec<RegisteredTool>,
     pub commands: HashMap<String, RegisteredCommand>,
@@ -85,7 +85,7 @@ fn sanitize_id_for_namespace(id: &str) -> String {
 
 /// Build the namespaced tool name: `{extension_id}__{tool_name}`.
 /// Bare names (no `__`) are also resolved as a fallback when unambiguous.
-pub(crate) fn namespaced_tool_name(ext_id: &str, tool_name: &str) -> String {
+pub fn namespaced_tool_name(ext_id: &str, tool_name: &str) -> String {
     format!("{ext_id}{NAMESPACE_SEPARATOR}{tool_name}")
 }
 

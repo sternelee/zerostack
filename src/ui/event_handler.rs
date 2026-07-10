@@ -3,10 +3,8 @@ use crossterm::style::Color;
 use tokio::sync::mpsc;
 
 use crate::agent::tools::todo::TODO_LIST;
-use crate::cli::Cli;
 use crate::config::{Config, ResolvedShowToolDetails};
 use crate::context::ContextFiles;
-use crate::event::AgentEvent;
 #[cfg(feature = "mcp")]
 use crate::extras::mcp::McpClientManager;
 use crate::extras::status_signals::StatusSignals;
@@ -19,6 +17,8 @@ use crate::session::{MessageRole, Session};
 use crate::ui::events::sanitize_output;
 use crate::ui::renderer::Renderer;
 use crate::ui::slash::handle_compress;
+use zerostack_core::cli::Cli;
+use zerostack_core::event::AgentEvent;
 
 use super::{C_AGENT, C_ERROR, C_TOOL, apply_current_prompt_mode};
 

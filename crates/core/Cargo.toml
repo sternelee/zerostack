@@ -31,6 +31,7 @@ extensions = ["dep:wasmtime", "dep:wasmtime-wasi", "zerostack-extension-api"]
 
 [dependencies]
 rig = { version = "0.39", features = ["rmcp"] }
+clap = { version = "4", features = ["derive", "env"] }
 rmcp = { version = "2.0", optional = true, default-features = false, features = [
     "client",
     "transport-child-process",

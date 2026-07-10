@@ -1,7 +1,7 @@
 /// Truncate `s` to at most `max` bytes on a UTF-8 char boundary, appending
 /// `marker` so callers know content was capped. Plain `String::truncate` panics
 /// mid-character (e.g. on CJK); this walks back to the nearest boundary.
-pub(crate) fn truncate_cjk(s: &str, max: usize, marker: &str) -> String {
+pub fn truncate_cjk(s: &str, max: usize, marker: &str) -> String {
     if s.len() <= max {
         return s.to_string();
     }
@@ -18,7 +18,7 @@ pub(crate) fn truncate_cjk(s: &str, max: usize, marker: &str) -> String {
 /// `total_lines` is the original line count. If `total_lines <= max`, `head`
 /// equals `s` (no truncation needed). Callers should append a tool-specific
 /// recovery hint when truncation occurred.
-pub(crate) fn head_lines(s: &str, max: usize) -> (String, usize) {
+pub fn head_lines(s: &str, max: usize) -> (String, usize) {
     let total = s.lines().count();
     if total <= max {
         return (s.to_string(), total);

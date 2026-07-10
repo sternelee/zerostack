@@ -184,7 +184,7 @@ editing in a known location, grepping for a literal you will act on immediately.
 /// Combine per-task outputs into a single Markdown string, ordered by the
 /// original prompt index. Multiple tasks get `## Task N:` headings; a single
 /// task is emitted as-is.
-pub(crate) fn combine_results(outputs: &[(usize, String, String)]) -> String {
+pub fn combine_results(outputs: &[(usize, String, String)]) -> String {
     let mut combined = String::new();
     for (idx, (_, prompt_text, response)) in outputs.iter().enumerate() {
         if outputs.len() > 1 {

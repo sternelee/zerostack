@@ -73,7 +73,7 @@ pub fn parse_provider(name: &str) -> Option<ProviderKind> {
 /// (model, Option<(input_cost, output_cost)>), or None if `provider` is unknown
 /// and has no configured default. Used both by `/provider` and at startup so a
 /// chosen provider never keeps an id that is invalid on it.
-pub(crate) fn default_model_for_provider(
+pub fn default_model_for_provider(
     provider: &str,
     cfg: &Config,
 ) -> Option<(String, Option<(f64, f64)>)> {
@@ -169,7 +169,7 @@ pub enum AnyClient {
 /// OpenRouter namespaces Claude under `anthropic/`, optionally with a leading
 /// `~` marking a floating "-latest" alias (e.g. `~anthropic/claude-sonnet-latest`).
 /// The `~` is part of the real slug, so strip it before matching.
-pub(crate) fn openrouter_anthropic_routing(model_id: &str) -> Option<serde_json::Value> {
+pub fn openrouter_anthropic_routing(model_id: &str) -> Option<serde_json::Value> {
     let slug = model_id.strip_prefix('~').unwrap_or(model_id);
     slug.starts_with("anthropic/").then(|| {
         serde_json::json!({
@@ -182,7 +182,7 @@ pub(crate) fn openrouter_anthropic_routing(model_id: &str) -> Option<serde_json:
 /// params (e.g. OpenRouter's `provider.order`). Top-level keys from `extra_body`
 /// win on collision. Returns `None` when both are absent so callers can avoid an
 /// empty `additional_params` call.
-pub(crate) fn merge_extra_body(
+pub fn merge_extra_body(
     base: Option<serde_json::Value>,
     extra: Option<serde_json::Value>,
 ) -> Option<serde_json::Value> {
@@ -524,7 +524,7 @@ where
     Ok(response)
 }
 
-pub(crate) fn serialize_conversation(messages: &[SessionMessage]) -> String {
+pub fn serialize_conversation(messages: &[SessionMessage]) -> String {
     let mut result = String::new();
     for msg in messages {
         let role_tag = match msg.role {
@@ -685,7 +685,7 @@ impl AnyAgent {
 /// Expands a value that is exactly "${VAR}" to the environment variable's value;
 /// any other format is returned as-is. Only whole-string `${VAR}` is supported
 /// (the common, safe case) rather than arbitrary interpolation.
-pub(crate) fn expand_env(value: &str) -> anyhow::Result<String> {
+pub fn expand_env(value: &str) -> anyhow::Result<String> {
     if let Some(var) = value.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
         std::env::var(var).map_err(|_| {
             anyhow::anyhow!(
@@ -704,7 +704,7 @@ pub(crate) fn expand_env(value: &str) -> anyhow::Result<String> {
 /// When the provider is not custom (`custom == None`) and TLS is not disabled,
 /// the resulting client is equivalent to `reqwest::Client::default()`, so the
 /// behavior of existing providers is unchanged.
-pub(crate) fn build_http_client(
+pub fn build_http_client(
     provider_name: &str,
     danger_accept_invalid_certs: bool,
     custom: Option<&CustomProviderConfig>,
@@ -761,7 +761,7 @@ fn is_localhost(url: Option<&str>) -> bool {
 /// if `api_style` is set explicitly, honor it; otherwise default to Completions
 /// when a base_url is present (i.e. a compatible gateway) and Responses when it
 /// is absent (i.e. real api.openai.com).
-pub(crate) fn resolve_api_style(
+pub fn resolve_api_style(
     base_url: Option<&str>,
     custom: Option<&CustomProviderConfig>,
 ) -> ApiStyle {

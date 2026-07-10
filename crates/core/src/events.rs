@@ -5,8 +5,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 pub enum CoreEvent {
     // === Streaming output ===
-    StreamingDelta { text: CompactString },
-    ReasoningDelta { text: CompactString },
+    StreamingDelta {
+        text: CompactString,
+    },
+    ReasoningDelta {
+        text: CompactString,
+    },
     CompletionCall {
         input_tokens: u64,
         output_tokens: u64,
@@ -74,24 +78,42 @@ pub enum CoreEvent {
 #[derive(Debug, Clone)]
 pub enum UserAction {
     // === Messages ===
-    SendMessage { text: CompactString },
+    SendMessage {
+        text: CompactString,
+    },
     CancelStream,
 
     // === Permissions ===
-    PermissionResponse { id: u64, allow: bool },
+    PermissionResponse {
+        id: u64,
+        allow: bool,
+    },
 
     // === Sessions ===
-    CreateSession { name: Option<CompactString> },
-    SwitchSession { session_id: CompactString },
-    DeleteSession { session_id: CompactString },
-    RenameSession { session_id: CompactString, name: CompactString },
+    CreateSession {
+        name: Option<CompactString>,
+    },
+    SwitchSession {
+        session_id: CompactString,
+    },
+    DeleteSession {
+        session_id: CompactString,
+    },
+    RenameSession {
+        session_id: CompactString,
+        name: CompactString,
+    },
 
     // === Commands ===
-    RunCommand { command: CompactString },
+    RunCommand {
+        command: CompactString,
+    },
 
     // === Config ===
     ReloadConfig,
-    SetModel { model: CompactString },
+    SetModel {
+        model: CompactString,
+    },
 
     // === Lifecycle ===
     Quit,

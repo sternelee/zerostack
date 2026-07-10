@@ -21,11 +21,10 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEv
 use crossterm::style::Color;
 use tokio::sync::mpsc;
 
-use crate::cli::Cli;
 use crate::config;
 use crate::config::Config;
 use crate::context::ContextFiles;
-use crate::event::{AgentEvent, UserEvent};
+use crate::event::UserEvent;
 #[cfg(feature = "mcp")]
 use crate::extras::mcp::McpClientManager;
 use crate::extras::status_signals::StatusSignals;
@@ -43,6 +42,8 @@ use crate::ui::pickers::rewind::RewindOutcome;
 use crate::ui::renderer::{Renderer, copy_to_clipboard};
 use crate::ui::slash::{apply_prompt_model, handle_compress, handle_slash};
 use crate::ui::terminal::TerminalGuard;
+use zerostack_core::cli::Cli;
+use zerostack_core::event::AgentEvent;
 
 use self::utils::{parse_color, to_ansi_256};
 
@@ -767,7 +768,22 @@ pub async fn run_interactive(
     renderer.set_chat_margin(cfg.resolve_chat_left_margin());
     if let Some(ref theme_name) = context.current_theme_name {
         if let Some(content) = context.themes.get(theme_name.as_str()) {
-            crate::context::themes::apply(content, &mut renderer);
+            if let Ok(colors) =
+                serde_json::from_str::<zerostack_core::config::ColorsConfig>(content)
+            {
+                let chat_bg = colors.chat_background.as_deref().and_then(parse_color);
+                let input_bg = colors.input_background.as_deref().and_then(parse_color);
+                let status_bg = colors.status_background.as_deref().and_then(parse_color);
+                if matches!(colors.scheme_type, zerostack_core::config::SchemeType::Ansi) {
+                    renderer.set_background_colors(
+                        chat_bg.map(to_ansi_256),
+                        input_bg.map(to_ansi_256),
+                        status_bg.map(to_ansi_256),
+                    );
+                } else {
+                    renderer.set_background_colors(chat_bg, input_bg, status_bg);
+                }
+            }
         }
     } else if let Some(colors) = &cfg.colors {
         let chat_bg = colors.chat_background.as_deref().and_then(parse_color);

@@ -13,7 +13,6 @@ pub(crate) use providers::warm_model_cache;
 
 use smallvec::SmallVec;
 
-use crate::cli::Cli;
 use crate::config::Config;
 use crate::context::ContextFiles;
 use crate::permission::ask::AskSender;
@@ -24,6 +23,7 @@ use crate::session::{MessageRole, Session};
 use crate::ui::events::render_session;
 use crate::ui::input::InputEditor;
 use crate::ui::renderer::Renderer;
+use zerostack_core::cli::Cli;
 
 pub(crate) const C_AGENT: crossterm::style::Color = crossterm::style::Color::White;
 pub(crate) const C_RESULT: crossterm::style::Color = crossterm::style::Color::DarkGrey;

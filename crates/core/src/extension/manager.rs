@@ -8,7 +8,7 @@ use crate::extension::{ExtensionMeta, RegisteredTool};
 
 /// Top-level extension manager. Owns the ExtensionHost and coordinates
 /// extension discovery, loading, queries, and teardown.
-pub(crate) struct ExtensionManager {
+pub struct ExtensionManager {
     host: ExtensionHost,
     /// Metadata for loaded extensions by id.
     extensions: Vec<ExtensionMeta>,

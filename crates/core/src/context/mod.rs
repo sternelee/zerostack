@@ -10,7 +10,7 @@ pub mod prompts;
 pub mod skills;
 pub mod themes;
 
-pub(crate) fn load_embedded_files(embedded: &Dir, ext: &str) -> Vec<(String, String)> {
+pub fn load_embedded_files(embedded: &Dir, ext: &str) -> Vec<(String, String)> {
     let mut results = Vec::new();
     for file in embedded.files() {
         if file.path().extension().is_some_and(|e| e == ext)
@@ -23,7 +23,7 @@ pub(crate) fn load_embedded_files(embedded: &Dir, ext: &str) -> Vec<(String, Str
     results
 }
 
-pub(crate) fn load_dir_files(dir: &Path, ext: &str) -> Vec<(String, String)> {
+pub fn load_dir_files(dir: &Path, ext: &str) -> Vec<(String, String)> {
     let mut results = Vec::new();
     if dir.exists()
         && let Ok(entries) = std::fs::read_dir(dir)
@@ -41,7 +41,7 @@ pub(crate) fn load_dir_files(dir: &Path, ext: &str) -> Vec<(String, String)> {
     results
 }
 
-pub(crate) fn copy_embedded_to(embedded: &Dir, dest: &Path) -> anyhow::Result<()> {
+pub fn copy_embedded_to(embedded: &Dir, dest: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dest)?;
     for file in embedded.files() {
         if let Some(name) = file.path().file_name().and_then(|s| s.to_str()) {
@@ -223,6 +223,6 @@ fn walk_context_files() -> (Option<String>, Option<String>) {
 }
 
 #[cfg(feature = "archmd")]
-pub(crate) fn load_architecture() -> Option<String> {
+pub fn load_architecture() -> Option<String> {
     walk_context_files().1
 }

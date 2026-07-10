@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 
 use crate::provider::ModelEntry;
 
-const CATALOG_JSON: &str = include_str!("../data/models.json");
+const CATALOG_JSON: &str = include_str!("../../../data/models.json");
 
 #[derive(serde::Deserialize)]
 struct RawModel {

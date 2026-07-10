@@ -231,7 +231,7 @@ async fn run_advisor_completion(
     }
 }
 
-pub(crate) fn format_conversation(msgs: &[SessionMessage], kilobytes_limit: u32) -> String {
+pub fn format_conversation(msgs: &[SessionMessage], kilobytes_limit: u32) -> String {
     let per_side = (kilobytes_limit as usize * 1024) / 2;
 
     fn format_line(msg: &SessionMessage) -> String {

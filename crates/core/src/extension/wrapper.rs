@@ -12,7 +12,7 @@ use crate::extension::manager::ExtensionManager;
 
 /// Wraps a extension-registered tool so it can be used as a `rig::tool::ToolDyn`
 /// in the agent builder.
-pub(crate) struct ExtensionToolWrapper {
+pub struct ExtensionToolWrapper {
     definition: RegisteredTool,
     manager: Arc<Mutex<ExtensionManager>>,
 }

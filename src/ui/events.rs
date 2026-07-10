@@ -2,12 +2,12 @@ use chrono::Datelike;
 use compact_str::CompactString;
 use crossterm::style::Color;
 
-use crate::cli::Cli;
 use crate::config::{Config, ResolvedShowToolDetails};
 use crate::context::ContextFiles;
 use crate::session::{MessageRole, Session};
 use crate::ui::markdown;
 use crate::ui::renderer::Renderer;
+use zerostack_core::cli::Cli;
 
 pub fn format_time(rfc3339: &str) -> CompactString {
     let dt = chrono::DateTime::parse_from_rfc3339(rfc3339).ok();

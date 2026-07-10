@@ -1,25 +1,27 @@
 #![deny(unsafe_code)]
 
-mod agent;
-mod auth;
-mod cli;
-mod config;
-mod context;
-mod docs;
 mod event;
-#[cfg(feature = "extensions")]
-mod extension;
-mod extras;
-mod fs;
-mod logging;
-mod models_catalog;
-mod permission;
-mod pricing;
-mod provider;
-mod retry;
-mod sandbox;
-mod session;
 mod ui;
+
+use zcore::agent;
+use zcore::auth;
+use zcore::cli;
+use zcore::config;
+use zcore::context;
+use zcore::docs;
+#[cfg(feature = "extensions")]
+use zcore::extension;
+use zcore::extras;
+use zcore::fs;
+use zcore::logging;
+use zcore::models_catalog;
+use zcore::permission;
+use zcore::pricing;
+use zcore::provider;
+use zcore::retry;
+use zcore::sandbox;
+use zcore::session;
+use zerostack_core as zcore;
 
 #[cfg(test)]
 mod tests;

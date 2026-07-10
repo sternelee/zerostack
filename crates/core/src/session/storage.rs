@@ -32,7 +32,7 @@ pub fn data_dir() -> PathBuf {
     base.join("zerostack")
 }
 
-pub(crate) fn config_path() -> PathBuf {
+pub fn config_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("ZS_CONFIG_DIR") {
         return PathBuf::from(dir);
     }

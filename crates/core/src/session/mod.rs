@@ -321,7 +321,7 @@ impl Session {
     pub fn add_tool_call(&mut self, name: &str, args: &serde_json::Value) {
         self.add_message(
             MessageRole::ToolCall,
-            &crate::ui::utils::format_tool_call_summary(name, args),
+            &crate::utils::format_tool_call_summary(name, args),
         );
     }
 
@@ -348,7 +348,7 @@ impl Session {
     pub fn add_subagent_tool_call(&mut self, name: &str, args: &serde_json::Value) {
         self.add_message(
             MessageRole::SubagentToolCall,
-            &crate::ui::utils::format_tool_call_summary(name, args),
+            &crate::utils::format_tool_call_summary(name, args),
         );
     }
 

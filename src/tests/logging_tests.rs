@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use crate::cli::Cli;
 use crate::logging;
+use zerostack_core::cli::Cli;
 
 use clap::Parser;
 

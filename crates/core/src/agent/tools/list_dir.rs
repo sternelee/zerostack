@@ -8,7 +8,7 @@ use crate::agent::tools::{
     AskSender, ListDirArgs, PermCheck, ToolError, check_perm_path, is_skip_dir,
 };
 
-pub(crate) fn format_size(bytes: u64) -> String {
+pub fn format_size(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
     let mut size = bytes as f64;
     let mut unit_idx = 0;
@@ -23,7 +23,7 @@ pub(crate) fn format_size(bytes: u64) -> String {
     }
 }
 
-pub(crate) fn count_dir_entries(path: &Path) -> u64 {
+pub fn count_dir_entries(path: &Path) -> u64 {
     std::fs::read_dir(path)
         .map(|rd| rd.count() as u64)
         .unwrap_or(0)
