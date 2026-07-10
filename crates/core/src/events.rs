@@ -59,19 +59,42 @@ pub enum CoreEvent {
     SessionChanged {
         session_id: CompactString,
     },
+    /// The full chat history of the current session, so the frontend can
+    /// re-render when switching sessions or after /clear, /undo, etc.
+    SessionHistory {
+        messages: Vec<ChatMessage>,
+    },
 
     // === Status ===
     StatusUpdate {
         model: CompactString,
+        provider: CompactString,
         tokens_used: u64,
         mode: String,
     },
+    /// Agent started processing (frontend can show "thinking" indicator).
+    AgentStarted,
+    /// Agent finished (counterpart to AgentStarted).
+    AgentStopped,
     ConfigChanged,
+
+    // === Slash command output ===
+    /// Human-readable output from a slash command (e.g. /help, /sessions).
+    CommandOutput {
+        text: CompactString,
+    },
 
     // === System ===
     Error {
         message: CompactString,
     },
+}
+
+/// A single chat message for history display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String, // "user", "assistant", "system", "tool_call", "tool_result"
+    pub content: CompactString,
 }
 
 /// Actions sent from the frontend to CoreEngine.
@@ -103,17 +126,38 @@ pub enum UserAction {
         session_id: CompactString,
         name: CompactString,
     },
+    ClearSession,
+    UndoLastExchange,
 
     // === Commands ===
     RunCommand {
         command: CompactString,
     },
+    /// Run a slash command (e.g. "/help", "/mode yolo", "/add file.rs").
+    RunSlashCommand {
+        command: CompactString,
+    },
 
-    // === Config ===
+    // === Config / model ===
     ReloadConfig,
     SetModel {
         model: CompactString,
     },
+    SetProvider {
+        provider: CompactString,
+    },
+    SetMode {
+        mode: CompactString,
+    },
+
+    // === Context files ===
+    AddFile {
+        path: CompactString,
+    },
+    DropFile {
+        path: CompactString,
+    },
+    DropAllFiles,
 
     // === Lifecycle ===
     Quit,
