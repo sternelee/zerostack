@@ -36,14 +36,14 @@ impl GuiBridge {
                 .expect("tokio runtime");
 
             rt.block_on(async move {
-                let (mut engine, mut engine_event_rx) = match CoreEngine::build_default(
+                let (mut engine, mut engine_event_rx, mut ask_rx) = match CoreEngine::build_default(
                     m.as_str().into(),
                     p.as_str().into(),
                     SecurityMode::Yolo,
                 )
                 .await
                 {
-                    Ok(pair) => pair,
+                    Ok(triple) => triple,
                     Err(e) => {
                         eprintln!("Failed to build CoreEngine: {e}");
                         let _ = gui_tx.send(CoreEvent::Error {
@@ -54,6 +54,16 @@ impl GuiBridge {
                 };
 
                 loop {
+                    // Check for permission requests (non-blocking)
+                    if let Some(ref mut rx) = ask_rx {
+                        while let Ok(request) = rx.try_recv() {
+                            engine.handle_ask_request(request);
+                            // Forward any generated events
+                            // (handle_ask_request sends directly via event_tx,
+                            //  so events arrive via engine_event_rx)
+                        }
+                    }
+
                     tokio::select! {
                         action = action_rx.recv() => {
                             let Some(action) = action else { break };
@@ -68,8 +78,31 @@ impl GuiBridge {
                         }
                         event = engine_event_rx.recv() => {
                             match event {
-                                Some(event) => { let _ = gui_tx.send(event); }
+                                Some(event) => {
+                                    // Save session on message complete
+                                    if matches!(event, CoreEvent::MessageComplete { .. }) {
+                                        engine.save_current_session();
+                                    }
+                                    let _ = gui_tx.send(event);
+                                }
                                 None => break,
+                            }
+                        }
+                        // Permission request from agent tools
+                        ask = async {
+                            match &mut ask_rx {
+                                Some(rx) => rx.recv().await,
+                                None => std::future::pending().await,
+                            }
+                        } => {
+                            if let Some(request) = ask {
+                                engine.handle_ask_request(request);
+                                // PermissionNeeded event goes via event_tx -> engine_event_rx
+                                // which is handled in the next select iteration.
+                                // But we need to forward it immediately:
+                                // Actually handle_ask_request sends via event_tx, and
+                                // engine_event_rx.recv() will pick it up. But we're
+                                // in a select, so it'll arrive next iteration.
                             }
                         }
                     }
@@ -264,10 +297,19 @@ script_mod! {
                             spacing: 0.0
                             padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
 
-                            chat_text := Markdown {
-                                width: Fill, height: Fit
-                                selectable: true
-                                body: "# Welcome to zerostack GUI\n\nType a message below to get started.\n\n**Commands:** `/help`, `/mode yolo`, `/model`, `/provider`, `/add`, `/clear`, `/undo`\n\nPress **Enter** to send, **Shift+Enter** for newline."
+                            chat_scroll := View {
+                                width: Fill, height: Fill
+                                flow: Down
+
+                                chat_text := Markdown {
+                                    width: Fill, height: Fit
+                                    selectable: true
+                                    body: "# Welcome to zerostack GUI\n\nType a message below to get started.\n\n**Commands:** `/help`, `/mode yolo`, `/model`, `/provider`, `/add`, `/clear`, `/undo`\n\nPress **Enter** to send, **Shift+Enter** for newline."
+                                }
+
+                                scroll_bars: ScrollBars {
+                                    scroll_bar_y.drag_scrolling: true
+                                }
                             }
                         }
 
@@ -368,6 +410,8 @@ pub struct App {
     current_session_id: String,
     #[rust]
     is_running: bool,
+    #[rust]
+    pending_permission: Option<(u64, String, String)>, // (id, tool_name, args)
 }
 
 impl App {
@@ -393,6 +437,36 @@ impl App {
 
         // Check for slash commands
         if text.starts_with('/') {
+            // Handle permission responses
+            if text.trim() == "/allow" || text.starts_with("/allow ") {
+                if let Some((id, _, _)) = self.pending_permission.take() {
+                    Self::ensure_bridge();
+                    if let Ok(guard) = BRIDGE.lock() {
+                        if let Some(ref bridge) = *guard {
+                            bridge.send_action(UserAction::PermissionResponse { id, allow: true });
+                        }
+                    }
+                    self.accumulated_text.push_str("✅ Allowed\n\n");
+                    self.redraw_chat(cx);
+                }
+                input.set_text(cx, "");
+                return;
+            }
+            if text.trim() == "/deny" || text.starts_with("/deny ") {
+                if let Some((id, _, _)) = self.pending_permission.take() {
+                    Self::ensure_bridge();
+                    if let Ok(guard) = BRIDGE.lock() {
+                        if let Some(ref bridge) = *guard {
+                            bridge.send_action(UserAction::PermissionResponse { id, allow: false });
+                        }
+                    }
+                    self.accumulated_text.push_str("🚫 Denied\n\n");
+                    self.redraw_chat(cx);
+                }
+                input.set_text(cx, "");
+                return;
+            }
+
             self.accumulated_text
                 .push_str(&format!("```\n{}\n```\n\n", text));
             self.redraw_chat(cx);
@@ -426,7 +500,12 @@ impl App {
     fn redraw_chat(&self, cx: &mut Cx) {
         let chat = self.ui.widget(
             cx,
-            &[live_id!(main_window), live_id!(body), live_id!(chat_text)],
+            &[
+                live_id!(main_window),
+                live_id!(body),
+                live_id!(chat_scroll),
+                live_id!(chat_text),
+            ],
         );
         if !chat.is_empty() {
             chat.set_text(cx, &self.accumulated_text);
@@ -671,6 +750,18 @@ impl App {
                 CoreEvent::CommandOutput { text } => {
                     self.accumulated_text
                         .push_str(&format!("```\n{}\n```\n\n", text));
+                    needs_redraw = true;
+                }
+                CoreEvent::PermissionNeeded {
+                    id,
+                    tool_name,
+                    args,
+                } => {
+                    self.pending_permission = Some((*id, tool_name.to_string(), args.clone()));
+                    self.accumulated_text.push_str(&format!(
+                        "\n\n⚠️ **Permission needed:** `{}`\n```\n{}\n```\n\n*Type `/allow` or `/deny` to respond*\n\n",
+                        tool_name, args
+                    ));
                     needs_redraw = true;
                 }
                 CoreEvent::ConfigChanged => {

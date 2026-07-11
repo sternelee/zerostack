@@ -1,5 +1,6 @@
 use compact_str::CompactString;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 use crate::agent::runner;
 use crate::agent::tools;
@@ -9,7 +10,7 @@ use crate::context::{self, ContextFiles};
 use crate::event::AgentEvent;
 use crate::events::{ChatMessage, CoreEvent, InitialState, SessionInfo, UserAction};
 use crate::permission::SecurityMode;
-use crate::permission::ask::{AskRequest, AskSender};
+use crate::permission::ask::{AskRequest, AskSender, UserDecision};
 use crate::permission::checker::{PermCheck, PermissionChecker};
 use crate::provider::{self, AnyAgent, AnyClient};
 use crate::retry::RetryConfig;
@@ -37,6 +38,12 @@ pub struct CoreEngine {
     current_task: Option<tokio::task::JoinHandle<()>>,
     /// Token usage accumulated across all messages in this engine run.
     tokens_used: u64,
+    /// Receiver for permission ask requests from the agent's tools.
+    ask_rx: Option<mpsc::Receiver<AskRequest>>,
+    /// Pending permission requests awaiting user response, keyed by id.
+    pending_permissions: std::collections::HashMap<u64, oneshot::Sender<UserDecision>>,
+    /// Next permission request id.
+    next_permission_id: u64,
 }
 
 impl CoreEngine {
@@ -45,7 +52,11 @@ impl CoreEngine {
         model: CompactString,
         provider_name: CompactString,
         mode: SecurityMode,
-    ) -> anyhow::Result<(Self, mpsc::UnboundedReceiver<CoreEvent>)> {
+    ) -> anyhow::Result<(
+        Self,
+        mpsc::UnboundedReceiver<CoreEvent>,
+        Option<mpsc::Receiver<AskRequest>>,
+    )> {
         let (cfg, _is_first_startup) = crate::config::load();
         let cli = Cli::default();
         let context = context::load(cli.resolve_no_context_files(&cfg));
@@ -59,7 +70,7 @@ impl CoreEngine {
         tools::set_edit_system(edit_system);
         tools::set_deny_repeated_reads(cfg.deny_repeated_reads.unwrap_or(true));
 
-        let (permission, ask_tx, _ask_rx) = build_permission_checker(&cli, &cfg, mode);
+        let (permission, ask_tx, ask_rx) = build_permission_checker(&cli, &cfg, mode);
 
         let client = provider::create_client(
             provider_name.as_str(),
@@ -96,6 +107,9 @@ impl CoreEngine {
             reasoning_enabled: true,
             current_task: None,
             tokens_used: 0,
+            ask_rx,
+            pending_permissions: std::collections::HashMap::new(),
+            next_permission_id: 0,
         };
 
         // Build the initial agent
@@ -103,7 +117,10 @@ impl CoreEngine {
             return Err(e);
         }
 
-        Ok((engine, event_rx))
+        // Extract ask_rx so the runtime loop can select on it
+        let ask_rx = engine.ask_rx.take();
+
+        Ok((engine, event_rx, ask_rx))
     }
 
     /// Rebuild the agent with the current model/provider/context/permission state.
@@ -405,8 +422,15 @@ impl CoreEngine {
                 }
                 vec![CoreEvent::ConfigChanged, self.emit_status_update()]
             }
-            UserAction::PermissionResponse { id: _, allow: _ } => {
-                // TODO: wire to permission ask channel
+            UserAction::PermissionResponse { id, allow } => {
+                if let Some(reply) = self.pending_permissions.remove(&id) {
+                    let decision = if allow {
+                        UserDecision::AllowOnce
+                    } else {
+                        UserDecision::Deny
+                    };
+                    let _ = reply.send(decision);
+                }
                 vec![]
             }
             UserAction::Quit => {
@@ -864,6 +888,28 @@ impl CoreEngine {
                 }]
             }
         }
+    }
+
+    /// Save the current session to disk.
+    pub fn save_current_session(&self) {
+        if let Some(session) = self.current_session() {
+            let _ = crate::session::storage::save_session(session);
+        }
+    }
+
+    /// Handle an incoming permission ask request from the agent's tools.
+    /// Stores the oneshot reply and emits a PermissionNeeded event.
+    pub fn handle_ask_request(&mut self, request: AskRequest) {
+        let id = self.next_permission_id;
+        self.next_permission_id += 1;
+        let tool_name = request.tool.clone();
+        let args = request.input.clone();
+        self.pending_permissions.insert(id, request.reply);
+        let _ = self.event_tx.send(CoreEvent::PermissionNeeded {
+            id,
+            tool_name,
+            args,
+        });
     }
 
     fn emit_session_list_updated(&self) -> Vec<CoreEvent> {
