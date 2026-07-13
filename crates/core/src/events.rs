@@ -169,6 +169,7 @@ pub struct SessionInfo {
     pub id: CompactString,
     pub name: CompactString,
     pub model: CompactString,
+    pub provider: CompactString,
     pub message_count: usize,
     pub created_at: CompactString,
 }

@@ -172,6 +172,7 @@ impl CoreEngine {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 model: s.model.clone(),
+                provider: s.provider.clone(),
                 message_count: s.messages.len(),
                 created_at: s.created_at.clone(),
             })
@@ -920,6 +921,7 @@ impl CoreEngine {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 model: s.model.clone(),
+                provider: s.provider.clone(),
                 message_count: s.messages.len(),
                 created_at: s.created_at.clone(),
             })
