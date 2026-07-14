@@ -493,7 +493,7 @@ impl CoreEngine {
         let retry_config: RetryConfig = self.config.retry.clone();
 
         // Spawn the agent runner
-        let mut agent_runner = agent.spawn_runner(text.to_string(), history, retry_config);
+        let mut agent_runner = agent.spawn_runner(text.to_string(), history, retry_config).await;
 
         // Signal that the agent has started
         let _ = self.event_tx.send(CoreEvent::AgentStarted);

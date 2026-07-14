@@ -4,6 +4,20 @@ use crate::provider::{AnyAgent, AnyModel, OpenAiAgent, OpenAiModel};
 use rig::agent::{Agent, AgentBuilder};
 use rig::completion::CompletionModel;
 
+/// The memory tools a subagent is granted: read-only access ONLY
+/// (`memory_read`, `memory_search`). `memory_write` and `memory_edit` are
+/// deliberately absent, so a subagent can never mutate the user's memory. This
+/// is the single place the subagent memory tool set is assembled, so the
+/// `subagent_memory_tool_set_excludes_memory_edit` test can guard it directly
+/// instead of re-listing the tools it expects.
+#[cfg(feature = "memory")]
+pub(crate) fn subagent_memory_tools() -> Vec<Box<dyn rig::tool::ToolDyn>> {
+    vec![
+        Box::new(crate::extras::memory::MemoryRead::new(None, None)),
+        Box::new(crate::extras::memory::MemorySearch::new(None, None)),
+    ]
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_explore_agent_inner<M: CompletionModel + 'static>(
     model: M,
@@ -42,11 +56,16 @@ fn build_explore_agent_inner<M: CompletionModel + 'static>(
         Box::new(tools::GrepTool::new(None, None, max_grep_results)),
         Box::new(tools::FindFilesTool::new(None, None, max_find_results)),
         Box::new(tools::ListDirTool::new(None, None, max_list_dir_entries)),
-        #[cfg(feature = "memory")]
-        Box::new(crate::extras::memory::MemoryRead::new(None, None)),
-        #[cfg(feature = "memory")]
-        Box::new(crate::extras::memory::MemorySearch::new(None, None)),
     ];
+    #[cfg(feature = "memory")]
+    let tools = {
+        let mut tools = tools;
+        tools.extend(subagent_memory_tools());
+        tools
+    };
+
+    #[cfg(feature = "hooks")]
+    let tools = crate::extras::hooks::wrap_from_global(tools, None);
 
     let mut builder = AgentBuilder::new(model)
         .preamble(&preamble)

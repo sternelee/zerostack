@@ -28,6 +28,7 @@ multimodal = ["rig/image"]
 pdf = ["multimodal", "rig/pdf"]
 advisor = []
 extensions = ["dep:wasmtime", "dep:wasmtime-wasi", "zerostack-extension-api"]
+hooks = []
 
 [dependencies]
 rig = { version = "0.39", features = ["rmcp"] }

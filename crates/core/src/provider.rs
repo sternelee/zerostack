@@ -18,6 +18,8 @@ use crate::cli::Cli;
 use crate::config::{ApiStyle, Config, CustomProviderConfig};
 use crate::context::ContextFiles;
 use crate::event::AgentEvent;
+#[cfg(feature = "hooks")]
+use crate::extras::hooks::LoopInfo;
 #[cfg(feature = "mcp")]
 use crate::extras::mcp::McpClientManager;
 use crate::permission::ask::AskSender;
@@ -38,8 +40,12 @@ pub fn resolve_provider_config(
     custom_providers: &HashMap<String, CustomProviderConfig>,
 ) -> anyhow::Result<ProviderConfig> {
     if let Some(custom) = custom_providers.get(name) {
-        let kind = ProviderKind::from_name(&custom.provider_type)
-            .ok_or_else(|| anyhow::anyhow!("Unknown provider type: {}", custom.provider_type))?;
+        let kind = ProviderKind::from_name(&custom.provider_type).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown provider type: {}. Run `zerostack --setup` to configure providers.",
+                custom.provider_type
+            )
+        })?;
         return Ok(ProviderConfig {
             kind,
             base_url: Some(custom.base_url.clone()),
@@ -49,7 +55,7 @@ pub fn resolve_provider_config(
     }
     let kind = ProviderKind::from_name(name).ok_or_else(|| {
         anyhow::anyhow!(
-            "Unknown provider: '{}'. Supported: openrouter, openai, anthropic, gemini, ollama",
+            "Unknown provider: '{}'. Supported: openrouter, openai, anthropic, gemini, ollama. Run `zerostack --setup` to configure providers.",
             name
         )
     })?;
@@ -565,34 +571,101 @@ pub enum AnyAgent {
     Ollama(Agent<ollama::CompletionModel>),
 }
 
+/// Synthesizes an `AgentRunner` for a prompt blocked by a `UserPromptSubmit`
+/// hook: no model call happens, the block feedback surfaces through the same
+/// `AgentEvent::Error` path a real run-time error would use.
+#[cfg(feature = "hooks")]
+fn spawn_blocked_runner(feedback: String) -> AgentRunner {
+    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(1);
+    let join = tokio::spawn(async move {
+        let _ = event_tx
+            .send(AgentEvent::Error(CompactString::from(feedback)))
+            .await;
+    });
+    AgentRunner {
+        event_rx,
+        abort_handle: join.abort_handle(),
+    }
+}
+
 impl AnyAgent {
     pub async fn run_print(
         &self,
         prompt: &str,
-        max_turns: usize,
         pure_stdout: bool,
         retry_config: &RetryConfig,
+        // `--loop` iteration/active state; see `runner::run_print`. `None`
+        // for plain `-p` one-shot runs.
+        #[cfg(feature = "hooks")] loop_info: Option<LoopInfo>,
     ) -> anyhow::Result<(String, rig::completion::Usage)> {
         match self {
             AnyAgent::OpenRouter(a) => {
-                runner::run_print(a, prompt, max_turns, pure_stdout, retry_config).await
+                runner::run_print(
+                    a,
+                    prompt,
+                    pure_stdout,
+                    retry_config,
+                    #[cfg(feature = "hooks")]
+                    loop_info,
+                )
+                .await
             }
             AnyAgent::OpenAI(a) => match a {
                 OpenAiAgent::Responses(a) => {
-                    runner::run_print(a, prompt, max_turns, pure_stdout, retry_config).await
+                    runner::run_print(
+                        a,
+                        prompt,
+                        pure_stdout,
+                        retry_config,
+                        #[cfg(feature = "hooks")]
+                        loop_info,
+                    )
+                    .await
                 }
                 OpenAiAgent::Completions(a) => {
-                    runner::run_print(a, prompt, max_turns, pure_stdout, retry_config).await
+                    runner::run_print(
+                        a,
+                        prompt,
+                        pure_stdout,
+                        retry_config,
+                        #[cfg(feature = "hooks")]
+                        loop_info,
+                    )
+                    .await
                 }
             },
             AnyAgent::Anthropic(a) => {
-                runner::run_print(a, prompt, max_turns, pure_stdout, retry_config).await
+                runner::run_print(
+                    a,
+                    prompt,
+                    pure_stdout,
+                    retry_config,
+                    #[cfg(feature = "hooks")]
+                    loop_info,
+                )
+                .await
             }
             AnyAgent::Gemini(a) => {
-                runner::run_print(a, prompt, max_turns, pure_stdout, retry_config).await
+                runner::run_print(
+                    a,
+                    prompt,
+                    pure_stdout,
+                    retry_config,
+                    #[cfg(feature = "hooks")]
+                    loop_info,
+                )
+                .await
             }
             AnyAgent::Ollama(a) => {
-                runner::run_print(a, prompt, max_turns, pure_stdout, retry_config).await
+                runner::run_print(
+                    a,
+                    prompt,
+                    pure_stdout,
+                    retry_config,
+                    #[cfg(feature = "hooks")]
+                    loop_info,
+                )
+                .await
             }
         }
     }
@@ -629,23 +702,77 @@ impl AnyAgent {
         }
     }
 
-    pub fn spawn_runner(
+    /// Async because, under `hooks`, the `UserPromptSubmit` gate must resolve
+    /// before spawning: its outcome decides whether the runner spawns at all
+    /// (a hook can block the prompt outright) and, if so, with what prompt
+    /// (a hook can rewrite it).
+    pub async fn spawn_runner(
         self,
         prompt: String,
         history: Vec<Message>,
         retry_config: RetryConfig,
+        // `--loop` iteration/active state; see `runner::spawn_agent`. `None`
+        // outside loop mode.
+        #[cfg(feature = "hooks")] loop_info: Option<LoopInfo>,
     ) -> AgentRunner {
+        #[cfg(feature = "hooks")]
+        let prompt = match crate::extras::hooks::dispatch_user_prompt_submit(prompt).await {
+            crate::extras::hooks::PromptGate::Blocked(feedback) => {
+                return spawn_blocked_runner(feedback);
+            }
+            crate::extras::hooks::PromptGate::Proceed(prompt) => prompt,
+        };
         match self {
-            AnyAgent::OpenRouter(a) => runner::spawn_agent(a, prompt, history, retry_config),
+            AnyAgent::OpenRouter(a) => runner::spawn_agent(
+                a,
+                prompt,
+                history,
+                retry_config,
+                #[cfg(feature = "hooks")]
+                loop_info,
+            ),
             AnyAgent::OpenAI(a) => match a {
-                OpenAiAgent::Responses(a) => runner::spawn_agent(a, prompt, history, retry_config),
-                OpenAiAgent::Completions(a) => {
-                    runner::spawn_agent(a, prompt, history, retry_config)
-                }
+                OpenAiAgent::Responses(a) => runner::spawn_agent(
+                    a,
+                    prompt,
+                    history,
+                    retry_config,
+                    #[cfg(feature = "hooks")]
+                    loop_info,
+                ),
+                OpenAiAgent::Completions(a) => runner::spawn_agent(
+                    a,
+                    prompt,
+                    history,
+                    retry_config,
+                    #[cfg(feature = "hooks")]
+                    loop_info,
+                ),
             },
-            AnyAgent::Anthropic(a) => runner::spawn_agent(a, prompt, history, retry_config),
-            AnyAgent::Gemini(a) => runner::spawn_agent(a, prompt, history, retry_config),
-            AnyAgent::Ollama(a) => runner::spawn_agent(a, prompt, history, retry_config),
+            AnyAgent::Anthropic(a) => runner::spawn_agent(
+                a,
+                prompt,
+                history,
+                retry_config,
+                #[cfg(feature = "hooks")]
+                loop_info,
+            ),
+            AnyAgent::Gemini(a) => runner::spawn_agent(
+                a,
+                prompt,
+                history,
+                retry_config,
+                #[cfg(feature = "hooks")]
+                loop_info,
+            ),
+            AnyAgent::Ollama(a) => runner::spawn_agent(
+                a,
+                prompt,
+                history,
+                retry_config,
+                #[cfg(feature = "hooks")]
+                loop_info,
+            ),
         }
     }
 
@@ -750,7 +877,7 @@ pub fn build_http_client(
 }
 
 fn is_localhost(url: Option<&str>) -> bool {
-    url.map_or(false, |u| {
+    url.is_some_and(|u| {
         u.starts_with("http://localhost")
             || u.starts_with("http://127.")
             || u.starts_with("http://[::1]")

@@ -3,8 +3,10 @@ use crossterm::style::Color;
 use tokio::sync::mpsc;
 
 use crate::agent::tools::todo::TODO_LIST;
+use crate::cli::Cli;
 use crate::config::{Config, ResolvedShowToolDetails};
 use crate::context::ContextFiles;
+use crate::event::AgentEvent;
 #[cfg(feature = "mcp")]
 use crate::extras::mcp::McpClientManager;
 use crate::extras::status_signals::StatusSignals;
@@ -17,8 +19,6 @@ use crate::session::{MessageRole, Session};
 use crate::ui::events::sanitize_output;
 use crate::ui::renderer::Renderer;
 use crate::ui::slash::handle_compress;
-use zerostack_core::cli::Cli;
-use zerostack_core::event::AgentEvent;
 
 use super::{C_AGENT, C_ERROR, C_TOOL, apply_current_prompt_mode};
 
@@ -621,12 +621,21 @@ async fn handle_agent_done(
                 )
                 .await
             });
-            let runner =
-                agent
-                    .as_ref()
-                    .unwrap()
-                    .clone()
-                    .spawn_runner(prompt, Vec::new(), cfg.retry.clone());
+            let runner = agent
+                .as_ref()
+                .unwrap()
+                .clone()
+                .spawn_runner(
+                    prompt,
+                    Vec::new(),
+                    cfg.retry.clone(),
+                    #[cfg(feature = "hooks")]
+                    Some(crate::extras::hooks::LoopInfo {
+                        iteration: ls.iteration,
+                        active: ls.active,
+                    }),
+                )
+                .await;
             *agent_rx = Some(runner.event_rx);
             *is_running = true;
             if let Some(ss) = status_signals.as_ref() {

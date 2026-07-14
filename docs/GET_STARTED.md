@@ -52,7 +52,7 @@ You can just set the matching env var with :
 | Gemini     | `GEMINI_API_KEY`      |
 | Ollama     | (none — local)        |
 
-Then, you can change your configuration file (`~/.local/share/zerostack/config.toml` on Linux/WSL or `~/Library/Application Support/zerostack/` on macOS) by adding `provider = [provider_name]` in order to change your default provider.
+Then, you can change your configuration file (`~/.local/share/zerostack/config.toml` on Linux/WSL or `~/Library/Application Support/zerostack/` on macOS, unless overridden by `$ZS_CONFIG_DIR` or an existing `~/.config/zerostack/` file — see [CONFIG.md](CONFIG.md) for the full precedence) by adding `provider = [provider_name]` in order to change your default provider.
 
 If you are using a provider that's not your default one, use the `--provider` CLI flag:
 
@@ -123,6 +123,11 @@ Prompts change *how* the agent behaves. Type `.` at the start of a message to on
 | `debug` | Systematic debugging |
 | `refactor` | Restructuring existing code |
 
+This is the short list; run `/prompt` in the agent (or see the root
+[README](../README.md#prompts-system)) for the full set of built-in prompts,
+including `frontend-design`, `review-security`, `simplify`, `write-prompt`,
+`autoconfig`, `orchestrator`, and `write-text`.
+
 ## 3. Autoconfig
 
 There is one special prompt, called `autoconfig`, that has full access to your zerostack configuration and to the project's documentation: after reading this Get Started guide, you might decide to just never read any documentation or any configuration file for zerostack, you just need to load `autoconfig` and everything will be managed.
@@ -157,6 +162,15 @@ If you want to use zerostack from scripts, from other programs, or if you just w
 | `--worktree` | Run the agent inside a git worktree (Experimental) |
 | `--parallel` | Run the agent inside a self-managed git worktree (Experimental) |
 | `--load-prompt <prompt>` | Use a specific prompt |
+
+## 6. Opt-in features
+
+Everything above ships in the default build. A few extras are compiled in
+only when you ask for them: lifecycle hooks (`--features hooks`), a
+second-model advisor (`--features advisor`), image/PDF message attachments
+(`--features multimodal,pdf`), and ACP editor integration
+(`--features acp`). See the root [README](../README.md) for what each one
+does and how to enable it.
 
 # Conclusions
 

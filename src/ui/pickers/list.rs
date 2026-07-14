@@ -39,6 +39,7 @@ const BASE_COMMANDS: &[&str] = &[
     "/theme",
     "/thinking",
     "/toggle",
+    "/tutor",
     "/tutorial",
     "/undo",
     "/welcome",
@@ -67,6 +68,9 @@ fn available_commands() -> Vec<&'static str> {
         cmds.push("/wt-merge");
     }
 
+    #[cfg(feature = "hooks")]
+    cmds.push("/hooks");
+
     #[cfg(feature = "loop")]
     cmds.push("/loop");
 
@@ -83,21 +87,6 @@ fn available_commands() -> Vec<&'static str> {
     }
 
     cmds
-}
-
-/// Get dynamic extension-registered command names.
-#[cfg(feature = "extensions")]
-fn extension_commands() -> Vec<String> {
-    let cmds = crate::extension::registry::extension_command_names();
-    if !cmds.is_empty() {
-        tracing::debug!(?cmds, "extension commands added to picker");
-    }
-    cmds
-}
-
-#[cfg(not(feature = "extensions"))]
-fn extension_commands() -> Vec<String> {
-    Vec::new()
 }
 
 pub struct ListPicker {
@@ -125,11 +114,7 @@ impl ListPicker {
 
     pub fn with_static_commands() -> Self {
         let mut picker = ListPicker::new();
-        let mut items: Vec<String> = available_commands().iter().map(|s| s.to_string()).collect();
-        items.extend(extension_commands());
-        items.sort();
-        items.dedup();
-        picker.items = items;
+        picker.items = available_commands().iter().map(|s| s.to_string()).collect();
         picker
     }
 

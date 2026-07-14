@@ -1,0 +1,12 @@
+id = "test/echo"
+name = "Echo Test Extension"
+version = "0.1.0"
+schema_version = 1
+description = "Test extension that echoes a message via a tool."
+
+[extension]
+entrypoint = "target/wasm32-wasip2/debug/test_echo.wasm"
+
+[capabilities]
+tools = true
+commands = false

@@ -2,6 +2,8 @@ pub(crate) mod add;
 mod content;
 mod features;
 mod help;
+#[cfg(feature = "hooks")]
+mod hooks;
 pub(crate) mod init;
 mod memory;
 mod providers;
@@ -13,6 +15,7 @@ pub(crate) use providers::warm_model_cache;
 
 use smallvec::SmallVec;
 
+use crate::cli::Cli;
 use crate::config::Config;
 use crate::context::ContextFiles;
 use crate::permission::ask::AskSender;
@@ -23,7 +26,6 @@ use crate::session::{MessageRole, Session};
 use crate::ui::events::render_session;
 use crate::ui::input::InputEditor;
 use crate::ui::renderer::Renderer;
-use zerostack_core::cli::Cli;
 
 pub(crate) const C_AGENT: crossterm::style::Color = crossterm::style::Color::White;
 pub(crate) const C_RESULT: crossterm::style::Color = crossterm::style::Color::DarkGrey;
@@ -530,103 +532,20 @@ pub async fn handle_slash(
             help::handle_welcome(ctx.renderer);
             Ok(())
         }
+        "/tutor" => {
+            help::handle_tutor(ctx.renderer);
+            Ok(())
+        }
         "/add" | "/drop" | "/drop-all" => add::handle(&parts, &mut ctx).await,
         "/init" => init::handle(&parts, &mut ctx).await,
         "/review" => review::handle(&parts, &mut ctx).await,
         "/memory" => memory::handle(&parts, &mut ctx).await,
-        "/regen-skills" => {
-            match crate::context::skills::regen() {
-                Ok(()) => {
-                    ctx.context.skills = crate::context::skills::reload_skills();
-                    write_ok(ctx.renderer, "Skills regenerated. Use /skills to see them.");
-                }
-                Err(e) => {
-                    write_error(ctx.renderer, format!("failed to regenerate skills: {e}"));
-                }
-            }
-            Ok(())
-        }
-        "/skills" => {
-            let skills = &ctx.context.skills;
-            if skills.is_empty() {
-                write_result(
-                    ctx.renderer,
-                    "No skills loaded. Add skills to ~/.local/share/zerostack/skills/ or .zerostack/skills/",
-                );
-            } else {
-                write_ok(ctx.renderer, "Available skills:");
-                let mut names: Vec<&str> = skills.keys().map(|s| s.as_str()).collect();
-                names.sort();
-                for name in names {
-                    if let Some(s) = skills.get(name) {
-                        write_result(
-                            ctx.renderer,
-                            &format!("  /skill:{name: <30} — {}", s.meta.description),
-                        );
-                    }
-                }
-                write_result(ctx.renderer, "");
-                write_result(ctx.renderer, "Use /skill:<name> to load full instructions.");
-            }
-            Ok(())
-        }
         "/compress" | "/compact" | "/loop" | "/worktree" | "/wt-merge" | "/wt-exit" => {
             features::handle(&parts, &mut ctx).await
         }
-        cmd if cmd.starts_with("/skill:") => {
-            // /skill:name — activate a skill as the system prompt.
-            // Per pi's progressive disclosure: full instructions load on-demand.
-            let skill_name = cmd.strip_prefix("/skill:").unwrap();
-            let args = if parts.len() > 1 {
-                text[parts[0].len()..].trim().to_string()
-            } else {
-                String::new()
-            };
-            if let Some(skill) = ctx.context.skills.get(skill_name) {
-                // Build prompt: skill content + optional user args.
-                let mut prompt = skill.content.clone();
-                if !args.is_empty() {
-                    prompt.push_str(&format!("\n\nUser: {args}"));
-                }
-                ctx.context.current_prompt = Some(prompt);
-                ctx.context.current_prompt_name = Some(format!("skill:{skill_name}"));
-                write_ok(
-                    ctx.renderer,
-                    format!(
-                        "Skill activated: {skill_name} — {} (use /prompt default to clear)",
-                        skill.meta.description
-                    ),
-                );
-            } else {
-                write_error(
-                    ctx.renderer,
-                    format!(
-                        "unknown skill: '{}'. Use /skills to see available skills.",
-                        skill_name
-                    ),
-                );
-            }
-            Ok(())
-        }
+        #[cfg(feature = "hooks")]
+        "/hooks" => hooks::handle(&parts, &mut ctx).await,
         _ => {
-            // Try extension commands first.
-            #[cfg(feature = "extensions")]
-            {
-                let cmd_name = parts[0].strip_prefix('/').unwrap_or(parts[0]);
-                let full_args = if parts.len() > 1 {
-                    text[parts[0].len()..].trim().to_string()
-                } else {
-                    String::new()
-                };
-                if let Some(output) =
-                    crate::extension::registry::dispatch_command(cmd_name, &full_args)
-                {
-                    let mut out = output;
-                    out.push('\n');
-                    ctx.renderer.write(&out, crate::ui::C_TOOL)?;
-                    return Ok(());
-                }
-            }
             write_error(
                 ctx.renderer,
                 format!("unknown command: {} (try /help)", parts[0]),

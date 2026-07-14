@@ -1,10 +1,10 @@
 [workspace]
-members = [".", "crates/extension-api", "crates/core", "crates/gui", "tests/extensions/test-echo", "tests/extensions/pi-simplify"]
-default-members = [".", "crates/extension-api"]
+members = [".", "crates/extension-api", "crates/gui", "tests/extensions/test-echo", "tests/extensions/pi-simplify"]
+default-members = [".", "crates/extension-api", "crates/gui"]
 resolver = "3"
 
 [workspace.package]
-version = "1.6.2"
+version = "1.7.0-rc1"
 edition = "2024"
 license = "GPL-3.0-only"
 homepage = "https://github.com/gi-dellav/zerostack"
@@ -43,6 +43,7 @@ multimodal = ["rig/image"]
 pdf = ["multimodal", "rig/pdf"]   
 advisor = []
 extensions = ["dep:wasmtime", "dep:wasmtime-wasi", "zerostack-extension-api"]
+hooks = []
 
 [dependencies]
 zerostack-core = { path = "crates/core" }

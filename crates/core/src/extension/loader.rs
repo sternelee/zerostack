@@ -74,8 +74,8 @@ pub struct Capabilities {
 impl Default for Capabilities {
     fn default() -> Self {
         Self {
-            tools: true,
-            commands: true,
+            tools: false,
+            commands: false,
             lifecycle: false,
             provider: false,
             ui: false,
@@ -88,7 +88,7 @@ impl Default for Capabilities {
 
 impl Capabilities {
     fn tools_default() -> bool {
-        true
+        false
     }
 }
 

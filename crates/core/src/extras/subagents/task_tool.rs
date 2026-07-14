@@ -115,14 +115,41 @@ editing in a known location, grepping for a literal you will act on immediately.
             let architecture = architecture.clone();
             let config = config.clone();
             let join_handle = tokio::spawn(async move {
-                let work = async {
-                    let agent =
-                        builder::build_explore_agent(model, max_turns, &config, architecture).await;
-                    agent
-                        .run_subagent(&prompt_text, max_turns, event_tx.as_ref(), &config.retry)
-                        .await
-                };
-                match tokio::time::timeout(SUBAGENT_TIMEOUT, work).await {
+                #[cfg(feature = "hooks")]
+                let prompt_text =
+                    match crate::extras::hooks::dispatch_subagent_start("explore").await {
+                        Some(extra) => format!("{extra}\n\n{prompt_text}"),
+                        None => prompt_text,
+                    };
+                let agent =
+                    builder::build_explore_agent(model, max_turns, &config, architecture).await;
+                let result = tokio::time::timeout(
+                    SUBAGENT_TIMEOUT,
+                    agent.run_subagent(&prompt_text, max_turns, event_tx.as_ref(), &config.retry),
+                )
+                .await;
+                #[cfg(feature = "hooks")]
+                if let Ok(Ok(response)) = &result
+                    && let crate::extras::hooks::SubagentStopGate::Continue { reason } =
+                        crate::extras::hooks::dispatch_subagent_stop("explore", false).await
+                {
+                    tracing::info!("hooks: SubagentStop forced continuation: {reason}");
+                    let continuation = format!("{response}\n\n{reason}");
+                    let retried = tokio::time::timeout(
+                        SUBAGENT_TIMEOUT,
+                        agent.run_subagent(
+                            &continuation,
+                            max_turns,
+                            event_tx.as_ref(),
+                            &config.retry,
+                        ),
+                    )
+                    .await;
+                    if let Ok(Ok(retried)) = retried {
+                        return (i, prompt_text, Ok(retried));
+                    }
+                }
+                match result {
                     Ok(Ok(response)) => (i, prompt_text, Ok(response)),
                     Ok(Err(e)) => (i, prompt_text, Err(format!("[error: {}]", e))),
                     Err(_elapsed) => (

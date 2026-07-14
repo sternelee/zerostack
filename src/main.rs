@@ -1,27 +1,24 @@
 #![deny(unsafe_code)]
 
+mod agent;
+mod auth;
+mod cli;
+mod config;
+mod context;
+mod docs;
 mod event;
+mod extras;
+mod fs;
+mod logging;
+mod models_catalog;
+mod permission;
+mod pricing;
+mod provider;
+mod retry;
+mod sandbox;
+mod session;
+mod setup;
 mod ui;
-
-use zcore::agent;
-use zcore::auth;
-use zcore::cli;
-use zcore::config;
-use zcore::context;
-use zcore::docs;
-#[cfg(feature = "extensions")]
-use zcore::extension;
-use zcore::extras;
-use zcore::fs;
-use zcore::logging;
-use zcore::models_catalog;
-use zcore::permission;
-use zcore::pricing;
-use zcore::provider;
-use zcore::retry;
-use zcore::sandbox;
-use zcore::session;
-use zerostack_core as zcore;
 
 #[cfg(test)]
 mod tests;
@@ -29,6 +26,7 @@ mod tests;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use anyhow::Context;
 use clap::Parser;
 use compact_str::CompactString;
 use session::MessageRole;
@@ -151,6 +149,12 @@ async fn connect_headless_mcp(
 )]
 #[cfg_attr(not(feature = "multithread"), tokio::main(flavor = "current_thread"))]
 async fn main() -> anyhow::Result<()> {
+    run().await.context(
+        "This error might derive from an incomplete configuration: run `zerostack --setup` to configure your providers and models interactively, or `zerostack --tutor` to see the getting started guide",
+    )
+}
+
+async fn run() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
     logging::install_panic_hook();
     logging::init(&cli);
@@ -160,6 +164,22 @@ async fn main() -> anyhow::Result<()> {
     if cli.print_config {
         print_config(&cli, &cfg);
         return Ok(());
+    }
+
+    if cli.setup {
+        match setup::run(&mut cfg)? {
+            setup::SetupOutcome::Quit => return Ok(()),
+            setup::SetupOutcome::LaunchAutoconfigure => {
+                // autoconfigure was already applied in setup; fall through to launch
+            }
+            setup::SetupOutcome::Launch => {
+                // fall through to launch
+            }
+        }
+    }
+
+    if cli.tutor {
+        return docs::show_get_started();
     }
 
     if cli.resume && cli.session.is_none() {
@@ -172,6 +192,31 @@ async fn main() -> anyhow::Result<()> {
     let is_interactive = !cli.acp_enabled && !cli.print && !cli.loop_mode;
     #[cfg(not(feature = "acp"))]
     let is_interactive = !cli.print && !cli.loop_mode;
+
+    // ── Hooks: load settings.json config, apply trust, install dispatcher ──
+    // Done this early (before provider/API-key resolution) so `--hooks-test`
+    // is a pure config/dispatch dry run that needs no API key and makes no
+    // model call.
+    #[cfg(feature = "hooks")]
+    {
+        crate::extras::hooks::init_dispatcher(crate::extras::hooks::trust::load_dispatcher(
+            cli.no_hooks,
+            !is_interactive,
+        ));
+
+        if let Some(tool_name) = &cli.hooks_test {
+            let tool_input: serde_json::Value = cli
+                .hooks_test_input
+                .as_deref()
+                .map(|s| serde_json::from_str(s).unwrap_or(serde_json::Value::Null))
+                .unwrap_or_else(|| serde_json::json!({}));
+            println!(
+                "{}",
+                crate::extras::hooks::hooks_test_dry_run(tool_name, tool_input).await
+            );
+            return Ok(());
+        }
+    }
 
     // Load context first so prompts/themes are available early.
     // (Version-change / ARCHITECTURE.md prompts are deferred to right before
@@ -214,12 +259,19 @@ async fn main() -> anyhow::Result<()> {
         session.output_token_cost = output_cost;
     }
 
+    #[cfg(feature = "hooks")]
+    let mut session_resumed = false;
+
     if cli.continue_session
         && cli.session.is_none()
         && let Ok(sessions) = session::storage::find_recent_sessions(1)
         && let Some(s) = sessions.into_iter().next()
     {
         session = s;
+        #[cfg(feature = "hooks")]
+        {
+            session_resumed = true;
+        }
     }
 
     if let Some(session_id) = &cli.session {
@@ -228,11 +280,19 @@ async fn main() -> anyhow::Result<()> {
             // try exact name match as fallback
             if let Some(s) = session::storage::find_session_by_name(session_id)? {
                 session = s;
+                #[cfg(feature = "hooks")]
+                {
+                    session_resumed = true;
+                }
             } else {
                 anyhow::bail!("no session matching '{}'", session_id);
             }
         } else if sessions.len() == 1 {
             session = sessions.into_iter().next().unwrap();
+            #[cfg(feature = "hooks")]
+            {
+                session_resumed = true;
+            }
         } else {
             eprintln!("multiple sessions match '{}':", session_id);
             for s in &sessions {
@@ -355,23 +415,21 @@ async fn main() -> anyhow::Result<()> {
         let need_pricing = session.input_token_cost == 0.0 && session.output_token_cost == 0.0;
         let need_ctx = cfg.context_window.is_none()
             && config::Config::catalog_context_window("openrouter", model.as_str()).is_none();
-        if need_pricing || need_ctx {
-            if let Ok(infos) = provider::fetch_openrouter_pricing(
+        if (need_pricing || need_ctx)
+            && let Ok(infos) = provider::fetch_openrouter_pricing(
                 cli.api_key.as_deref(),
                 &cfg.custom_providers_map(),
                 cfg.api_keys.as_ref(),
             )
             .await
-            {
-                if let Some(info) = infos.get(model.as_str()) {
-                    if need_pricing {
-                        session.input_token_cost = info.input_cost;
-                        session.output_token_cost = info.output_cost;
-                    }
-                    if need_ctx && let Some(cw) = info.context_length {
-                        session.update_context_window(cw);
-                    }
-                }
+            && let Some(info) = infos.get(model.as_str())
+        {
+            if need_pricing {
+                session.input_token_cost = info.input_cost;
+                session.output_token_cost = info.output_cost;
+            }
+            if need_ctx && let Some(cw) = info.context_length {
+                session.update_context_window(cw);
             }
         }
     }
@@ -563,6 +621,14 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // `SessionStart` fires here (dispatcher already installed above, before
+    // provider/API-key resolution) once `session_resumed` is known.
+    #[cfg(feature = "hooks")]
+    {
+        let source = if session_resumed { "resume" } else { "startup" };
+        crate::extras::hooks::dispatch_session_start(source).await;
+    }
+
     // ARCHITECTURE.md prompt: defer to here so all heavy setup completes first.
     #[cfg(feature = "archmd")]
     let arch_created = if !cli.resolve_no_context_files(&cfg) {
@@ -727,17 +793,6 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "archmd"))]
     let arch_msg: Option<String> = None;
 
-    // Initialize extension manager (for both headless and interactive).
-    #[cfg(feature = "extensions")]
-    {
-        let extension_paths: Vec<std::path::PathBuf> = cli.extension.clone();
-        if !extension_paths.is_empty() {
-            crate::extension::registry::init_from_paths(&extension_paths)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            tracing::info!("extensions initialized");
-        }
-    }
-
     if cli.print {
         let msg = cli.message.join(" ");
         if msg.starts_with('!') {
@@ -809,9 +864,10 @@ async fn main() -> anyhow::Result<()> {
             let response_result = agent
                 .run_print(
                     &msg,
-                    cli.resolve_max_agent_turns(&cfg),
                     cli.pure_stdout,
                     &cfg.retry,
+                    #[cfg(feature = "hooks")]
+                    None,
                 )
                 .await;
             if let Some(ss) = status_signals.as_ref() {
@@ -875,7 +931,10 @@ async fn main() -> anyhow::Result<()> {
                 mcp_manager.as_ref(),
             )
             .await;
-            return run_headless_loop(agent, &cli, &cfg, &context, status_signals).await;
+            let result = run_headless_loop(agent, &cli, &cfg, &context, status_signals).await;
+            #[cfg(feature = "hooks")]
+            crate::extras::hooks::dispatch_session_end("exit").await;
+            return result;
         }
 
         if !cli.resolve_no_tools(&cfg)
@@ -891,37 +950,6 @@ async fn main() -> anyhow::Result<()> {
         if !initial_msg.is_empty() {
             session.add_message(MessageRole::User, &initial_msg);
         }
-
-        // Load skills from CLI --skill flags.
-        if !cli.skill.is_empty() {
-            use crate::context::skills;
-            for path in &cli.skill {
-                let skill = if path.is_dir() {
-                    skills::load_skill(path)
-                } else if path.is_file() && path.ends_with("SKILL.md") {
-                    // Load from parent directory.
-                    if let Some(parent) = path.parent() {
-                        skills::load_skill(parent)
-                    } else {
-                        Err("invalid skill path".into())
-                    }
-                } else {
-                    Err(format!("not a skill directory or SKILL.md file: {path:?}"))
-                };
-                match skill {
-                    Ok(s) => {
-                        context.skills.insert(s.meta.name.clone(), s);
-                    }
-                    Err(e) => {
-                        tracing::warn!(?path, error = %e, "failed to load skill from CLI");
-                    }
-                }
-            }
-            // Note: we intentionally do NOT call skills::reload_skills() here.
-            // CLI-loaded skills are only added to context.skills for this run;
-            // the global cache continues to reflect disk-loaded skills.
-        }
-
         ui::run_interactive(
             client,
             None,
@@ -940,6 +968,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .await?;
     }
+
+    #[cfg(feature = "hooks")]
+    crate::extras::hooks::dispatch_session_end("exit").await;
 
     Ok(())
 }
@@ -1206,9 +1237,13 @@ async fn run_headless_loop(
         let response = match agent
             .run_print(
                 &iteration_prompt,
-                cli.resolve_max_agent_turns(cfg),
                 cli.pure_stdout,
                 &cfg.retry,
+                #[cfg(feature = "hooks")]
+                Some(crate::extras::hooks::LoopInfo {
+                    iteration: state.iteration,
+                    active: state.active,
+                }),
             )
             .await
         {

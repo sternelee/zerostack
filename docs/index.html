@@ -91,7 +91,7 @@ footer{padding:32px 0;text-align:center;font-size:.78rem;color:var(--text-dim)}
 <img class="logo" src="https://raw.githubusercontent.com/gi-dellav/zerostack/main/assets/logo.png" alt="zerostack logo" width="56" height="56">
 <div class="header-text">
 <h1>zerostack</h1>
-<div class="tagline">~16k LoC · 26MB binary · ~16 MB RAM (avg) / ~24 MB (peak)</div>
+<div class="tagline">~30k LoC (core) · 26MB binary · ~16 MB RAM (avg) / ~24 MB (peak)</div>
 <div class="header-links">
 <a href="#overview">Overview</a>
 <a href="#docs">Docs</a>
@@ -115,11 +115,11 @@ footer{padding:32px 0;text-align:center;font-size:.78rem;color:var(--text-dim)}
 <a href="https://www.producthunt.com/products/zerostack-coding-agent/reviews/new?utm_source=badge-product_review&utm_medium=badge&utm_source=badge-zerostack&#0045;coding&#0045;agent" target="_blank"><img src="https://api.producthunt.com/widgets/embed-image/v1/product_review.svg?product_id=1236867&theme=light" alt="Zerostack&#0032;Coding&#0032;Agent - A&#0032;minimal&#0032;coding&#0032;agent&#0044;&#0032;with&#0032;a&#0032;bundle&#0032;of&#0032;innovative&#0032;features | Product Hunt" style="width: 250px; height: 54px;" width="250" height="54" /></a>
 <h2>Overview</h2>
 <p>
-Minimal coding agent written in Rust — ~16k LoC, 26MB binary, ~16 MB RAM (avg), ~24 MB (peak).
+Minimal coding agent written in Rust — ~30k LoC (core), 26MB binary, ~16 MB RAM (avg), ~24 MB (peak).
 Peak RAM ~24 MB vs ~700 MB for JS-based agents. CPU: 0.0% idle, ~1.5% under load.
 </p>
 <div class="perf-grid">
-<div class="perf-card"><div class="value">~16k</div><div class="label">Lines of Code</div></div>
+<div class="perf-card"><div class="value">~30k</div><div class="label">Lines of Code</div></div>
 <div class="perf-card"><div class="value">26MB</div><div class="label">Binary Size</div></div>
 <div class="perf-card"><div class="value">~16 MB</div><div class="label">RAM (avg)</div></div>
 <div class="perf-card"><div class="value">0.0%</div><div class="label">CPU (idle)</div></div>
@@ -129,17 +129,22 @@ Peak RAM ~24 MB vs ~700 MB for JS-based agents. CPU: 0.0% idle, ~1.5% under load
 <li><strong>Standard tools</strong> — all tools exposed to coding agents (as described by opencode)</li>
 <li><strong>Permission system</strong> — 5 modes, per-tool patterns, session allowlists</li>
 <li><strong>Terminal UI</strong> — crossterm, markdown rendering, mouse support, scrollback</li>
-<li><strong>Prompts system</strong> — 10 built-in prompts, switchable at runtime</li>
+<li><strong>Prompts system</strong> — 14 built-in prompts, switchable at runtime</li>
 <li><strong>Session management</strong> — save/load/resume, auto-compaction</li>
 <li><strong>MCP support</strong> — connect external tool servers</li>
 <li><strong>Ralph Wiggum loops</strong> — iterative coding for long-horizon tasks</li>
 <li><strong>Git Worktrees</strong> — branch-per-task workflow</li>
 <li><strong>ACP support</strong> (gated) — editor integration (Zed, etc.)</li>
 <li><strong>Persistent memory</strong> (gated) — plain-Markdown memory across sessions</li>
+<li><strong>Lifecycle hooks</strong> (gated) — observe/gate tool calls and session lifecycle via external commands</li>
+<li><strong>Advisor</strong> (gated) — consult a second model mid-session for strategic guidance</li>
+<li><strong>Multimodal input</strong> (gated) — attach images and PDFs to messages</li>
 <li><strong>Subagents</strong> — parallel, fast codebase exploration</li>
 <li><strong>ARCHITECTURE.md</strong> — shared core knowledge for all agents on the same codebase</li>
 <li><strong>Sandbox mode</strong> — bubblewrap / zerobox isolation</li>
 <li><strong>Exa search</strong> — WebFetch &amp; WebSearch tools</li>
+<li><strong>Prompt chaining</strong> — offers to advance brainstorm → plan → code → review</li>
+<li><strong>Status signals</strong> — start/stop/git-conflict events over a Unix socket</li>
 </ul>
 <div class="screenshot-wrap">
 <img src="https://raw.githubusercontent.com/gi-dellav/zerostack/main/assets/tui_screenshot0.png" alt="zerostack TUI screenshot">
@@ -234,6 +239,21 @@ Peak RAM ~24 MB vs ~700 MB for JS-based agents. CPU: 0.0% idle, ~1.5% under load
 <div class="cmd-header"><strong>/wt-exit</strong> — Return to main repo without merging</div>
 </div>
 <div class="cmd">
+<div class="cmd-header"><strong>/queue</strong> — Manage input queued while the agent is busy</div>
+</div>
+<div class="cmd">
+<div class="cmd-header"><strong>/btw</strong> — Ask a quick side question in parallel</div>
+</div>
+<div class="cmd">
+<div class="cmd-header"><strong>/review</strong> — Run a one-shot code review</div>
+</div>
+<div class="cmd">
+<div class="cmd-header"><strong>/hooks</strong> (gated) — Show the installed hook dispatcher config</div>
+</div>
+<div class="cmd">
+<div class="cmd-header"><strong>/advisor</strong> (gated) — Show or change advisor status</div>
+</div>
+<div class="cmd">
 <div class="cmd-header"><strong>/help</strong> — Show all commands</div>
 </div>
 </section>
@@ -242,6 +262,7 @@ Peak RAM ~24 MB vs ~700 MB for JS-based agents. CPU: 0.0% idle, ~1.5% under load
 <section id="docs">
 <h2>Documentation</h2>
 <ul class="features">
+<li><a href="GET_STARTED.html">GET_STARTED.md</a> — Installation, first session, and essential commands</li>
 <li><a href="ARCHITECTURE.html">ARCHITECTURE.md</a> — Project architecture and design decisions</li>
 <li><a href="COMMANDS.html">COMMANDS.md</a> — Slash commands reference</li>
 <li><a href="CONFIG.html">CONFIG.md</a> — Full configuration guide (TOML/YAML)</li>
@@ -278,7 +299,7 @@ zerostack --provider openrouter --model deepseek/deepseek-v4-flash</code></pre>
 <section id="install">
 <h2>Installation</h2>
 <p>Requires <a href="https://rustup.rs/" target="_blank" rel="noopener">Cargo</a> and git:</p>
-<pre><code># Default — MCP, loop, git-worktree, and subagents
+<pre><code># Default — loop, git-worktree, mcp, subagents, archmd, status-signals, multithread
 cargo install zerostack
 
 # With ACP (Agent Communication Protocol) support for editor integration
@@ -287,8 +308,8 @@ cargo install zerostack --features acp
 # With Memory support
 cargo install zerostack --features memory
 
-# With experimental multi-threaded subagents
-cargo install zerostack --features multithread</code></pre>
+# With hooks and advisor
+cargo install zerostack --features hooks,advisor</code></pre>
 <p>Pre-built binaries are also available on <a href="https://github.com/gi-dellav/zerostack/releases" target="_blank" rel="noopener">GitHub Releases</a>.</p>
 <p>Once installed, run <code>/prompt autoconfig</code> inside zerostack to configure the tool interactively.</p>
 

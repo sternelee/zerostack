@@ -21,10 +21,11 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEv
 use crossterm::style::Color;
 use tokio::sync::mpsc;
 
+use crate::cli::Cli;
 use crate::config;
 use crate::config::Config;
 use crate::context::ContextFiles;
-use crate::event::UserEvent;
+use crate::event::{AgentEvent, UserEvent};
 #[cfg(feature = "mcp")]
 use crate::extras::mcp::McpClientManager;
 use crate::extras::status_signals::StatusSignals;
@@ -42,8 +43,6 @@ use crate::ui::pickers::rewind::RewindOutcome;
 use crate::ui::renderer::{Renderer, copy_to_clipboard};
 use crate::ui::slash::{apply_prompt_model, handle_compress, handle_slash};
 use crate::ui::terminal::TerminalGuard;
-use zerostack_core::cli::Cli;
-use zerostack_core::event::AgentEvent;
 
 use self::utils::{parse_color, to_ansi_256};
 
@@ -327,7 +326,14 @@ async fn spawn_merge_agent(
         .as_ref()
         .unwrap()
         .clone()
-        .spawn_runner(prompt, history, cfg.retry.clone());
+        .spawn_runner(
+            prompt,
+            history,
+            cfg.retry.clone(),
+            #[cfg(feature = "hooks")]
+            None,
+        )
+        .await;
     *agent_rx = Some(runner.event_rx);
     *main_abort = Some(runner.abort_handle);
     *is_running = true;
@@ -444,12 +450,18 @@ async fn start_main_run(
             h
         }
     };
-    let runner =
-        agent
-            .as_ref()
-            .unwrap()
-            .clone()
-            .spawn_runner(text.to_string(), history, cfg.retry.clone());
+    let runner = agent
+        .as_ref()
+        .unwrap()
+        .clone()
+        .spawn_runner(
+            text.to_string(),
+            history,
+            cfg.retry.clone(),
+            #[cfg(feature = "hooks")]
+            None,
+        )
+        .await;
     *agent_rx = Some(runner.event_rx);
     *main_abort = Some(runner.abort_handle);
     *is_running = true;
@@ -612,11 +624,18 @@ async fn mid_turn_compact_and_respawn(
     )
     .await;
     let history = crate::agent::runner::convert_history(session);
-    let runner = agent.as_ref().unwrap().clone().spawn_runner(
-        MID_TURN_CONTINUE_PROMPT.to_string(),
-        history,
-        cfg.retry.clone(),
-    );
+    let runner = agent
+        .as_ref()
+        .unwrap()
+        .clone()
+        .spawn_runner(
+            MID_TURN_CONTINUE_PROMPT.to_string(),
+            history,
+            cfg.retry.clone(),
+            #[cfg(feature = "hooks")]
+            None,
+        )
+        .await;
     *agent_rx = Some(runner.event_rx);
     *main_abort = Some(runner.abort_handle);
     *is_running = true;
@@ -768,22 +787,7 @@ pub async fn run_interactive(
     renderer.set_chat_margin(cfg.resolve_chat_left_margin());
     if let Some(ref theme_name) = context.current_theme_name {
         if let Some(content) = context.themes.get(theme_name.as_str()) {
-            if let Ok(colors) =
-                serde_json::from_str::<zerostack_core::config::ColorsConfig>(content)
-            {
-                let chat_bg = colors.chat_background.as_deref().and_then(parse_color);
-                let input_bg = colors.input_background.as_deref().and_then(parse_color);
-                let status_bg = colors.status_background.as_deref().and_then(parse_color);
-                if matches!(colors.scheme_type, zerostack_core::config::SchemeType::Ansi) {
-                    renderer.set_background_colors(
-                        chat_bg.map(to_ansi_256),
-                        input_bg.map(to_ansi_256),
-                        status_bg.map(to_ansi_256),
-                    );
-                } else {
-                    renderer.set_background_colors(chat_bg, input_bg, status_bg);
-                }
-            }
+            crate::context::themes::apply(content, &mut renderer);
         }
     } else if let Some(colors) = &cfg.colors {
         let chat_bg = colors.chat_background.as_deref().and_then(parse_color);
@@ -1023,11 +1027,18 @@ pub async fn run_interactive(
         )
         .await;
         let history = crate::agent::runner::convert_history(session);
-        let runner = agent.as_ref().unwrap().clone().spawn_runner(
-            trigger_msg.to_string(),
-            history,
-            cfg.retry.clone(),
-        );
+        let runner = agent
+            .as_ref()
+            .unwrap()
+            .clone()
+            .spawn_runner(
+                trigger_msg.to_string(),
+                history,
+                cfg.retry.clone(),
+                #[cfg(feature = "hooks")]
+                None,
+            )
+            .await;
         agent_rx = Some(runner.event_rx);
         main_abort = Some(runner.abort_handle);
         is_running = true;
@@ -2000,7 +2011,18 @@ pub async fn run_interactive(
                                             #[cfg(feature = "mcp")] mcp_ref,
                                         ).await;
                                         let history = crate::agent::runner::convert_history(session);
-                                        let runner = agent.as_ref().unwrap().clone().spawn_runner(prompt, history, cfg.retry.clone());
+                                        let runner = agent
+                                            .as_ref()
+                                            .unwrap()
+                                            .clone()
+                                            .spawn_runner(
+                                                prompt,
+                                                history,
+                                                cfg.retry.clone(),
+                                                #[cfg(feature = "hooks")]
+                                                None,
+                                            )
+                                            .await;
                                         agent_rx = Some(runner.event_rx);
                                         main_abort = Some(runner.abort_handle);
                                         is_running = true;
@@ -2020,7 +2042,18 @@ pub async fn run_interactive(
                                             #[cfg(feature = "mcp")] mcp_ref,
                                         ).await;
                                         let history = crate::agent::runner::convert_history(session);
-                                        let runner = agent.as_ref().unwrap().clone().spawn_runner(msg, history, cfg.retry.clone());
+                                        let runner = agent
+                                            .as_ref()
+                                            .unwrap()
+                                            .clone()
+                                            .spawn_runner(
+                                                msg,
+                                                history,
+                                                cfg.retry.clone(),
+                                                #[cfg(feature = "hooks")]
+                                                None,
+                                            )
+                                            .await;
                                         agent_rx = Some(runner.event_rx);
                                         main_abort = Some(runner.abort_handle);
                                         is_running = true;
@@ -2079,7 +2112,21 @@ pub async fn run_interactive(
                                                 &permission, &ask_tx, &sandbox, reasoning_enabled,
                                                 #[cfg(feature = "mcp")] mcp_ref,
                                             ).await;
-                                            let runner = agent.as_ref().unwrap().clone().spawn_runner(prompt, Vec::new(), cfg.retry.clone());
+                                            let runner = agent
+                                                .as_ref()
+                                                .unwrap()
+                                                .clone()
+                                                .spawn_runner(
+                                                    prompt,
+                                                    Vec::new(),
+                                                    cfg.retry.clone(),
+                                                    #[cfg(feature = "hooks")]
+                                                    Some(crate::extras::hooks::LoopInfo {
+                                                        iteration: ls.iteration,
+                                                        active: ls.active,
+                                                    }),
+                                                )
+                                                .await;
                                             agent_rx = Some(runner.event_rx);
                                             main_abort = Some(runner.abort_handle);
                                             is_running = true;

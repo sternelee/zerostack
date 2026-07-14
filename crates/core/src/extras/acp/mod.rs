@@ -303,11 +303,15 @@ async fn run_prompt(
     )
     .await;
 
-    let runner = agent.spawn_runner(
-        prompt_text.to_string(),
-        vec![],
-        crate::retry::RetryConfig::default(),
-    );
+    let runner = agent
+        .spawn_runner(
+            prompt_text.to_string(),
+            vec![],
+            crate::retry::RetryConfig::default(),
+            #[cfg(feature = "hooks")]
+            None,
+        )
+        .await;
     let mut rx = runner.event_rx;
 
     let mut tool_call_id: Option<ToolCallId> = None;

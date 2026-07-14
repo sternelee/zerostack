@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::extension::host::ExtensionHost;
-use crate::extension::loader::{self, ExtensionBundle};
+use crate::extension::loader::{self, Capabilities, ExtensionBundle};
 use crate::extension::{ExtensionMeta, RegisteredTool};
 
 /// Top-level extension manager. Owns the ExtensionHost and coordinates
@@ -133,7 +133,11 @@ impl ExtensionManager {
         let caps = manifest
             .as_ref()
             .map(|m| m.capabilities.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(|| Capabilities {
+                tools: true,
+                commands: true,
+                ..Default::default()
+            });
 
         let meta = self.host.load_extension(
             &extension_id,

@@ -336,7 +336,7 @@ fn yaml_round_trips_serde_json_value_fields() {
     // they survive a YAML serialize/deserialize round trip intact.
     let cfg = Config {
         provider: Some(CompactString::new("openrouter")),
-        extra_body: Some(serde_json::json!({ "extensions": { "preset": "quality" } })),
+        extra_body: Some(serde_json::json!({ "plugins": { "preset": "quality" } })),
         permission: Some(serde_json::json!({ "*": "ask", "read": "allow" })),
         ..Config::default()
     };

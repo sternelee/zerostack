@@ -22,6 +22,9 @@ pub mod archmd;
 #[cfg(feature = "advisor")]
 pub mod advisor;
 
+#[cfg(feature = "hooks")]
+pub mod hooks;
+
 pub mod chain;
 #[cfg(feature = "multimodal")]
 pub mod multimodal;

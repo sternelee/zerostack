@@ -162,32 +162,7 @@ async fn handle_theme(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<
         if let Some(content) = ctx.context.themes.get(name) {
             ctx.context.current_theme_name = Some(name.to_string());
             let _ = storage::save_theme_name(Some(name));
-            if let Ok(colors) =
-                serde_json::from_str::<zerostack_core::config::ColorsConfig>(content)
-            {
-                let chat_bg = colors
-                    .chat_background
-                    .as_deref()
-                    .and_then(crate::ui::utils::parse_color);
-                let input_bg = colors
-                    .input_background
-                    .as_deref()
-                    .and_then(crate::ui::utils::parse_color);
-                let status_bg = colors
-                    .status_background
-                    .as_deref()
-                    .and_then(crate::ui::utils::parse_color);
-                if matches!(colors.scheme_type, zerostack_core::config::SchemeType::Ansi) {
-                    ctx.renderer.set_background_colors(
-                        chat_bg.map(crate::ui::utils::to_ansi_256),
-                        input_bg.map(crate::ui::utils::to_ansi_256),
-                        status_bg.map(crate::ui::utils::to_ansi_256),
-                    );
-                } else {
-                    ctx.renderer
-                        .set_background_colors(chat_bg, input_bg, status_bg);
-                }
-            }
+            crate::context::themes::apply(content, ctx.renderer);
             write_ok(ctx.renderer, format!("active theme: {}", name));
         } else {
             write_error(ctx.renderer, format!("unknown theme: '{}'", name));

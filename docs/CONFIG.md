@@ -152,7 +152,7 @@ Accepted top-level keys:
 | `max_text_file_size`      | integer | Maximum allowed file size in bytes for read/write tool operations. Default: `1048576` (1 MB).                                                                               |
 | `deny_repeated_reads`     | boolean | Block repeated reads of the same file section within a session until the file is edited or written. Default: `true`. Set to `false` to allow re-reading.                     |
 | `show_cost_always`        | boolean | Show the session cost in the status bar even when it is `$0.0000` (for example when the model has no per-token pricing configured). Default: `false`, which hides the cost until it is above zero. |
-| `compact_enabled`         | boolean | Master switch for all automatic conversation compaction (both between-turn and mid-turn). Default: `true`. When `false`, nothing is ever compacted automatically.            |
+| `compact_enabled`         | boolean | Master switch for all automatic conversation compaction (both between-turn and mid-turn). Default: `false`. When `false`, nothing is ever compacted automatically.            |
 | `mid_turn_compact_threshold` | number | Opt-in mid-turn compaction. Fraction of the context window (`0.0`–`1.0`) of real provider prompt pressure at which to compact *during* a turn, not just between turns. Unset by default, meaning no mid-turn compaction. Honored only when `compact_enabled` is `true`. Recommended starting value: `0.80`. See Mid-turn compaction below.            |
 | `always_show_welcome`     | boolean | Always show the welcome banner on startup, bypassing the one-shot marker file. Default: `false`.                                                                               |
 | `auto-update-prompts`     | boolean | When `true`, always regenerate prompts on version change without asking. When `false`, never regenerate. When unset, asks interactively.                                         |
@@ -188,6 +188,130 @@ Accepted top-level keys:
 | `acp_host`                | string  | TCP bind host for ACP server mode (equivalent to `--acp-host`).                                                                                                              |
 | `acp_port`                | integer | TCP bind port for ACP server mode (equivalent to `--acp-port`, default: 7243).                                                                                               |
 | `colors`                  | object  | Background color overrides for the TUI. See the colors section below.                                                                                                       |
+
+## Hooks
+
+Requires the `hooks` Cargo feature, which is **default-off** — a prebuilt
+binary or package must have been compiled with `--features hooks` (or
+`--all-features`) for any of this to apply. When the feature isn't compiled
+in, none of the flags, files, or `/hooks`/`--hooks-test` commands below exist.
+
+Hooks let external commands observe or gate agent behavior at defined points
+(a tool call, a user prompt, the agent finishing a turn, a session
+starting/ending, a subagent starting/stopping), using the same
+`settings.json` shape, stdin envelope, and exit-code/stdout-JSON contract as
+Claude Code, so an existing CC hooks setup is largely compatible (see the
+`$CLAUDE_PROJECT_DIR` caveat below for the one script-level change some
+setups need).
+
+### Config file locations and precedence
+
+Hook config lives in a `settings.json` (JSON, not `config.toml`/`.yaml`) at up
+to three locations, loaded and merged in this order:
+
+| Location | Trust |
+| -------- | ----- |
+| `~/.config/zerostack/settings.json` (global; on macOS `~/Library/Application Support/zerostack/settings.json`; on Windows `%APPDATA%\zerostack\settings.json`, experimental) | Trusted by default |
+| `.zerostack/settings.json` (project, relative to CWD) | **Not** trusted by default — see Trust model below |
+| `/etc/zerostack/managed-settings.json` (Linux) / `/Library/Application Support/zerostack/managed-settings.json` (macOS) / `C:\ProgramData\zerostack\managed-settings.json` (Windows, experimental) — admin-controlled | Always trusted; unaffected by `disableAllHooks` |
+
+Each file may have a top-level `hooks` object (keyed by event name) and a
+top-level `disableAllHooks: true` boolean. `disableAllHooks` (from the global
+or project file) or the `--no-hooks` CLI flag suppresses every non-managed
+hook; managed hooks still run regardless. A missing or invalid file is not an
+error — it just contributes nothing.
+
+**Compatible with Claude Code's `.claude/settings.json`**: zerostack does not
+read that file directly, but its own `settings.json` uses the identical
+`hooks` schema, so copying or symlinking the `hooks` key from
+`.claude/settings.json` into `.zerostack/settings.json` works as-is. Scripts
+themselves may still need a change: zerostack sets `$ZEROSTACK_PROJECT_DIR`
+rather than `$CLAUDE_PROJECT_DIR`, so a script that reads the latter must be
+updated to read the former.
+
+### Handler schema
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write",
+        "hooks": [
+          { "type": "command", "command": "./guard.sh", "timeout": 30 }
+        ]
+      }
+    ]
+  }
+}
+```
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `type` | string | Only `"command"` is supported. |
+| `command` | string | Shell command, run via `sh -c` on Unix (`powershell -Command` on Windows, experimental). Receives the stdin envelope as JSON; `$ZEROSTACK_PROJECT_DIR` is set in its environment. |
+| `args` | array of strings | When present, bypasses the shell entirely: `command` is executed directly as the program with `args` as its argv (no shell metacharacter expansion). |
+| `timeout` | integer (seconds) | Per-hook timeout; the whole process group is killed on expiry. Default: 60. |
+| `async` | boolean | When `true`, the hook runs in the background and its decision is ignored. Default: `false`. |
+| `if` | string | A shell command evaluated (with the same stdin envelope) before the handler runs; the handler only runs if it exits `0`. Fails closed: a broken/unparseable/timed-out condition still runs the handler, with a warning. |
+| `once` | boolean | Runs the handler at most once per event per session; later matches are skipped. |
+
+`matcher` (on the handler group, not the handler) follows Claude Code
+semantics: omitted, `""`, or `"*"` matches every tool; a bare name or a
+`|`/`,`-separated list is an exact case-insensitive match after tool-name
+normalization (e.g. `Bash` ↔ `bash`, `Glob` ↔ `find_files`, `Edit|Write`
+matches zerostack's `write` tool); anything else is treated as a regex.
+Invalid regexes are reported at load time.
+
+### Events
+
+`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit`,
+`Stop`, `SessionStart`, `SessionEnd`, `SubagentStart`, `SubagentStop`.
+`PreCompact` and `Notification` are not currently implemented.
+
+Only `PreToolUse` is permission-blockable by default. A handler's stdout JSON
+may set `"permissionDecision"` to `"deny"`, `"ask"`, `"allow"`, or omit it
+(defer to the normal permission system). `deny` always blocks, holding even
+under `--yolo`. `ask` forces an interactive confirmation regardless of
+permission mode, and escalates to deny in non-interactive contexts (`-p`,
+`--loop`) where no confirmation is possible. `allow` suppresses the
+interactive prompt for that one call only — it can never override a deny
+from a rule, security mode, managed policy, or another hook. `PreToolUse` may
+also set `"updatedInput"` to rewrite the tool's arguments before it runs, and
+`PostToolUse` may set `"result"` to rewrite the model-visible output.
+
+`UserPromptSubmit` and `SubagentStart` can set `"additionalContext"` to
+prepend text to the prompt. `Stop` and `SubagentStop` can set
+`"decision": "block"` with a `"reason"` to force the agent (or subagent) to
+continue instead of finishing, using `reason` as the next instruction; `Stop`
+gives up after 8 consecutive blocks without progress.
+
+Any handler can also signal via **exit code** instead of JSON: exit `0` means
+no objection, exit `2` blocks (for blockable events) with stderr as the
+reason, and any other exit code is a non-blocking error. Exit `2` combined
+with stdout JSON is a mixed-channel warning — the JSON is ignored.
+
+### Trust model
+
+Project-level hook handlers (`.zerostack/settings.json` — global and managed
+hooks are trusted automatically) require interactive confirmation the first
+time they'd run, keyed by a hash of the handler's definition (event +
+matcher + command/args/timeout/etc.); changing the definition changes the
+hash and requires re-confirmation. Confirmations persist to
+`$XDG_DATA_HOME/zerostack/trusted-hooks.json` (a user-level file, so child
+processes/orchestrated subagents sharing it inherit trust automatically). In
+headless contexts (`-p`, `--loop`) an unconfirmed project hook is skipped
+with a warning rather than prompting.
+
+### Global switches
+
+| Flag | Effect |
+| ---- | ------ |
+| `--no-hooks` | Disables all non-managed hooks for this run. |
+| `disableAllHooks: true` (in global or project `settings.json`) | Same effect, via config. |
+| `--hooks-test <tool> [--hooks-test-input <json>]` | Dry-runs `PreToolUse` for `tool` against the loaded/trust-filtered dispatcher and prints the merged verdict/reason/`updatedInput`, then exits — no session, agent, or API key required. |
+
+See [COMMANDS.md](COMMANDS.md#hooks) for the `/hooks` slash command.
 
 ## Mid-turn compaction
 
@@ -444,6 +568,14 @@ Available items:
 
 The `git_changes` and `git_status` items run `git status` once a second (only
 when one of them is used). All other items are read from the session.
+
+## Status signals
+
+Requires the `status-signals` feature (included in the default build). Pass
+`--status-socket <path>` to have zerostack emit `start`, `stop`, and
+`git-conflict` events over a Unix domain socket at `<path>`, for external
+status bars or tooling to watch. This is separate from the in-TUI status bar
+above.
 
 ## Colors
 
@@ -847,9 +979,8 @@ model only when needed.
 [advisor]
 enabled = true
 model = "deepseek-v4-pro"
-# provider = "openrouter"         # defaults to main provider
 # max_uses = 3                    # max advisor calls per request (nil = unlimited)
-# human_handoff = false           # route advisor calls to the user instead
+# human_handoff = true            # struct default is true, but currently has no effect from config alone; see the note below
 # advisor_kilobytes_limit = 256   # max KB of conversation context (split half head / half tail)
 ```
 
@@ -860,7 +991,7 @@ advisor:
   enabled: true
   model: deepseek-v4-pro
   max_uses: 3
-  human_handoff: false
+  human_handoff: true
   advisor_kilobytes_limit: 256
 ```
 
@@ -870,14 +1001,19 @@ advisor:
 |------|-------------|
 | `--advisor` | Enable the advisor tool |
 | `--advisor-model <name>` | Advisor model name |
-| `--advisor-provider <name>` | Provider for the advisor model |
 | `--advisor-max-uses <n>` | Max advisor calls per request |
-| `--advisor-human-handoff` | Route advisor calls to the user |
+| `--advisor-human-handoff[=<bool>]` | Route advisor calls to the user instead of a model. Bare flag or `=true` enables it; CLI default is `false` unless passed |
 | `--advisor-kilobytes-limit <n>` | Max KB of conversation context sent to advisor (default: 256) |
+
+**Known quirk:** the CLI flag always supplies a value (`Some(false)` when not
+passed), so `resolve_advisor_human_handoff()` never falls through to the
+config file's `human_handoff` key in practice. Use `--advisor-human-handoff`
+or the `/advisor handoff on` runtime command to actually enable it; setting
+`human_handoff` in the config file alone currently has no effect.
 
 ### Human handoff mode
 
-When `human_handoff = true`, the agent's advisor calls are redirected to the
+When enabled, the agent's advisor calls are redirected to the
 user instead of a second model. The agent pauses, shows its question, and the
 user types a response. This is useful for:
 

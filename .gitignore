@@ -30,5 +30,5 @@ model-prompts/
 
 PLAN*.md
 .pi
-.pi-subagents/artifacts/
+.pi-*
 gui_*.png

@@ -7,14 +7,23 @@ All slash commands are available from the TUI input prompt.
 | Command | Description |
 | ------- | ----------- |
 | `/clear` | Clear the current session (all messages, tokens, compactions). |
+| `/new` | Alias for `/clear`. |
 | `/undo` | Remove the last exchange (user message + assistant response). |
+| `/redo` | Restore whatever the most recent `/undo` or `/rewind` removed. |
+| `/rewind` | Open a picker to jump the session back to an earlier point. |
 | `/retry` | Load the last user message into the input editor for editing. |
 | `/quit` | Exit zerostack. |
+| `/exit` | Alias for `/quit`. |
 | `/sessions` | List recent saved sessions (up to 20). |
 | `/sessions <id-or-name>` | Load a session by its ID prefix or name. |
 | `/sessions delete <id-or-name>` | Delete a session by its ID prefix or name. |
 | `/rename <name>` | Rename the current session. |
 | `/history` | Show global chat history (last 10 entries across sessions). |
+| `/queue` | List input queued while the agent is busy (same as `/queue ls`). |
+| `/queue clear` | Empty the queue. |
+| `/queue pop` | Remove the last queued input. |
+| `/welcome` | Show the welcome/onboarding screen. |
+| `/tutorial` | Alias for `/welcome`. |
 
 ## Provider & Model
 
@@ -66,6 +75,19 @@ Prompts can set the security mode automatically via `%%mode=<mode>` on
 the first line. When a prompt with `%%mode=last_user_mode` is activated,
 the mode reverts to whatever was last set explicitly by `/mode` or
 startup config. See Prompts & Themes below.
+
+## Hooks
+
+Requires the `hooks` feature (default-off; see [CONFIG.md](CONFIG.md#hooks)).
+
+| Command | Description |
+| ------- | ----------- |
+| `/hooks` | Show whether a hook dispatcher is installed and, if so, each configured event with its handler count. |
+
+Run `zerostack --hooks-test <tool> [--hooks-test-input <json>]` from the
+shell (not a slash command) to dry-run `PreToolUse` hooks for a tool without
+starting a session or making a model call. See
+[CONFIG.md](CONFIG.md#hooks) for the full hooks configuration reference.
 
 ## Prompts & Themes
 
@@ -159,6 +181,17 @@ older daily logs are accessible via `/memory read` and `memory_search`.
 | `/advisor model <name>` | Change the advisor model. |
 | `/advisor max-uses <n>` | Set max advisor calls per request (0 = unlimited). |
 | `/advisor context-limit <n>` | Set max kilobytes of conversation context sent to advisor. |
+
+## Subagents (feature-gated)
+
+Requires the `subagents` feature (default-on; see [SUBAGENTS.md](SUBAGENTS.md)).
+
+| Command | Description |
+| ------- | ----------- |
+| `/model-subagent` | Show the model currently used for subagents. |
+| `/model-subagent <name>` | Switch the subagent model. |
+| `/models-subagent` | List quick models available for subagents. |
+| `/models-subagent <name>` | Switch subagents to a named quick model. |
 
 ## Worktree (feature-gated)
 
