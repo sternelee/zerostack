@@ -10,6 +10,8 @@ use zerostack_core::engine::CoreEngine;
 use zerostack_core::events::{ChatMessage, CoreEvent, SessionInfo, UserAction};
 use zerostack_core::permission::SecurityMode;
 
+use zerostack_gui::theme::dark;
+
 app_main!(App);
 
 // ─── Global Bridge ─────────────────────────────────────────────────────────
@@ -192,135 +194,123 @@ script_mod! {
                     flow: Right
                     spacing: 0.0
                     show_bg: true
-                    draw_bg.color: #050505
-
-                    // ══ Left Navigation Rail ════════════════════════
-                    left_rail := View {
-                        width: 48.0, height: Fill
-                        show_bg: true
-                        draw_bg.color: #050505
-                        flow: Down
-                        padding: Inset { top: 16.0, bottom: 12.0 }
-                        spacing: 4.0
-                        align: Align { x: 0.5 }
-
-                        nav_new_agent := Button {
-                            text: "＋"
-                            width: 36.0, height: 36.0
-                            draw_bg.color: #00000000
-                            draw_bg.radius: 8.0
-                            draw_bg.hover_color: #151519
-                            draw_text.color: #F2F2F5
-                            draw_text.text_style.font_size: 18.0
-                        }
-                        nav_search := Button {
-                            text: "⌕"
-                            width: 36.0, height: 36.0
-                            draw_bg.color: #00000000
-                            draw_bg.radius: 8.0
-                            draw_bg.hover_color: #151519
-                            draw_text.color: #7A7A80
-                            draw_text.text_style.font_size: 18.0
-                        }
-                        nav_automations := Button {
-                            text: "⚡"
-                            width: 36.0, height: 36.0
-                            draw_bg.color: #00000000
-                            draw_bg.radius: 8.0
-                            draw_bg.hover_color: #151519
-                            draw_text.color: #7A7A80
-                            draw_text.text_style.font_size: 16.0
-                        }
-                        nav_customize := Button {
-                            text: "⚙"
-                            width: 36.0, height: 36.0
-                            draw_bg.color: #00000000
-                            draw_bg.radius: 8.0
-                            draw_bg.hover_color: #151519
-                            draw_text.color: #7A7A80
-                            draw_text.text_style.font_size: 16.0
-                        }
-
-                        View { width: Fill, height: Fill }
-
-                        nav_profile := Button {
-                            text: "●"
-                            width: 32.0, height: 32.0
-                            draw_bg.color: #232328
-                            draw_bg.radius: 16.0
-                            draw_bg.hover_color: #2E2E34
-                            draw_text.color: #F2F2F5
-                            draw_text.text_style.font_size: 12.0
-                        }
-                    }
+                    draw_bg.color: #x171719
 
                     // ══ Sidebar ══════════════════════════════════════
-                    sidebar := View {
+                    sidebar := RoundedView {
                         width: 260.0, height: Fill
                         show_bg: true
-                        draw_bg.color: #0A0A0C
+                        draw_bg.color: #x1F2024
+                        draw_bg.border_radius: 0.0
                         flow: Down
                         spacing: 0.0
 
-                        // Sidebar header
-                        View {
+                        // Sidebar top: toggle button only
+                        RoundedView {
                             width: Fill, height: Fit
-                            padding: Inset { left: 16.0, right: 16.0, top: 16.0, bottom: 12.0 }
+                            padding: Inset { left: 10.0, right: 10.0, top: 10.0, bottom: 8.0 }
                             flow: Right
                             align: Align { y: 0.5 }
                             spacing: 8.0
 
-                            project_label := Label {
-                                text: "zerostack"
+                            View { width: Fill, height: 0.0 }
+
+                            sidebar_split_btn := Button {
+                                text: "▢"
+                                width: 24.0, height: 24.0
+                                draw_bg.color: #x00000000
+                                draw_bg.radius: 6.0
+                                draw_bg.color_hover: #x2E2F33
+                                draw_text.color: #x71717A
+                                draw_text.text_style.font_size: 12.0
+                            }
+                        }
+
+                        // Navigation menu
+                        nav_menu := View {
+                            width: Fill, height: Fit
+                            flow: Down
+                            spacing: 2.0
+                            padding: Inset { left: 10.0, right: 10.0, top: 4.0, bottom: 8.0 }
+
+                            nav_new_agent := Button {
+                                text: "  ＋  New Agent"
+                                width: Fill, height: 32.0
+                                padding: Inset { left: 10.0, right: 10.0 }
+                                align: Align { x: 0.0, y: 0.5 }
+                                draw_bg.color: #x00000000
+                                draw_bg.radius: 8.0
+                                draw_bg.color_hover: #x2A2B30
+                                draw_text.color: #xF2F2F5
+                                draw_text.text_style.font_size: 12.0
+                            }
+                            nav_search := Button {
+                                text: "  ⌕  Search"
+                                width: Fill, height: 32.0
+                                padding: Inset { left: 10.0, right: 10.0 }
+                                align: Align { x: 0.0, y: 0.5 }
+                                draw_bg.color: #x00000000
+                                draw_bg.radius: 8.0
+                                draw_bg.color_hover: #x2A2B30
+                                draw_text.color: #x98999D
+                                draw_text.text_style.font_size: 12.0
+                            }
+                            nav_automations := Button {
+                                text: "  ⚡  Automations"
+                                width: Fill, height: 32.0
+                                padding: Inset { left: 10.0, right: 10.0 }
+                                align: Align { x: 0.0, y: 0.5 }
+                                draw_bg.color: #x00000000
+                                draw_bg.radius: 8.0
+                                draw_bg.color_hover: #x2A2B30
+                                draw_text.color: #x98999D
+                                draw_text.text_style.font_size: 12.0
+                            }
+                            nav_customize := Button {
+                                text: "  ⚙  Customize"
+                                width: Fill, height: 32.0
+                                padding: Inset { left: 10.0, right: 10.0 }
+                                align: Align { x: 0.0, y: 0.5 }
+                                draw_bg.color: #x00000000
+                                draw_bg.radius: 8.0
+                                draw_bg.color_hover: #x2A2B30
+                                draw_text.color: #x98999D
+                                draw_text.text_style.font_size: 12.0
+                            }
+                        }
+
+                        // Project / Recent section header
+                        project_header := View {
+                            width: Fill, height: Fit
+                            padding: Inset { left: 16.0, right: 10.0, top: 6.0, bottom: 4.0 }
+                            flow: Right
+                            align: Align { y: 0.5 }
+                            spacing: 6.0
+
+                            section_project := Label {
+                                text: "natro"
                                 width: Fill
-                                draw_text.color: #F2F2F5
+                                draw_text.color: #x98999D
+                                draw_text.text_style.font_size: 11.0
+                            }
+
+                            section_filter := Button {
+                                text: "≣"
+                                width: 22.0, height: 22.0
+                                draw_bg.color: #x00000000
+                                draw_bg.radius: 6.0
+                                draw_bg.color_hover: #x2A2B30
+                                draw_text.color: #x71717A
                                 draw_text.text_style.font_size: 13.0
                             }
-
-                            new_session_btn := Button {
-                                text: "+"
-                                width: 28.0, height: 28.0
-                                draw_bg.color: #18181C
-                                draw_bg.radius: 8.0
-                                draw_bg.hover_color: #232328
-                                draw_text.color: #F2F2F5
-                                draw_text.text_style.font_size: 16.0
-                            }
-                        }
-
-                        // Search input
-                        search_input := TextInput {
-                            width: Fill, height: Fit
-                            empty_text: "Search chats..."
-                            padding: Inset { left: 12.0, right: 12.0, top: 10.0, bottom: 10.0 }
-                            margin: Inset { left: 16.0, right: 16.0, bottom: 10.0 }
-                            draw_bg.color: #121216
-                            draw_bg.radius: 8.0
-                            draw_bg.border_size: 1.0
-                            draw_bg.border_color_1: #1F1F24
-                            draw_bg.border_color_2: #1F1F24
-                            draw_text.color: #F2F2F5
-                            draw_text.text_style.font_size: 12.0
-                            draw_text.empty_color: #6E6E75
-                            draw_bg.focus_color: #2E2E34
-                        }
-
-                        // Divider
-                        View {
-                            width: Fill, height: 1.0
-                            margin: Inset { left: 16.0, right: 16.0, bottom: 8.0 }
-                            show_bg: true
-                            draw_bg.color: #1A1A1E
-                        }
-
-                        // Project section
-                        View {
-                            width: Fill, height: Fit
-                            padding: Inset { left: 16.0, right: 16.0, top: 6.0, bottom: 6.0 }
-                            section_project := Label {
-                                text: "PROJECT"
-                                draw_text.color: #6E6E75
-                                draw_text.text_style.font_size: 9.0
+                            section_select_all := Button {
+                                text: "☐"
+                                width: 22.0, height: 22.0
+                                draw_bg.color: #x00000000
+                                draw_bg.radius: 6.0
+                                draw_bg.color_hover: #x2A2B30
+                                draw_text.color: #x71717A
+                                draw_text.text_style.font_size: 12.0
                             }
                         }
 
@@ -330,32 +320,37 @@ script_mod! {
                             spacing: 2.0
                             padding: Inset { left: 12.0, right: 12.0 }
 
-                            project_session_0 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
-                            project_session_1 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
-                            project_session_2 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
-                            project_session_3 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
-                            project_session_4 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
-                            project_session_5 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
-                            project_session_6 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
-                            project_session_7 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
+                            project_session_0 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
+                            project_session_1 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
+                            project_session_2 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
+                            project_session_3 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
+                            project_session_4 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
+                            project_session_5 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
+                            project_session_6 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
+                            project_session_7 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
                         }
 
                         // Divider
-                        View {
+                        RoundedView {
                             width: Fill, height: 1.0
                             margin: Inset { left: 16.0, right: 16.0, top: 8.0, bottom: 8.0 }
                             show_bg: true
-                            draw_bg.color: #1A1A1E
+                            draw_bg.color: #x27272A
                         }
 
-                        // This Mac section
-                        View {
+                        // This Mac section header
+                        local_header := View {
                             width: Fill, height: Fit
-                            padding: Inset { left: 16.0, right: 16.0, top: 6.0, bottom: 6.0 }
+                            padding: Inset { left: 16.0, right: 10.0, top: 8.0, bottom: 4.0 }
+                            flow: Right
+                            align: Align { y: 0.5 }
+                            spacing: 6.0
+
                             section_local := Label {
-                                text: "THIS MAC"
-                                draw_text.color: #6E6E75
-                                draw_text.text_style.font_size: 9.0
+                                text: "This Mac"
+                                width: Fill
+                                draw_text.color: #x98999D
+                                draw_text.text_style.font_size: 11.0
                             }
                         }
 
@@ -368,31 +363,31 @@ script_mod! {
                                 scroll_bar_y.drag_scrolling: true
                             }
 
-                            local_session_0 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
-                            local_session_1 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
-                            local_session_2 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
-                            local_session_3 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
-                            local_session_4 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
-                            local_session_5 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
-                            local_session_6 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
-                            local_session_7 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #00000000, draw_bg.radius: 8.0, draw_bg.hover_color: #18181C, draw_text.color: #A0A0A8, draw_text.text_style.font_size: 12.0, text: "" }
+                            local_session_0 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
+                            local_session_1 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
+                            local_session_2 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
+                            local_session_3 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
+                            local_session_4 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
+                            local_session_5 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
+                            local_session_6 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
+                            local_session_7 := Button { width: Fill, height: Fit, visible: false, padding: Inset { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }, align: Align { x: 0.0, y: 0.5 }, draw_bg.color: #x00000000, draw_bg.radius: 8.0, draw_bg.color_hover: #x18181B, draw_text.color: #xA1A1AA, draw_text.text_style.font_size: 12.0, text: "" }
                         }
 
                         // User profile footer
-                        View { width: Fill, height: Fill }
+                        RoundedView { width: Fill, height: Fill }
 
                         // Divider above footer
-                        View {
+                        RoundedView {
                             width: Fill, height: 1.0
                             margin: Inset { left: 16.0, right: 16.0, bottom: 8.0 }
                             show_bg: true
-                            draw_bg.color: #1A1A1E
+                            draw_bg.color: #x27272A
                         }
 
-                        profile_footer := View {
+                        profile_footer := RoundedView {
                             width: Fill, height: Fit
                             show_bg: true
-                            draw_bg.color: #00000000
+                            draw_bg.color: #x00000000
                             padding: Inset { left: 12.0, right: 12.0, top: 10.0, bottom: 12.0 }
                             flow: Right
                             spacing: 10.0
@@ -401,10 +396,10 @@ script_mod! {
                             profile_avatar := Button {
                                 text: "U"
                                 width: 32.0, height: 32.0
-                                draw_bg.color: #232328
-                                draw_bg.radius: 16.0
-                                draw_bg.hover_color: #2E2E34
-                                draw_text.color: #F2F2F5
+                                draw_bg.color: #x27272A
+                                draw_bg.radius: 9999.0
+                                draw_bg.color_hover: #x3F3F46
+                                draw_text.color: #xFAFAFA
                                 draw_text.text_style.font_size: 12.0
                             }
 
@@ -417,13 +412,13 @@ script_mod! {
                                 profile_name := Label {
                                     text: "User"
                                     width: Fill
-                                    draw_text.color: #F2F2F5
+                                    draw_text.color: #xFAFAFA
                                     draw_text.text_style.font_size: 12.0
                                 }
                                 profile_plan := Label {
                                     text: "Free Plan"
                                     width: Fill
-                                    draw_text.color: #9A9AA0
+                                    draw_text.color: #xA1A1AA
                                     draw_text.text_style.font_size: 10.0
                                 }
                             }
@@ -431,90 +426,90 @@ script_mod! {
                             profile_settings := Button {
                                 text: "⚙"
                                 width: 28.0, height: 28.0
-                                draw_bg.color: #00000000
-                                draw_bg.radius: 6.0
-                                draw_bg.hover_color: #18181C
-                                draw_text.color: #7A7A80
+                                draw_bg.color: #x00000000
+                                draw_bg.radius: 8.0
+                                draw_bg.color_hover: #x18181B
+                                draw_text.color: #x71717A
                                 draw_text.text_style.font_size: 14.0
                             }
                         }
                     }
 
                     // Vertical divider between sidebar and chat
-                    View {
+                    RoundedView {
                         width: 1.0, height: Fill
                         show_bg: true
-                        draw_bg.color: #1A1A1E
+                        draw_bg.color: #x27272A
                     }
 
                     // ══ Main Content ═════════════════════════════════
-                    main_content := View {
+                    main_content := RoundedView {
                         width: Fill, height: Fill
                         flow: Down
                         spacing: 0.0
                         show_bg: true
-                        draw_bg.color: #050505
+                        draw_bg.color: #x171719
 
                         // ── Top Bar ─────────────────────────────────
-                        top_bar := View {
-                            width: Fill, height: 48.0
+                        top_bar := RoundedView {
+                            width: Fill, height: 40.0
                             show_bg: true
-                            draw_bg.color: #050505
-                            padding: Inset { left: 20.0, right: 16.0 }
-                            flow: Right
-                            spacing: 12.0
+                            draw_bg.color: #x171719
+                            draw_bg.border_radius: 0.0
+                                padding: Inset { left: 16.0, right: 12.0 }
+                                flow: Right
+                            spacing: 10.0
                             align: Align { y: 0.5 }
 
-                            View {
-                                width: Fit, height: Fit
-                                flow: Down
-                                spacing: 2.0
-
-                                session_title := Label {
-                                    text: "New chat"
-                                    draw_text.color: #F2F2F5
-                                    draw_text.text_style.font_size: 14.0
-                                }
-                                project_chip := Label {
-                                    text: "zerostack"
-                                    draw_text.color: #6E6E75
-                                    draw_text.text_style.font_size: 11.0
-                                }
+                            session_title := Label {
+                                text: "new chat"
+                                draw_text.color: #xF2F2F5
+                                draw_text.text_style.font_size: 13.0
                             }
 
                             View { width: Fill, height: 0.0 }
 
-                            top_ide := Button {
-                                text: "IDE ⌘"
+                            top_model := Button {
+                                text: "Composer 2.5 Fast"
                                 width: Fit, height: 26.0
                                 padding: Inset { left: 10.0, right: 10.0 }
-                                draw_bg.color: #18181C
-                                draw_bg.radius: 6.0
-                                draw_bg.hover_color: #232328
-                                draw_text.color: #F2F2F5
+                                draw_bg.color: #x2A2B30
+                                draw_bg.radius: 8.0
+                                draw_bg.color_hover: #x34353A
+                                draw_text.color: #xD4D4D8
                                 draw_text.text_style.font_size: 11.0
                             }
 
                             top_menu := Button {
                                 text: "⋯"
                                 width: 28.0, height: 26.0
-                                draw_bg.color: #00000000
-                                draw_bg.radius: 6.0
-                                draw_bg.hover_color: #18181C
-                                draw_text.color: #7A7A80
-                                draw_text.text_style.font_size: 13.0
+                                draw_bg.color: #x00000000
+                                draw_bg.radius: 8.0
+                                draw_bg.color_hover: #x2A2B30
+                                draw_text.color: #x98999D
+                                draw_text.text_style.font_size: 14.0
+                            }
+
+                            top_maximize := Button {
+                                text: "☐"
+                                width: 28.0, height: 26.0
+                                draw_bg.color: #x00000000
+                                draw_bg.radius: 8.0
+                                draw_bg.color_hover: #x2A2B30
+                                draw_text.color: #x98999D
+                                draw_text.text_style.font_size: 12.0
                             }
                         }
 
                         // Top bar divider
-                        View {
+                        RoundedView {
                             width: Fill, height: 1.0
                             show_bg: true
-                            draw_bg.color: #1A1A1E
+                            draw_bg.color: #x33343A
                         }
 
                         // ── Chat Area ────────────────────────────────
-                        chat_scroll := View {
+                        chat_scroll := RoundedView {
                             width: Fill, height: Fill
                             flow: Down
                             padding: Inset { left: 16.0, right: 16.0, top: 8.0, bottom: 16.0 }
@@ -541,63 +536,63 @@ script_mod! {
                                     welcome_title := Label {
                                         text: "zerostack"
                                         width: Fit
-                                        draw_text.color: #FFFFFF
+                                        draw_text.color: #xFAFAFA
                                         draw_text.text_style.font_size: 28.0
                                     }
                                     welcome_subtitle := Label {
                                         text: "What can I help you build today?"
                                         width: Fit
-                                        draw_text.color: #7A7A80
+                                        draw_text.color: #x71717A
                                         draw_text.text_style.font_size: 14.0
                                     }
                                 }
 
-                                View {
+                                RoundedView {
                                     width: Fit, height: Fit
                                     align: Align { x: 0.5 }
                                     flow: Right
                                     spacing: 10.0
                                     padding: Inset { top: 16.0 }
 
-                                    hint_0 := View {
+                                    hint_0 := RoundedView {
                                         width: Fit, height: Fit
                                         show_bg: true
-                                        draw_bg.color: #121216
-                                        draw_bg.radius: 8.0
-                                        draw_bg.border_color: #232328
+                                        draw_bg.color: #x141417
+                                        draw_bg.border_radius: 12.0
                                         draw_bg.border_size: 1.0
+                                        draw_bg.border_color: #x27272A
                                         padding: Inset { left: 14.0, right: 14.0, top: 10.0, bottom: 10.0 }
                                         hint_0_text := Label {
                                             text: "Explain this code"
-                                            draw_text.color: #9A9AA0
+                                            draw_text.color: #xA1A1AA
                                             draw_text.text_style.font_size: 12.0
                                         }
                                     }
-                                    hint_1 := View {
+                                    hint_1 := RoundedView {
                                         width: Fit, height: Fit
                                         show_bg: true
-                                        draw_bg.color: #121216
-                                        draw_bg.radius: 8.0
-                                        draw_bg.border_color: #232328
+                                        draw_bg.color: #x141417
+                                        draw_bg.border_radius: 12.0
                                         draw_bg.border_size: 1.0
+                                        draw_bg.border_color: #x27272A
                                         padding: Inset { left: 14.0, right: 14.0, top: 10.0, bottom: 10.0 }
                                         hint_1_text := Label {
                                             text: "Refactor a function"
-                                            draw_text.color: #9A9AA0
+                                            draw_text.color: #xA1A1AA
                                             draw_text.text_style.font_size: 12.0
                                         }
                                     }
-                                    hint_2 := View {
+                                    hint_2 := RoundedView {
                                         width: Fit, height: Fit
                                         show_bg: true
-                                        draw_bg.color: #121216
-                                        draw_bg.radius: 8.0
-                                        draw_bg.border_color: #232328
+                                        draw_bg.color: #x141417
+                                        draw_bg.border_radius: 12.0
                                         draw_bg.border_size: 1.0
+                                        draw_bg.border_color: #x27272A
                                         padding: Inset { left: 14.0, right: 14.0, top: 10.0, bottom: 10.0 }
                                         hint_2_text := Label {
                                             text: "Write a test"
-                                            draw_text.color: #9A9AA0
+                                            draw_text.color: #xA1A1AA
                                             draw_text.text_style.font_size: 12.0
                                         }
                                     }
@@ -613,7 +608,7 @@ script_mod! {
 
                                 worked_text := Label {
                                     text: "Worked for 1s"
-                                    draw_text.color: #6E6E75
+                                    draw_text.color: #x71717A
                                     draw_text.text_style.font_size: 11.0
                                 }
                             }
@@ -630,12 +625,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_0_inner := View {
+                                msg_0_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_0_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -654,12 +649,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_1_inner := View {
+                                msg_1_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_1_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -678,12 +673,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_2_inner := View {
+                                msg_2_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_2_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -702,12 +697,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_3_inner := View {
+                                msg_3_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_3_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -726,12 +721,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_4_inner := View {
+                                msg_4_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_4_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -750,12 +745,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_5_inner := View {
+                                msg_5_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_5_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -774,12 +769,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_6_inner := View {
+                                msg_6_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_6_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -798,12 +793,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_7_inner := View {
+                                msg_7_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_7_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -822,12 +817,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_8_inner := View {
+                                msg_8_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_8_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -846,12 +841,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_9_inner := View {
+                                msg_9_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_9_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -870,12 +865,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_10_inner := View {
+                                msg_10_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_10_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -894,12 +889,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_11_inner := View {
+                                msg_11_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_11_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -918,12 +913,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_12_inner := View {
+                                msg_12_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_12_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -942,12 +937,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_13_inner := View {
+                                msg_13_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_13_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -966,12 +961,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_14_inner := View {
+                                msg_14_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_14_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -990,12 +985,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_15_inner := View {
+                                msg_15_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_15_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -1014,12 +1009,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_16_inner := View {
+                                msg_16_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_16_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -1038,12 +1033,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_17_inner := View {
+                                msg_17_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_17_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -1062,12 +1057,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_18_inner := View {
+                                msg_18_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_18_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -1086,12 +1081,12 @@ script_mod! {
                                     visible: false
                                 }
 
-                                msg_19_inner := View {
+                                msg_19_inner := RoundedView {
                                     width: Fill, height: Fit
                                     show_bg: true
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    padding: Inset { left: 16.0, right: 16.0, top: 12.0, bottom: 12.0 }
+                                    draw_bg.color: #x2E3039
+                                    draw_bg.border_radius: 12.0
+                                    padding: Inset { left: 12.0, right: 12.0, top: 8.0, bottom: 8.0 }
                                     msg_19_text := Markdown {
                                         width: Fit, height: Fit
                                         draw_text.text_style.font_size: 14.0
@@ -1099,131 +1094,211 @@ script_mod! {
                                     }
                                 }
                             }
+
+                            // ── Message actions row (Just now + reactions) ───
+                            msg_actions := View {
+                                width: Fill, height: Fit
+                                visible: false
+                                padding: Inset { left: 16.0, right: 16.0, top: 4.0, bottom: 8.0 }
+                                flow: Right
+                                align: Align { x: 1.0, y: 0.5 }
+                                spacing: 14.0
+
+                                msg_actions_time := Label {
+                                    text: "Just now"
+                                    draw_text.color: #x71717A
+                                    draw_text.text_style.font_size: 11.0
+                                }
+
+                                msg_actions_thumb_up := Button {
+                                    text: "[👍]"
+                                    width: Fit, height: 22.0
+                                    draw_bg.color: #x00000000
+                                    draw_bg.radius: 6.0
+                                    draw_bg.color_hover: #x2A2B30
+                                    draw_text.color: #x98999D
+                                    draw_text.text_style.font_size: 11.0
+                                }
+                                msg_actions_thumb_down := Button {
+                                    text: "[👎]"
+                                    width: Fit, height: 22.0
+                                    draw_bg.color: #x00000000
+                                    draw_bg.radius: 6.0
+                                    draw_bg.color_hover: #x2A2B30
+                                    draw_text.color: #x98999D
+                                    draw_text.text_style.font_size: 11.0
+                                }
+                                msg_actions_branch := Button {
+                                    text: "[⎇]"
+                                    width: Fit, height: 22.0
+                                    draw_bg.color: #x00000000
+                                    draw_bg.radius: 6.0
+                                    draw_bg.color_hover: #x2A2B30
+                                    draw_text.color: #x98999D
+                                    draw_text.text_style.font_size: 11.0
+                                }
+                                msg_actions_copy := Button {
+                                    text: "[📋]"
+                                    width: Fit, height: 22.0
+                                    draw_bg.color: #x00000000
+                                    draw_bg.radius: 6.0
+                                    draw_bg.color_hover: #x2A2B30
+                                    draw_text.color: #x98999D
+                                    draw_text.text_style.font_size: 11.0
+                                }
+                            }
                         }
 
                         // ── Bottom Input Bar ─────────────────────────
-                        bottom_bar := View {
+                        bottom_bar := RoundedView {
                             width: Fill, height: Fit
                             show_bg: true
-                            draw_bg.color: #050505
-                            padding: Inset { left: 16.0, right: 16.0, top: 8.0, bottom: 24.0 }
+                            draw_bg.color: #x171719
+                            padding: Inset { left: 16.0, right: 16.0, top: 8.0, bottom: 12.0 }
                             align: Align { y: 0.5 }
 
-                            input_container := View {
+                            input_container := RoundedView {
                                 width: Fill, height: Fit
                                 show_bg: true
-                                draw_bg.color: #121216
-                                draw_bg.radius: 28.0
-                                draw_bg.border_color: #1F1F24
+                                draw_bg.color: #x26272C
+                                draw_bg.border_radius: 18.0
                                 draw_bg.border_size: 1.0
-                                padding: Inset { left: 6.0, right: 8.0, top: 4.0, bottom: 4.0 }
+                                draw_bg.border_color: #x33343A
+                                draw_bg.color_focus: #x3F3F46
+                                padding: Inset { left: 8.0, right: 8.0, top: 6.0, bottom: 6.0 }
                                 flow: Right
-                                spacing: 6.0
+                                spacing: 8.0
                                 align: Align { y: 0.5 }
 
                                 attach_btn := Button {
                                     text: "＋"
-                                    width: 34.0, height: 34.0
-                                    draw_bg.color: #00000000
-                                    draw_bg.radius: 17.0
-                                    draw_bg.hover_color: #18181C
-                                    draw_text.color: #7A7A80
-                                    draw_text.text_style.font_size: 18.0
+                                    width: 32.0, height: 32.0
+                                    draw_bg.color: #x00000000
+                                    draw_bg.radius: 9999.0
+                                    draw_bg.color_hover: #x2E2F33
+                                    draw_text.color: #x98999D
+                                    draw_text.text_style.font_size: 16.0
                                 }
 
                                 input_field := TextInput {
                                     width: Fill, height: Fit
                                     empty_text: "Send follow-up"
                                     submit_on_enter: true
-                                    padding: Inset { left: 8.0, right: 8.0, top: 11.0, bottom: 11.0 }
-                                    draw_bg.color: #00000000
-                                    draw_text.color: #F2F2F5
-                                    draw_text.text_style.font_size: 14.0
-                                    draw_text.empty_color: #6E6E75
-                                    draw_bg.focus_color: #2E2E34
+                                    padding: Inset { left: 6.0, right: 6.0, top: 9.0, bottom: 9.0 }
+                                    draw_bg.color: #x00000000
+                                    draw_text.color: #xF2F2F5
+                                    draw_text.text_style.font_size: 13.0
+                                    draw_text.empty_color: #x71717A
+                                    draw_bg.color_focus: #x3F3F46
                                 }
 
                                 model_btn := Button {
-                                    text: "Composer"
-                                    width: Fit, height: 28.0
-                                    padding: Inset { left: 10.0, right: 10.0 }
-                                    draw_bg.color: #18181C
-                                    draw_bg.radius: 12.0
-                                    draw_bg.hover_color: #232328
-                                    draw_text.color: #9A9AA0
+                                    text: "Composer 2.5 Fast"
+                                    width: Fit, height: 32.0
+                                    padding: Inset { left: 12.0, right: 10.0 }
+                                    align: Align { x: 0.0, y: 0.5 }
+                                    draw_bg.color: #x00000000
+                                    draw_bg.radius: 9999.0
+                                    draw_bg.color_hover: #x2E2F33
+                                    draw_text.color: #xC7C8CC
                                     draw_text.text_style.font_size: 11.0
                                 }
 
                                 mic_btn := Button {
-                                    text: "●"
-                                    width: 34.0, height: 34.0
-                                    draw_bg.color: #F2F2F5
-                                    draw_bg.radius: 17.0
-                                    draw_bg.hover_color: #FFFFFF
-                                    draw_text.color: #050505
+                                    text: "🎤"
+                                    width: 32.0, height: 32.0
+                                    draw_bg.color: #xF2F2F5
+                                    draw_bg.radius: 9999.0
+                                    draw_bg.color_hover: #xFAFAFA
+                                    draw_text.color: #x09090B
                                     draw_text.text_style.font_size: 10.0
                                 }
+                            }
+                        }
+
+                        // ── Status Bar (very bottom, 24px) ───────────
+                        status_bar := RoundedView {
+                            width: Fill, height: 24.0
+                            show_bg: true
+                            draw_bg.color: #x171719
+                            padding: Inset { left: 16.0, right: 12.0, top: 4.0, bottom: 4.0 }
+                            flow: Right
+                            align: Align { y: 0.5 }
+                            spacing: 8.0
+
+                            status_project := Label {
+                                text: "natro"
+                                draw_text.color: #x71717A
+                                draw_text.text_style.font_size: 10.0
+                            }
+
+                            View { width: Fill, height: 0.0 }
+
+                            status_spinner := Label {
+                                text: "◌"
+                                draw_text.color: #x71717A
+                                draw_text.text_style.font_size: 12.0
                             }
                         }
                     }
 
                     // ══ Right Tool Rail ══════════════════════════════
-                    right_rail := View {
-                        width: 48.0, height: Fill
+                    right_rail := RoundedView {
+                        width: 40.0, height: Fill
                         show_bg: true
-                        draw_bg.color: #050505
+                        draw_bg.color: #x171719
                         flow: Down
-                        padding: Inset { top: 16.0, bottom: 16.0 }
-                        spacing: 4.0
+                        padding: Inset { top: 12.0, bottom: 12.0 }
+                        spacing: 6.0
                         align: Align { x: 0.5 }
 
-                        tool_add := Button {
-                            text: "＋"
-                            width: 36.0, height: 36.0
-                            draw_bg.color: #00000000
-                            draw_bg.radius: 8.0
-                            draw_bg.hover_color: #18181C
-                            draw_text.color: #7A7A80
+                        tool_fullscreen := Button {
+                            text: "⛶"
+                            width: 32.0, height: 32.0
+                            draw_bg.color: #x00000000
+                            draw_bg.radius: 9999.0
+                            draw_bg.color_hover: #x2A2B30
+                            draw_text.color: #x98999D
                             draw_text.text_style.font_size: 14.0
                         }
                         tool_browser := Button {
-                            text: "◎"
-                            width: 36.0, height: 36.0
-                            draw_bg.color: #00000000
-                            draw_bg.radius: 8.0
-                            draw_bg.hover_color: #18181C
-                            draw_text.color: #7A7A80
-                            draw_text.text_style.font_size: 16.0
+                            text: "🌐"
+                            width: 32.0, height: 32.0
+                            draw_bg.color: #x00000000
+                            draw_bg.radius: 9999.0
+                            draw_bg.color_hover: #x2A2B30
+                            draw_text.color: #x98999D
+                            draw_text.text_style.font_size: 14.0
                         }
                         tool_terminal := Button {
                             text: ">_"
-                            width: 36.0, height: 36.0
-                            draw_bg.color: #00000000
-                            draw_bg.radius: 8.0
-                            draw_bg.hover_color: #18181C
-                            draw_text.color: #7A7A80
-                            draw_text.text_style.font_size: 12.0
+                            width: 32.0, height: 32.0
+                            draw_bg.color: #x00000000
+                            draw_bg.radius: 9999.0
+                            draw_bg.color_hover: #x2A2B30
+                            draw_text.color: #x98999D
+                            draw_text.text_style.font_size: 11.0
                         }
                         tool_canvas := Button {
-                            text: "▤"
-                            width: 36.0, height: 36.0
-                            draw_bg.color: #00000000
-                            draw_bg.radius: 8.0
-                            draw_bg.hover_color: #18181C
-                            draw_text.color: #7A7A80
-                            draw_text.text_style.font_size: 14.0
+                            text: "📄"
+                            width: 32.0, height: 32.0
+                            draw_bg.color: #x00000000
+                            draw_bg.radius: 9999.0
+                            draw_bg.color_hover: #x2A2B30
+                            draw_text.color: #x98999D
+                            draw_text.text_style.font_size: 13.0
                         }
 
                         View { width: Fill, height: Fill }
 
                         tool_stop := Button {
                             text: "■"
-                            width: 36.0, height: 36.0
+                            width: 32.0, height: 32.0
                             visible: false
-                            draw_bg.color: #F38BA8
-                            draw_bg.radius: 8.0
-                            draw_bg.hover_color: #FF9EB3
-                            draw_text.color: #050505
+                            draw_bg.color: #xEF4444
+                            draw_bg.radius: 9999.0
+                            draw_bg.color_hover: #xFCA5A5
+                            draw_text.color: #x171719
                             draw_text.text_style.font_size: 12.0
                         }
                     }
@@ -1258,8 +1333,6 @@ pub struct App {
     agent_start_time: Option<Instant>,
     #[rust]
     worked_seconds: u64,
-    #[rust]
-    font_size: f64,
 }
 
 fn short_model_name(model: &str) -> &str {
@@ -1357,13 +1430,12 @@ impl App {
         self.worked_seconds = 0;
         self.update_running_ui(cx);
         Self::ensure_bridge();
-        if let Ok(guard) = BRIDGE.lock() {
-            if let Some(ref bridge) = *guard {
+        if let Ok(guard) = BRIDGE.lock()
+            && let Some(ref bridge) = *guard {
                 bridge.send_action(UserAction::SendMessage {
                     text: text.as_str().into(),
                 });
             }
-        }
     }
 
     fn handle_slash_input(&mut self, cx: &mut Cx, text: &str) {
@@ -1372,11 +1444,10 @@ impl App {
         if trimmed == "/allow" || trimmed.starts_with("/allow ") {
             if let Some((id, _, _)) = self.pending_permission.take() {
                 Self::ensure_bridge();
-                if let Ok(guard) = BRIDGE.lock() {
-                    if let Some(ref bridge) = *guard {
+                if let Ok(guard) = BRIDGE.lock()
+                    && let Some(ref bridge) = *guard {
                         bridge.send_action(UserAction::PermissionResponse { id, allow: true });
                     }
-                }
                 self.add_bubble(cx, ChatBubble::new("assistant", "✅ **Allowed**"));
             }
             return;
@@ -1384,11 +1455,10 @@ impl App {
         if trimmed == "/deny" || trimmed.starts_with("/deny ") {
             if let Some((id, _, _)) = self.pending_permission.take() {
                 Self::ensure_bridge();
-                if let Ok(guard) = BRIDGE.lock() {
-                    if let Some(ref bridge) = *guard {
+                if let Ok(guard) = BRIDGE.lock()
+                    && let Some(ref bridge) = *guard {
                         bridge.send_action(UserAction::PermissionResponse { id, allow: false });
                     }
-                }
                 self.add_bubble(cx, ChatBubble::new("assistant", "🚫 **Denied**"));
             }
             return;
@@ -1399,13 +1469,12 @@ impl App {
         self.agent_start_time = Some(Instant::now());
         self.update_running_ui(cx);
         Self::ensure_bridge();
-        if let Ok(guard) = BRIDGE.lock() {
-            if let Some(ref bridge) = *guard {
+        if let Ok(guard) = BRIDGE.lock()
+            && let Some(ref bridge) = *guard {
                 bridge.send_action(UserAction::RunSlashCommand {
                     command: trimmed.into(),
                 });
             }
-        }
     }
 
     // ── Bubble rendering ────────────────────────────────────────────────
@@ -1465,11 +1534,13 @@ impl App {
 
             if is_user {
                 spacer.set_visible(cx, false);
-                self.set_view_color(cx, &inner, 0x18, 0x18, 0x1C, 0xFF);
+                let (r, g, b) = hex_to_rgb(dark::USER_BUBBLE_BG);
+                self.set_view_color(cx, &inner, r, g, b, 0xFF);
             } else {
                 spacer.set_visible(cx, false);
                 if is_tool {
-                    self.set_view_color(cx, &inner, 0x13, 0x13, 0x17, 0xFF);
+                    let (r, g, b) = hex_to_rgb(dark::TOOL_BUBBLE_BG);
+                    self.set_view_color(cx, &inner, r, g, b, 0xFF);
                 } else {
                     self.set_view_color(cx, &inner, 0x00, 0x00, 0x00, 0x00);
                 }
@@ -1714,6 +1785,46 @@ impl App {
         }
     }
 
+    // ── Message actions row (timestamp + reactions) ───────────────────
+
+    fn show_msg_actions(&self, cx: &mut Cx, visible: bool) {
+        let actions = self.ui.widget(
+            cx,
+            &[
+                live_id!(main_window),
+                live_id!(body),
+                live_id!(main_content),
+                live_id!(chat_scroll),
+                live_id!(msg_actions),
+            ],
+        );
+        if !actions.is_empty() {
+            actions.set_visible(cx, visible);
+        }
+    }
+
+    // ── Status bar spinner animation ─────────────────────────────────
+
+    fn update_status_spinner(&self, cx: &mut Cx) {
+        if !self.is_running {
+            return;
+        }
+        let spinner = self.ui.widget(
+            cx,
+            &[
+                live_id!(main_window),
+                live_id!(body),
+                live_id!(main_content),
+                live_id!(status_bar),
+                live_id!(status_spinner),
+            ],
+        );
+        if !spinner.is_empty() {
+            let frame = SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()];
+            spinner.set_text(cx, &frame.to_string());
+        }
+    }
+
     // ── Visual updates ──────────────────────────────────────────────────
 
     fn update_top_bar(&self, cx: &mut Cx) {
@@ -1738,9 +1849,9 @@ impl App {
                     live_id!(body),
                     live_id!(main_content),
                     live_id!(top_bar),
-                    live_id!(project_chip),
+                    live_id!(top_model),
                 ],
-                &guard.project_name,
+                short_model_name(&guard.model),
             );
             ui_set_text(
                 cx,
@@ -1753,7 +1864,7 @@ impl App {
                     live_id!(input_container),
                     live_id!(model_btn),
                 ],
-                &format!("{} · {}", short_model_name(&guard.model), guard.mode.to_uppercase()),
+                short_model_name(&guard.model),
             );
             ui_set_text(
                 cx,
@@ -1762,7 +1873,20 @@ impl App {
                     live_id!(main_window),
                     live_id!(body),
                     live_id!(sidebar),
-                    live_id!(project_label),
+                    live_id!(project_header),
+                    live_id!(section_project),
+                ],
+                &guard.project_name,
+            );
+            ui_set_text(
+                cx,
+                &self.ui,
+                &[
+                    live_id!(main_window),
+                    live_id!(body),
+                    live_id!(main_content),
+                    live_id!(status_bar),
+                    live_id!(status_project),
                 ],
                 &guard.project_name,
             );
@@ -1836,9 +1960,17 @@ impl App {
                 s.name.to_string()
             };
             let text = if is_selected {
-                format!("● {}    {}", name, format_session_time(s.created_at.as_str()))
+                format!(
+                    "● {}    {}",
+                    name,
+                    format_session_time(s.created_at.as_str())
+                )
             } else {
-                format!("  {}    {}", name, format_session_time(s.created_at.as_str()))
+                format!(
+                    "  {}    {}",
+                    name,
+                    format_session_time(s.created_at.as_str())
+                )
             };
             btn.set_text(cx, &text);
             btn.set_visible(cx, true);
@@ -1897,8 +2029,8 @@ impl App {
 
     fn cycle_model(&self) {
         Self::ensure_bridge();
-        if let Ok(guard) = BRIDGE.lock() {
-            if let Some(ref bridge) = *guard {
+        if let Ok(guard) = BRIDGE.lock()
+            && let Some(ref bridge) = *guard {
                 // Placeholder: cycle through a few common models
                 let next = if let Ok(state) = GUI_STATE.lock() {
                     match state.model.as_str() {
@@ -1915,7 +2047,6 @@ impl App {
                     model: next.as_str().into(),
                 });
             }
-        }
     }
 
     // ── Main loop ───────────────────────────────────────────────────────
@@ -1925,6 +2056,7 @@ impl App {
 
         if self.is_running {
             self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+            self.update_status_spinner(cx);
             if let Some(start) = self.agent_start_time {
                 let elapsed = start.elapsed().as_secs();
                 if elapsed != self.worked_seconds {
@@ -1959,6 +2091,7 @@ impl App {
             match event {
                 CoreEvent::StreamingDelta { text } => {
                     self.hide_welcome(cx);
+                    self.show_msg_actions(cx, false);
                     if self.bubbles.last().map(|b| b.role.as_str()) != Some("assistant") {
                         self.bubbles.push(ChatBubble::new("assistant", ""));
                         if self.bubbles.len() > MAX_BUBBLES {
@@ -2029,20 +2162,19 @@ impl App {
                         if self.bubbles.last().map(|b| b.role.as_str()) != Some("assistant") {
                             self.bubbles
                                 .push(ChatBubble::new("assistant", response.to_string()));
-                        } else if let Some(last) = self.bubbles.last_mut() {
-                            if !last.content.contains(response.as_str()) {
+                        } else if let Some(last) = self.bubbles.last_mut()
+                            && !last.content.contains(response.as_str()) {
                                 last.content.push_str(response);
                             }
-                        }
                     }
                     needs_bubble_render = true;
                     self.set_worked_visible(cx, false, 0);
+                    self.show_msg_actions(cx, true);
 
-                    if let Ok(mut guard) = BRIDGE.lock() {
-                        if let Some(ref mut bridge) = *guard {
+                    if let Ok(mut guard) = BRIDGE.lock()
+                        && let Some(ref mut bridge) = *guard {
                             bridge.tokens_used += input_tokens + output_tokens;
                         }
-                    }
                     if let Ok(mut guard) = GUI_STATE.lock() {
                         guard.tokens_used += input_tokens + output_tokens;
                     }
@@ -2086,7 +2218,7 @@ impl App {
                     if let Ok(mut guard) = GUI_STATE.lock() {
                         guard.sessions = sessions.clone();
                     }
-                    self.refresh_session_buttons(cx, &sessions);
+                    self.refresh_session_buttons(cx, sessions);
                 }
                 CoreEvent::SessionChanged { session_id } => {
                     self.current_session_id = session_id.to_string();
@@ -2231,14 +2363,15 @@ impl MatchEvent for App {
             input.set_text(cx, "");
         }
 
-        // ── New session ──
+        // ── New session (now bound to the nav_new_agent button) ──
         let new_btn = self.ui.widget(
             cx,
             &[
                 live_id!(main_window),
                 live_id!(body),
                 live_id!(sidebar),
-                live_id!(new_session_btn),
+                live_id!(nav_menu),
+                live_id!(nav_new_agent),
             ],
         );
         if matches!(
@@ -2246,11 +2379,10 @@ impl MatchEvent for App {
             ButtonAction::Clicked(_)
         ) {
             Self::ensure_bridge();
-            if let Ok(guard) = BRIDGE.lock() {
-                if let Some(ref bridge) = *guard {
+            if let Ok(guard) = BRIDGE.lock()
+                && let Some(ref bridge) = *guard {
                     bridge.send_action(UserAction::CreateSession { name: None });
                 }
-            }
         }
 
         // ── Left rail navigation ──
@@ -2267,11 +2399,10 @@ impl MatchEvent for App {
             ButtonAction::Clicked(_)
         ) {
             Self::ensure_bridge();
-            if let Ok(guard) = BRIDGE.lock() {
-                if let Some(ref bridge) = *guard {
+            if let Ok(guard) = BRIDGE.lock()
+                && let Some(ref bridge) = *guard {
                     bridge.send_action(UserAction::CreateSession { name: None });
                 }
-            }
         }
 
         let nav_search_btn = self.ui.widget(
@@ -2335,13 +2466,12 @@ impl MatchEvent for App {
             {
                 if let Some(s) = self.sessions.get(idx) {
                     Self::ensure_bridge();
-                    if let Ok(guard) = BRIDGE.lock() {
-                        if let Some(ref bridge) = *guard {
+                    if let Ok(guard) = BRIDGE.lock()
+                        && let Some(ref bridge) = *guard {
                             bridge.send_action(UserAction::SwitchSession {
                                 session_id: s.id.clone(),
                             });
                         }
-                    }
                 }
                 break;
             }
@@ -2377,13 +2507,12 @@ impl MatchEvent for App {
                 let split = self.sessions.len().min(8);
                 if let Some(s) = self.sessions.get(split + idx) {
                     Self::ensure_bridge();
-                    if let Ok(guard) = BRIDGE.lock() {
-                        if let Some(ref bridge) = *guard {
+                    if let Ok(guard) = BRIDGE.lock()
+                        && let Some(ref bridge) = *guard {
                             bridge.send_action(UserAction::SwitchSession {
                                 session_id: s.id.clone(),
                             });
                         }
-                    }
                 }
                 break;
             }
@@ -2428,11 +2557,10 @@ impl MatchEvent for App {
             self.agent_start_time = None;
             self.set_worked_visible(cx, false, 0);
             self.update_running_ui(cx);
-            if let Ok(guard) = BRIDGE.lock() {
-                if let Some(ref bridge) = *guard {
+            if let Ok(guard) = BRIDGE.lock()
+                && let Some(ref bridge) = *guard {
                     bridge.send_action(UserAction::CancelStream);
                 }
-            }
         }
 
         // ── Attach button ──
@@ -2450,12 +2578,11 @@ impl MatchEvent for App {
         if matches!(
             actions.find_widget_action_cast::<ButtonAction>(attach_btn.widget_uid()),
             ButtonAction::Clicked(_)
-        ) {
-            if !input.is_empty() {
+        )
+            && !input.is_empty() {
                 input.set_text(cx, "/add ");
                 input.set_key_focus(cx);
             }
-        }
 
         // ── Right rail placeholders ──
         let tool_browser_btn = self.ui.widget(
@@ -2515,45 +2642,51 @@ impl MatchEvent for App {
             );
         }
 
-        let tool_add_btn = self.ui.widget(
+        let tool_fullscreen_btn = self.ui.widget(
             cx,
             &[
                 live_id!(main_window),
                 live_id!(body),
                 live_id!(right_rail),
-                live_id!(tool_add),
+                live_id!(tool_fullscreen),
             ],
         );
         if matches!(
-            actions.find_widget_action_cast::<ButtonAction>(tool_add_btn.widget_uid()),
+            actions.find_widget_action_cast::<ButtonAction>(tool_fullscreen_btn.widget_uid()),
             ButtonAction::Clicked(_)
         ) {
-            self.font_size += 1.0;
-            // Font size change is applied by re-rendering; makepad text_style is fixed at compile time
-            self.add_bubble(cx, ChatBubble::new("assistant", "Font size adjusted."));
+            self.add_bubble(
+                cx,
+                ChatBubble::new("assistant", "⛶ Fullscreen view is not yet implemented."),
+            );
         }
 
-        // ── IDE placeholder ──
-        let top_ide_btn = self.ui.widget(
+        // ── Top model selector ──
+        let top_model_btn = self.ui.widget(
             cx,
             &[
                 live_id!(main_window),
                 live_id!(body),
                 live_id!(main_content),
                 live_id!(top_bar),
-                live_id!(top_ide),
+                live_id!(top_model),
             ],
         );
         if matches!(
-            actions.find_widget_action_cast::<ButtonAction>(top_ide_btn.widget_uid()),
+            actions.find_widget_action_cast::<ButtonAction>(top_model_btn.widget_uid()),
             ButtonAction::Clicked(_)
         ) {
-            self.add_bubble(
-                cx,
-                ChatBubble::new("assistant", "IDE integration is not yet implemented."),
-            );
+            self.cycle_model();
         }
     }
+}
+
+pub fn hex_to_rgb(hex: &str) -> (u8, u8, u8) {
+    let hex = hex.trim_start_matches('#');
+    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
+    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
+    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
+    (r, g, b)
 }
 
 impl AppMain for App {
