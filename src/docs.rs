@@ -8,6 +8,22 @@ pub fn global_docs_dir() -> PathBuf {
     crate::session::storage::data_dir().join("docs")
 }
 
+pub fn show_get_started() -> anyhow::Result<()> {
+    ensure_global()?;
+    let doc_path = global_docs_dir().join("GET_STARTED.md");
+    if !doc_path.exists() {
+        anyhow::bail!(
+            "GET_STARTED.md not found at {}. Try reinstalling zerostack.",
+            doc_path.display()
+        );
+    }
+    let status = std::process::Command::new("less").arg(&doc_path).status()?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
 pub fn ensure_global() -> anyhow::Result<bool> {
     let dir = global_docs_dir();
     let version_file = dir.join("current_version");

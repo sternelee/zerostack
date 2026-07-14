@@ -22,6 +22,12 @@ pub struct Cli {
     #[arg(long = "print-config", help = "Print resolved configuration and exit")]
     pub print_config: bool,
 
+    #[arg(long = "setup", help = "Interactive setup wizard")]
+    pub setup: bool,
+
+    #[arg(long = "tutor", help = "Show getting started guide")]
+    pub tutor: bool,
+
     #[arg(short = 'c', long = "continue", help = "Continue most recent session")]
     pub continue_session: bool,
 
@@ -83,6 +89,25 @@ pub struct Cli {
         help = "Load a skill directory or single SKILL.md file (repeatable)"
     )]
     pub skill: Vec<std::path::PathBuf>,
+
+    #[cfg(feature = "hooks")]
+    #[arg(long = "no-hooks", help = "Disable all hooks")]
+    pub no_hooks: bool,
+
+    #[cfg(feature = "hooks")]
+    #[arg(
+        long = "hooks-test",
+        value_name = "TOOL",
+        help = "Dry-run PreToolUse hooks for TOOL with --hooks-test-input, print the merged decision, and exit"
+    )]
+    pub hooks_test: Option<String>,
+
+    #[cfg(feature = "hooks")]
+    #[arg(
+        long = "hooks-test-input",
+        help = "tool_input JSON for --hooks-test (default: {})"
+    )]
+    pub hooks_test_input: Option<String>,
 
     #[arg(long = "restrictive", short = 'R', help = "Ask for all operations")]
     pub restrictive: bool,

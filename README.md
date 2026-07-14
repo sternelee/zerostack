@@ -23,8 +23,13 @@ Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/lates
 - **Integrated Git Worktrees integration**: Use `/worktree` to move the agent from one worktree to another.
 - **ACP support** (gated): Agent Communication Protocol server — lets editors (Zed, etc.) connect to zerostack as an ACP agent
 - **Persistent memory** (gated): plain-Markdown memory across sessions: a global MEMORY.md plus per-project daily logs, scratchpad, and notes, injected into the system prompt each session
+- **Lifecycle hooks** (gated): observe or gate tool calls, prompts, and session lifecycle events via external commands, using a `settings.json` schema largely compatible with Claude Code hooks
+- **Advisor** (gated): a second model the agent can consult mid-session for strategic guidance, with an optional human-handoff mode
+- **Multimodal input** (gated): attach images and PDFs to messages
 - **Subagents**: Parallel and fast, used for exploring the codebase
 - **ARCHITECTURE.md**: Our own companion file for AGENTS.md, it allows to offer a shared core knowledge for all agents working on the same codebase
+- **Prompt chaining**: offers to advance brainstorm → plan → code → review as each phase finishes, config-gated per transition
+- **Status signals**: emits start/stop/git-conflict events over a Unix socket for external status bars or tooling
 
 **NOTE**: Windows support is not tested is any way, but feel free to try and open an issue if you encounter any bugs!
 
@@ -32,7 +37,7 @@ Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/lates
 
 _zerostack_ is one of the smallest and most performant coding agents on the market.
 
-- Lines of code: ~17k LoC
+- Lines of code: ~30k LoC (core, excluding tests)
 - Binary size: 26MB
 - RAM footprint: ~16MB on average, with peaks at ~24MB (vs ~300MB with peaks at ~700MB for opencode or other JS-based coding agents)
 - CPU usage: 0.0% on idle, ~1.5% when using tools (measured on an Intel i5 7th gen, vs ~2% on idle and ~20% when working for opencode)
@@ -64,14 +69,14 @@ Or pick a tarball manually from [GitHub Releases](https://github.com/gi-dellav/z
 ### Cargo
 
 ```bash
-# Default: loop, git-worktree, mcp, subagents, archmd
+# Default: loop, git-worktree, mcp, subagents, archmd, status-signals, multithread
 cargo install zerostack
 
 # With all features
 cargo install zerostack --all-features
 
 # With specific features
-cargo install zerostack --features acp,memory,multithread
+cargo install zerostack --features acp,memory,hooks,advisor
 ```
 
 ### Homebrew
@@ -186,6 +191,10 @@ Built-in prompts:
 | **`review-security`** | Security review mode — finds exploitable vulnerabilities                 |
 | **`simplify`**        | Code simplification mode — refines for clarity without changing behavior |
 | **`write-prompt`**    | Prompt writing mode — creates and optimizes agent prompts                |
+| **`refactor`**        | Refactoring mode — restructures code for design and maintainability while preserving behavior |
+| **`autoconfig`**      | Configuration mode — reads docs and edits your config/prompts, writes no code |
+| **`orchestrator`**    | Orchestration mode — combines direct tool use with parallel `zerostack` subprocess invocations for heavier work |
+| **`write-text`**      | Prose-writing mode — drafts and reviews non-code writing (docs, posts, emails) |
 
 You can also create custom prompts by placing markdown files in
 `$XDG_CONFIG_HOME/zerostack/prompts/` and referencing them by name.
@@ -195,6 +204,14 @@ project root or any ancestor directory, injecting their contents into the
 system prompt. When enabled (feature `archmd`), `ARCHITECTURE.md` is also loaded
 the same way, providing high-level design context to speed up exploration.
 Use `-n` / `--no-context-files` to disable all context file loading.
+
+### Prompt chaining
+
+When `brainstorm`, `plan`, or `code` finishes, zerostack can offer to advance
+to the next phase (`brainstorm` → `plan` → `code` → `/review`), asking
+`Continue to plan? [Y/N/B]`-style at each step: `Y` advances, `N` stays put,
+and `B` ("but ...") advances with an extra instruction appended. Each
+transition is enabled independently in config.
 
 ## Permission system
 
@@ -236,6 +253,9 @@ This is a list of the most important slash commands:
 - `/mode` — Set the permission system's mode
 - `/queue` — Manage input queued while the agent is busy
 - `/btw` — Ask a quick side question in parallel without interrupting the agent
+- `/review` — Run a one-shot code review in readonly mode, then restore the previous prompt
+- `/hooks` (gated) — Show whether a hook dispatcher is installed and what it's configured for
+- `/advisor` (gated) — Show or change advisor status (enabled, mode, model, max uses)
 
 To see all of the commands, use `/help`.
 
@@ -292,6 +312,58 @@ injects the relevant ones into the system prompt at the start of every session,
 so it remembers your preferences and recent context across runs.
 
 Global memory files are stored in `$XDG_DATA_HOME/zerostack/agent/memory/`.
+
+## Hooks
+
+**NOTE:** Hooks are gated behind the `hooks` feature and are not included in the
+default build. Install with `cargo install zerostack --features hooks`.
+
+With the `hooks` feature, external commands can observe or gate agent behavior
+at defined lifecycle events: a tool call (`PreToolUse`/`PostToolUse`), a user
+prompt (`UserPromptSubmit`), the agent finishing a turn (`Stop`), a session
+starting/ending, or a subagent starting/stopping. Hooks use the same
+`settings.json` shape, stdin envelope, and exit-code/stdout-JSON contract as
+Claude Code, so an existing CC hooks setup is largely compatible.
+
+Hook config lives in `settings.json` at up to three locations (global,
+project, and an admin-managed file), merged in that order. The project-level
+file is untrusted by default; zerostack asks for confirmation (tracked by
+hash) before running project hooks for the first time. Use `--no-hooks` to
+disable all non-managed hooks, or `--hooks-test <tool>` to dry-run
+`PreToolUse` hooks for a tool without starting a session. See
+[docs/CONFIG.md](docs/CONFIG.md#hooks) for the full configuration reference.
+
+## Advisor
+
+**NOTE:** Advisor is gated behind the `advisor` feature and is not included in
+the default build. Install with `cargo install zerostack --features advisor`.
+
+With the `advisor` feature, the agent can consult a second model mid-session
+for strategic guidance (architecture calls, edge cases, course correction)
+without derailing the main coding session. Enable it with `--advisor`, or
+toggle it at runtime with `/advisor on` / `/advisor off`. An optional
+human-handoff mode (`/advisor handoff on`) routes advisor calls to you
+instead of a model. See [docs/CONFIG.md](docs/CONFIG.md#advisor) for
+configuration.
+
+## Multimodal input
+
+**NOTE:** Multimodal input is gated behind the `multimodal` feature (images)
+and `pdf` feature (PDFs, implies `multimodal`), neither included in the
+default build.
+
+With these features enabled, you can attach images and PDFs to your messages
+(up to 20 MB per file) and the agent processes them via the underlying
+provider's multimodal support.
+
+## Status signals
+
+**NOTE:** Status signals require the `status-signals` feature, which is
+included in the default build.
+
+Pass `--status-socket <path>` to have zerostack emit `start`, `stop`, and
+`git-conflict` events over a Unix domain socket, for external status bars or
+tooling to watch.
 
 ## Parallel Agent
 

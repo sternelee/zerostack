@@ -37,13 +37,13 @@ fn which_cmd(name: &str) -> bool {
     })
 }
 
-struct ProcessGroupGuard {
+pub(crate) struct ProcessGroupGuard {
     pid: Option<u32>,
     active_groups: Arc<Mutex<HashSet<u32>>>,
 }
 
 impl ProcessGroupGuard {
-    fn new(pid: Option<u32>, active_groups: Arc<Mutex<HashSet<u32>>>) -> Self {
+    pub(crate) fn new(pid: Option<u32>, active_groups: Arc<Mutex<HashSet<u32>>>) -> Self {
         if let Some(pid) = pid {
             active_groups
                 .lock()
@@ -53,7 +53,7 @@ impl ProcessGroupGuard {
         Self { pid, active_groups }
     }
 
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         if let Some(pid) = self.pid.take() {
             self.active_groups
                 .lock()
@@ -280,13 +280,13 @@ async fn join_reader(reader: tokio::task::JoinHandle<std::io::Result<()>>) -> st
         .map_err(|e| std::io::Error::other(format!("pipe reader task failed: {e}")))?
 }
 
-fn configure_child_lifetime(cmd: &mut Command) {
+pub(crate) fn configure_child_lifetime(cmd: &mut Command) {
     cmd.kill_on_drop(true);
     #[cfg(unix)]
     cmd.process_group(0);
 }
 
-fn kill_process_group(pid: u32) {
+pub(crate) fn kill_process_group(pid: u32) {
     #[cfg(unix)]
     {
         let group = format!("-{}", pid);

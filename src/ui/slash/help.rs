@@ -1,7 +1,39 @@
+use std::io::Write;
+
+use crossterm::ExecutableCommand;
+
 use crate::ui::slash::{SlashCtx, write_ok, write_result};
 
 pub fn handle_welcome(renderer: &mut crate::ui::renderer::Renderer) {
     let _ = crate::ui::events::show_welcome(renderer);
+}
+
+pub fn handle_tutor(renderer: &mut crate::ui::renderer::Renderer) {
+    match run_tutor() {
+        Ok(()) => {}
+        Err(e) => {
+            let _ = renderer.write_line(&format!("{}", e), crate::ui::slash::C_ERROR);
+        }
+    }
+}
+
+fn run_tutor() -> anyhow::Result<()> {
+    let _ = crossterm::terminal::disable_raw_mode();
+    let mut stdout = std::io::stdout();
+    let _ = stdout.execute(crossterm::event::DisableMouseCapture);
+    let _ = stdout.execute(crossterm::terminal::LeaveAlternateScreen);
+    let _ = stdout.flush();
+
+    let result = crate::docs::show_get_started();
+
+    let _ = stdout.execute(crossterm::terminal::EnterAlternateScreen);
+    let _ = stdout.execute(crossterm::terminal::Clear(
+        crossterm::terminal::ClearType::All,
+    ));
+    let _ = stdout.execute(crossterm::event::EnableMouseCapture);
+    let _ = crossterm::terminal::enable_raw_mode();
+
+    result
 }
 
 pub fn handle(_parts: &[&str], ctx: &mut SlashCtx<'_>) {
@@ -62,6 +94,14 @@ pub fn handle(_parts: &[&str], ctx: &mut SlashCtx<'_>) {
         ctx.renderer,
         "  /mode <mode>           set mode (standard|restrictive|readonly|guarded|yolo)",
     );
+    write_result(
+        ctx.renderer,
+        "  /toggle                show toggleable features",
+    );
+    write_result(
+        ctx.renderer,
+        "  /toggle todo [on|off]  toggle todo-list tools",
+    );
     #[cfg(feature = "mcp")]
     {
         write_result(
@@ -94,6 +134,23 @@ pub fn handle(_parts: &[&str], ctx: &mut SlashCtx<'_>) {
     write_result(ctx.renderer, "  /retry                 retry last prompt");
     write_result(
         ctx.renderer,
+        "  /queue                 list input queued while agent is busy",
+    );
+    write_result(ctx.renderer, "  /queue clear           clear the queue");
+    write_result(
+        ctx.renderer,
+        "  /queue pop             remove the last queued input",
+    );
+    write_result(
+        ctx.renderer,
+        "  /btw <message>         ask a side question in parallel (no session trace)",
+    );
+    write_result(
+        ctx.renderer,
+        "  /review [msg]          review code (auto message if omitted)",
+    );
+    write_result(
+        ctx.renderer,
         "  /compress [/compact]   compress conversation history",
     );
     write_result(
@@ -104,6 +161,27 @@ pub fn handle(_parts: &[&str], ctx: &mut SlashCtx<'_>) {
         ctx.renderer,
         "  /editsys [mode]        edit system (similarity | hashedit)",
     );
+    #[cfg(feature = "advisor")]
+    {
+        write_result(ctx.renderer, "  /advisor               show advisor status");
+        write_result(
+            ctx.renderer,
+            "  /advisor on|off        enable or disable advisor",
+        );
+        write_result(
+            ctx.renderer,
+            "  /advisor handoff [on|off]  toggle human handoff mode",
+        );
+        write_result(ctx.renderer, "  /advisor model <name>  set advisor model");
+        write_result(
+            ctx.renderer,
+            "  /advisor max-uses <n>  set max advisor calls per request",
+        );
+        write_result(
+            ctx.renderer,
+            "  /advisor context-limit <n>  set max KB sent to advisor",
+        );
+    }
     #[cfg(feature = "loop")]
     {
         write_result(
@@ -132,6 +210,10 @@ pub fn handle(_parts: &[&str], ctx: &mut SlashCtx<'_>) {
     write_result(
         ctx.renderer,
         "  /skills                list available skills",
+    );
+    write_result(
+        ctx.renderer,
+        "  /rename <name>         rename current session",
     );
     write_result(
         ctx.renderer,
@@ -166,6 +248,11 @@ pub fn handle(_parts: &[&str], ctx: &mut SlashCtx<'_>) {
             "  /wt-exit               exit worktree and return to main repo",
         );
     }
+    #[cfg(feature = "hooks")]
+    write_result(
+        ctx.renderer,
+        "  /hooks                 show configured hook events and handlers",
+    );
     write_result(
         ctx.renderer,
         "  /history               show global chat history",
@@ -174,6 +261,10 @@ pub fn handle(_parts: &[&str], ctx: &mut SlashCtx<'_>) {
     write_result(
         ctx.renderer,
         "  /welcome               show the quickstart guide",
+    );
+    write_result(
+        ctx.renderer,
+        "  /tutor                 open GET_STARTED.md in less",
     );
     write_result(ctx.renderer, "  /tutorial              alias for /welcome");
     write_result(ctx.renderer, "  /help                  show this message");

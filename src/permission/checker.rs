@@ -39,6 +39,15 @@ pub struct PermissionChecker {
     user_mode: SecurityMode,
     permission_modes: Vec<SecurityMode>,
     allow_all_mcp_calls: bool,
+    /// One-shot: the next `check`/`check_path` call for this tool is forced
+    /// to `Ask`, consumed immediately after. Set by a hook `ask` verdict.
+    #[cfg(feature = "hooks")]
+    pending_forced_ask: Option<String>,
+    /// One-shot: the next `check`/`check_path` call for this tool suppresses
+    /// the prompt (`Allowed`), consumed immediately after. Set by a hook
+    /// `allow` verdict. Never bypasses a deny rule (checked first).
+    #[cfg(feature = "hooks")]
+    pending_one_shot_allow: Option<String>,
 }
 
 impl PermissionChecker {
@@ -193,7 +202,27 @@ impl PermissionChecker {
             user_mode: mode,
             permission_modes: resolved_modes,
             allow_all_mcp_calls: false,
+            #[cfg(feature = "hooks")]
+            pending_forced_ask: None,
+            #[cfg(feature = "hooks")]
+            pending_one_shot_allow: None,
         }
+    }
+
+    /// Forces the next `check`/`check_path` call for `tool` to `Ask`,
+    /// regardless of permission mode. Consumed after that one call. Set by a
+    /// hook `ask` verdict; never overrides a deny rule (checked first).
+    #[cfg(feature = "hooks")]
+    pub fn force_ask_once(&mut self, tool: String) {
+        self.pending_forced_ask = Some(tool);
+    }
+
+    /// Suppresses the interactive prompt for the next `check`/`check_path`
+    /// call for `tool`. Consumed after that one call. Set by a hook `allow`
+    /// verdict; never overrides a deny rule (checked first).
+    #[cfg(feature = "hooks")]
+    pub fn allow_once(&mut self, tool: String) {
+        self.pending_one_shot_allow = Some(tool);
     }
 
     fn apply_rules(&self) -> bool {
@@ -315,6 +344,22 @@ impl PermissionChecker {
         }
     }
 
+    /// Consumes a hook-set one-shot forced-ask/allow entry for `tool`, if
+    /// pending. Called after the deny-rule check in `check`/`check_path` so
+    /// neither can ever bypass a deny.
+    #[cfg(feature = "hooks")]
+    fn take_pending_one_shot(&mut self, tool: &str) -> Option<CheckResult> {
+        if self.pending_forced_ask.as_deref() == Some(tool) {
+            self.pending_forced_ask = None;
+            return Some(CheckResult::Ask);
+        }
+        if self.pending_one_shot_allow.as_deref() == Some(tool) {
+            self.pending_one_shot_allow = None;
+            return Some(CheckResult::Allowed);
+        }
+        None
+    }
+
     pub fn check(&mut self, tool: &str, input: &str) -> CheckResult {
         tracing::debug!("perm check: tool={}, input_len={}", tool, input.len());
         if tool == "todo_write" {
@@ -324,6 +369,10 @@ impl PermissionChecker {
         // allowlist and allow_all_mcp_calls so neither can bypass a deny.
         if self.matches_deny_rule(tool, &[input]) {
             return CheckResult::Denied("Blocked by deny rule".to_string());
+        }
+        #[cfg(feature = "hooks")]
+        if let Some(result) = self.take_pending_one_shot(tool) {
+            return result;
         }
         if self.allow_all_mcp_calls && tool == "mcp_tool" {
             return CheckResult::Allowed;
@@ -365,6 +414,10 @@ impl PermissionChecker {
         // Deny rules first — security baseline, cannot be bypassed.
         if self.matches_deny_rule(tool, &[&abs_path, &expanded]) {
             return CheckResult::Denied("Blocked by deny rule".to_string());
+        }
+        #[cfg(feature = "hooks")]
+        if let Some(result) = self.take_pending_one_shot(tool) {
+            return result;
         }
         if self.is_session_allowed(tool, &expanded) || self.is_session_allowed(tool, &abs_path) {
             return CheckResult::Allowed;
@@ -487,6 +540,14 @@ impl PermissionChecker {
             }
         }
         None
+    }
+
+    /// Feeds a hook-denied call into doom-loop detection. A hook deny never
+    /// reaches `check`/`check_path`, so without this a denied call could
+    /// retry forever invisibly to doom detection.
+    #[cfg(feature = "hooks")]
+    pub fn record_blocked(&mut self, tool: &str, input: &str) {
+        self.track_doom_loop(tool, input);
     }
 
     fn track_doom_loop(&mut self, tool: &str, input: &str) {

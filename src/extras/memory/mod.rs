@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::{Duration, Local};
+use chrono::Local;
 use regex::RegexBuilder;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -29,6 +30,52 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     fs::write(&tmp, content)?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Take a single-version backup of `path` before a content-destroying mutation,
+/// so it stays recoverable. Copies the current file to a sibling `.bak` path
+/// (`MEMORY.md` -> `MEMORY.bak`), OVERWRITING any prior `.bak` (one version, not
+/// a history). The `.bak` extension keeps it out of the `.md`-filtered list and
+/// search. If `path` doesn't exist yet (e.g. a first-ever overwrite), there's
+/// nothing to back up, so this is a no-op rather than an error.
+fn backup_file(path: &Path) -> std::io::Result<()> {
+    if path.exists() {
+        fs::copy(path, path.with_extension("bak"))?;
+    }
+    Ok(())
+}
+
+/// Back up `path` and return a warning suffix for the tool response if the
+/// backup could not be written (empty string on success). The mutation still
+/// proceeds (fail-open): the primary operation is what the caller asked for, but
+/// a failed backup means there is no `.bak` to undo it, so the response must say
+/// so. The failure is also logged.
+fn backup_warning(path: &Path) -> String {
+    match backup_file(path) {
+        Ok(()) => String::new(),
+        Err(e) => {
+            tracing::warn!("memory backup of {} failed: {e}", path.display());
+            format!(" (warning: backup failed, no .bak written: {e})")
+        }
+    }
+}
+
+/// Normalize a line for long-term append dedup comparison: trim, and collapse
+/// every run of Unicode whitespace (ASCII spaces/tabs and full-width U+3000) to
+/// a single ASCII space, preserving case. `split_whitespace` uses the Unicode
+/// White_Space property, so U+3000 folds like an ASCII space, and a whitespace-
+/// only line normalizes to the empty string.
+fn normalize_line(line: &str) -> String {
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A daily-log date name is caller-supplied (models pass `name=YYYY-MM-DD`), so
+/// it must be validated before being spliced into a path: `daily_file` does no
+/// sanitization, so an unchecked name like `../../secret` would traverse out of
+/// the memory store. Allow ASCII digits and hyphens only (enough for a
+/// `YYYY-MM-DD` date), which forbids `.`, `/`, and `\`.
+fn is_safe_daily_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_digit() || c == '-')
 }
 
 /// Append the injected memory block to a system-prompt preamble.
@@ -96,7 +143,18 @@ pub struct Mem {
     /// projects don't pollute each other. MEMORY.md stays global (shared).
     pub project: String,
     pub today: String,
-    pub yesterday: String,
+}
+
+/// A daily log selected for injection: the file's date stem and its raw content.
+struct DailyLog {
+    date: String,
+    content: String,
+}
+
+/// One block of the injected context: a rendered heading and its body.
+struct Section {
+    title: String,
+    body: String,
 }
 
 impl Mem {
@@ -112,15 +170,11 @@ impl Mem {
             .map(|p| project_slug(&p))
             .unwrap_or_else(|_| "default".to_string());
         let today = Local::now().format("%Y-%m-%d").to_string();
-        let yesterday = (Local::now() - Duration::days(1))
-            .format("%Y-%m-%d")
-            .to_string();
         tracing::debug!("memory open: root={}, project={}", root.display(), project);
         Mem {
             root,
             project,
             today,
-            yesterday,
         }
     }
 
@@ -139,8 +193,82 @@ impl Mem {
     fn notes_dir(&self) -> PathBuf {
         self.project_dir().join("notes")
     }
+    /// Enumerate every `.md` memory file visible to `source=list`: the global
+    /// MEMORY.md (the store root, whose only `.md` is MEMORY.md) plus the current
+    /// project's notes and daily logs, sorted. Any non-`.md` file (notably a
+    /// `.bak` backup) is excluded, matching `Mem::search`, so backups never
+    /// surface here. This is the exact enumeration the `memory_read source=list`
+    /// tool returns.
+    pub(crate) fn list(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for dir in [self.root.clone(), self.notes_dir(), self.daily_dir()] {
+            if let Ok(rd) = fs::read_dir(&dir) {
+                for e in rd.flatten() {
+                    if e.path().extension().is_some_and(|x| x == "md") {
+                        names.push(e.path().display().to_string());
+                    }
+                }
+            }
+        }
+        names.sort();
+        names
+    }
     pub(crate) fn daily_file(&self, date: &str) -> PathBuf {
         self.daily_dir().join(format!("{date}.md"))
+    }
+
+    /// Up to the two most recent daily logs whose trimmed content is
+    /// non-empty, newest first. Scans `daily_dir()`, sorts filenames
+    /// (`YYYY-MM-DD.md`) descending, and skips empty/whitespace-only files by
+    /// continuing the scan rather than stopping at the first one.
+    fn recent_daily_logs(&self) -> Vec<DailyLog> {
+        let mut files: Vec<PathBuf> = match fs::read_dir(self.daily_dir()) {
+            Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
+            Err(_) => return Vec::new(),
+        };
+        files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+
+        let mut logs = Vec::new();
+        for path in files {
+            if logs.len() >= 2 {
+                break;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let Some(date) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !Self::is_daily_log_stem(date) {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            if content.trim().is_empty() {
+                continue;
+            }
+            logs.push(DailyLog {
+                date: date.to_string(),
+                content,
+            });
+        }
+        logs
+    }
+
+    /// True if `s` is exactly `YYYY-MM-DD` shaped (10 ASCII bytes, digits at every
+    /// position except the two hyphens). Used to make sure only real daily-log
+    /// files (never a stray `.tmp` from a crashed `atomic_write`, nor an unrelated
+    /// `.md` a user drops in `daily/`) are scanned and their filename interpolated
+    /// into the injected `<memory>` block.
+    fn is_daily_log_stem(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() == 10
+            && b[4] == b'-'
+            && b[7] == b'-'
+            && b.iter()
+                .enumerate()
+                .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
     }
 
     /// Sanitize a note name so it can never escape `notes/` (no traversal).
@@ -211,23 +339,94 @@ impl Mem {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        // Message state: `appended_len` is the byte count reported as written
+        // (content bytes for overwrite, surviving bytes for a deduped append);
+        // `dedup_note` is an optional suffix; `nothing_written` short-circuits to
+        // the whole-batch-dropped message. Only long_term append ever sets these.
+        let mut appended_len = content.len();
+        let mut dedup_note = String::new();
+        let mut nothing_written: Option<usize> = None;
+        let mut backup_note = String::new();
         match mode {
-            WriteMode::Overwrite => atomic_write(&path, content)?,
+            WriteMode::Overwrite => {
+                // Overwriting a curated file replaces its whole content; back it
+                // up first so the prior version is recoverable. Daily/note
+                // overwrites are out of scope (low-risk / not curated).
+                if matches!(target, WriteTarget::LongTerm | WriteTarget::Scratchpad) {
+                    backup_note = backup_warning(&path);
+                }
+                atomic_write(&path, content)?;
+            }
             WriteMode::Append => {
-                // Memory files are small; read-modify-write is simpler and clearer
-                // than seeking to the end to inspect the last byte.
-                let mut prev = fs::read_to_string(&path).unwrap_or_default();
-                if !prev.is_empty() && !prev.ends_with('\n') {
-                    prev.push('\n');
+                // Long-term memory is curated one-fact-per-line, so drop lines
+                // whose normalized form repeats within this batch or already
+                // exists in MEMORY.md. Blank/whitespace-only lines normalize to
+                // empty and are never treated as a dedup key (they carry no fact,
+                // so they must not swallow real content); they are kept verbatim.
+                // Dedup is scoped to long_term ONLY: scratchpad/daily/note appends
+                // stay byte-identical to the pre-dedup behavior.
+                let mut append_content = content.to_string();
+                if matches!(target, WriteTarget::LongTerm) {
+                    let existing = fs::read_to_string(&path).unwrap_or_default();
+                    let mut seen: HashSet<String> = existing
+                        .lines()
+                        .map(normalize_line)
+                        .filter(|n| !n.is_empty())
+                        .collect();
+                    let mut kept: Vec<&str> = Vec::new();
+                    let mut skipped = 0usize;
+                    for line in content.split('\n') {
+                        let norm = normalize_line(line);
+                        if norm.is_empty() {
+                            kept.push(line);
+                            continue;
+                        }
+                        // insert returns false when the key was already present,
+                        // covering both prior file content and earlier batch lines.
+                        if seen.insert(norm) {
+                            kept.push(line);
+                        } else {
+                            skipped += 1;
+                        }
+                    }
+                    if skipped > 0 {
+                        let survived = kept.iter().any(|l| !normalize_line(l).is_empty());
+                        if survived {
+                            append_content = kept.join("\n");
+                            dedup_note = format!(" (skipped {skipped} duplicate line(s))");
+                        } else {
+                            // Nothing meaningful survived: leave the file untouched
+                            // (no atomic_write) and report that nothing was written.
+                            nothing_written = Some(skipped);
+                        }
+                    }
                 }
-                prev.push_str(content);
-                if !prev.ends_with('\n') {
-                    prev.push('\n');
+                if nothing_written.is_none() {
+                    // Memory files are small; read-modify-write is simpler and clearer
+                    // than seeking to the end to inspect the last byte.
+                    let mut prev = fs::read_to_string(&path).unwrap_or_default();
+                    if !prev.is_empty() && !prev.ends_with('\n') {
+                        prev.push('\n');
+                    }
+                    prev.push_str(&append_content);
+                    if !prev.ends_with('\n') {
+                        prev.push('\n');
+                    }
+                    atomic_write(&path, &prev)?;
+                    appended_len = append_content.len();
                 }
-                atomic_write(&path, &prev)?;
             }
         }
-        let mut msg = format!("Wrote {} bytes to {}", content.len(), path.display());
+        if let Some(n) = nothing_written {
+            return Ok(format!(
+                "Nothing written to {}: all {n} line(s) were duplicates",
+                path.display()
+            ));
+        }
+        let mut msg = format!(
+            "Wrote {appended_len} bytes to {}{dedup_note}{backup_note}",
+            path.display()
+        );
         if original_len > content.len() {
             msg.push_str(&format!(
                 " (truncated from {original_len} bytes to {} byte cap)",
@@ -235,6 +434,105 @@ impl Mem {
             ));
         }
         Ok(msg)
+    }
+
+    /// Strict, unique-substring content replacement in a memory file.
+    ///
+    /// `old_str` must occur EXACTLY once in the target file (0 or >1 matches is a
+    /// hard error naming the count, with no write performed). The single match is
+    /// replaced with `new_str` via `replace_range` — a plain substring swap with
+    /// no implicit newline cleanup, so `new_str=""` removes exactly the matched
+    /// bytes and nothing more. Unlike the source-code `EditTool`, there is no
+    /// fuzzy fallback.
+    ///
+    /// The `old_str: None` branch deletes an entire note file (`target=note`,
+    /// `name=<stem>`) from disk. Omitting `old_str` for any non-note target
+    /// (`long_term`/`scratchpad`/`daily`) is a hard error that touches nothing.
+    pub fn edit(
+        &self,
+        target: WriteTarget,
+        name: Option<&str>,
+        old_str: Option<&str>,
+        new_str: &str,
+    ) -> std::io::Result<String> {
+        tracing::debug!(
+            "memory edit: target={:?}, has_old={}",
+            target,
+            old_str.is_some(),
+        );
+        let path = match target {
+            WriteTarget::LongTerm => self.memory_md(),
+            WriteTarget::Scratchpad => self.scratchpad(),
+            WriteTarget::Daily => {
+                // Honor a caller-supplied date (`name`) the way memory_read does,
+                // defaulting to today; validate it first since `daily_file` does
+                // no sanitization of its own.
+                let date = name.unwrap_or(&self.today);
+                if !is_safe_daily_name(date) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "invalid daily date name (expected YYYY-MM-DD: digits and hyphens only)",
+                    ));
+                }
+                self.daily_file(date)
+            }
+            WriteTarget::Note => match name.and_then(|n| self.note_path(n)) {
+                Some(p) => p,
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "invalid note name (no slashes or dots)",
+                    ));
+                }
+            },
+        };
+        match old_str {
+            Some(old) => {
+                let current = fs::read_to_string(&path)?;
+                let count = current.match_indices(old).count();
+                if count != 1 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "old_str matched {count} time(s) in {}; it must match exactly once",
+                            path.display()
+                        ),
+                    ));
+                }
+                let pos = current
+                    .find(old)
+                    .expect("match_indices count == 1 guarantees a match");
+                let mut updated = current;
+                updated.replace_range(pos..pos + old.len(), new_str);
+                // A content-replace on a curated file mutates it in place; back
+                // up the pre-edit version. Daily/note edits are low-risk and out
+                // of scope.
+                let mut warn = String::new();
+                if matches!(target, WriteTarget::LongTerm | WriteTarget::Scratchpad) {
+                    warn = backup_warning(&path);
+                }
+                atomic_write(&path, &updated)?;
+                Ok(format!("Edited {}{warn}", path.display()))
+            }
+            None => {
+                if !matches!(target, WriteTarget::Note) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "memory_edit without old_str deletes a whole note; \
+it is only allowed for target=note, not long_term/scratchpad/daily",
+                    ));
+                }
+                // `path` is already the sanitized note path (Note branch above
+                // rejects invalid names via `note_path`). Removing a missing note
+                // surfaces the io NotFound error, so deleting a stale note the
+                // model no longer sees is a clear failure rather than a silent Ok.
+                // Back up the note's bytes before removing it (this branch is
+                // note-only by construction) so the deletion is recoverable.
+                let warn = backup_warning(&path);
+                fs::remove_file(&path)?;
+                Ok(format!("Deleted {}{warn}", path.display()))
+            }
+        }
     }
 
     /// Append a timestamped entry to today's daily log. Used by the
@@ -247,21 +545,36 @@ impl Mem {
         Ok(())
     }
 
-    /// The block injected into the system prompt every turn: long-term memory +
-    /// open scratchpad items + today's & yesterday's logs. Notes and older daily
-    /// logs are deliberately excluded.
+    fn daily_title(date: &str, today: &str) -> String {
+        if date == today {
+            format!("Daily log {date} (today)")
+        } else {
+            format!("Daily log {date}")
+        }
+    }
+
+    fn truncated_marker(title: &str) -> String {
+        format!("\n…[section truncated: {title}]")
+    }
+
+    fn omitted_marker(title: &str) -> String {
+        format!("\n\n…[section omitted: {title}]")
+    }
+
+    /// The block injected into the system prompt every turn, assembled from up
+    /// to four sections in priority order (highest first): scratchpad open
+    /// items, the newest selected daily log, long-term memory (MEMORY.md), and
+    /// the second-newest selected daily log. See `recent_daily_logs` for how
+    /// the two daily logs are chosen. Notes are deliberately excluded.
+    ///
+    /// Sections are included whole while they fit within `MAX_INJECT_BYTES`;
+    /// the first section that doesn't fit whole is tail-truncated to consume
+    /// exactly what's left (marked `…[section truncated: <title>]`), and every
+    /// section after that is omitted entirely (marked
+    /// `…[section omitted: <title>]`) rather than displacing a higher-priority
+    /// section that already fit. A final whole-string `truncate_cjk` pass is
+    /// kept as a hard backstop against unexpected overrun.
     pub fn context_block(&self) -> Option<String> {
-        let mut out = String::new();
-        let mut push = |title: &str, body: &str| {
-            let b = body.trim();
-            if b.is_empty() {
-                return;
-            }
-            out.push_str("\n\n## ");
-            out.push_str(title);
-            out.push('\n');
-            out.push_str(b);
-        };
         let mut m = String::new();
         if let Ok(meta) = std::fs::metadata(self.memory_md())
             && meta.len() <= 128 * 1024
@@ -269,9 +582,10 @@ impl Mem {
         {
             m = content;
         }
-        push("Long-term memory (MEMORY.md)", &m);
+
+        let mut scratch = String::new();
         if let Ok(s) = fs::read_to_string(self.scratchpad()) {
-            let open: String = s
+            scratch = s
                 .lines()
                 .filter(|l| {
                     let t = l.trim_start();
@@ -279,17 +593,72 @@ impl Mem {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            push("Scratchpad (open items)", &open);
         }
-        if let Ok(d) = fs::read_to_string(self.daily_file(&self.yesterday)) {
-            push(&format!("Daily log {}", self.yesterday), &d);
+
+        let logs = self.recent_daily_logs();
+
+        let mut sections: Vec<Section> = Vec::new();
+        if !scratch.trim().is_empty() {
+            sections.push(Section {
+                title: "Scratchpad (open items)".to_string(),
+                body: scratch,
+            });
         }
-        if let Ok(d) = fs::read_to_string(self.daily_file(&self.today)) {
-            push(&format!("Daily log {} (today)", self.today), &d);
+        if let Some(log) = logs.first() {
+            sections.push(Section {
+                title: Self::daily_title(&log.date, &self.today),
+                body: log.content.clone(),
+            });
         }
-        if out.is_empty() {
+        if !m.trim().is_empty() {
+            sections.push(Section {
+                title: "Long-term memory (MEMORY.md)".to_string(),
+                body: m,
+            });
+        }
+        if let Some(log) = logs.get(1) {
+            sections.push(Section {
+                title: Self::daily_title(&log.date, &self.today),
+                body: log.content.clone(),
+            });
+        }
+
+        if sections.is_empty() {
             return None;
         }
+
+        let mut out = String::new();
+        let mut remaining = MAX_INJECT_BYTES;
+        let mut boundary_hit = false;
+        for (i, section) in sections.iter().enumerate() {
+            let title = &section.title;
+            let body = section.body.trim();
+            if boundary_hit {
+                out.push_str(&Self::omitted_marker(title));
+                continue;
+            }
+            let header = format!("\n\n## {title}\n");
+            let full_len = header.len() + body.len();
+            if full_len <= remaining {
+                out.push_str(&header);
+                out.push_str(body);
+                remaining -= full_len;
+                continue;
+            }
+            boundary_hit = true;
+            let marker = Self::truncated_marker(title);
+            let trailing_overhead: usize = sections[i + 1..]
+                .iter()
+                .map(|s| Self::omitted_marker(&s.title).len())
+                .sum();
+            let cut_len = remaining
+                .saturating_sub(header.len())
+                .saturating_sub(marker.len())
+                .saturating_sub(trailing_overhead);
+            out.push_str(&header);
+            out.push_str(&truncate_cjk(body, cut_len, &marker));
+        }
+
         out = truncate_cjk(&out, MAX_INJECT_BYTES, "\n…[memory truncated]");
         // Memory is untrusted historical context, not instructions.
         Some(format!(
@@ -307,7 +676,7 @@ impl Mem {
     /// output is capped, the least-relevant files drop off first. A file whose
     /// name (but not content) matches falls back to a short preview, ranked below
     /// any content hit. Older daily logs ARE searched (unlike the auto-injected
-    /// context block, which is limited to today + yesterday).
+    /// context block, which selects only the two most recent non-empty logs).
     pub fn search(&self, query: &str) -> SearchResults {
         tracing::debug!("memory search: '{}'", query);
         // Distinct, non-empty terms, preserving query order.
@@ -637,7 +1006,9 @@ impl Tool for MemoryWrite {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: "Persist durable memory to disk. target=long_term writes curated facts/\
-preferences/decisions to MEMORY.md (always loaded next session). target=scratchpad maintains a \
+preferences/decisions to MEMORY.md (always loaded next session), one fact per line; long_term \
+appends are deduplicated (whitespace-insensitive) so a line already present is skipped. \
+target=scratchpad maintains a \
 per-project checklist (use `- [ ]` items; open ones are auto-injected, mode=overwrite to rewrite the list). \
 target=daily appends to today's running log. target=note saves reference material to \
 notes/<name>.md (find it later with memory_search, then read it in full with memory_read). \
@@ -676,6 +1047,86 @@ Prefer long_term for things that should always be remembered."
         };
         Mem::open()
             .write(target, &args.content, mode, args.name.as_deref())
+            .map_err(|e| ToolError::Msg(e.to_string()))
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MemoryEditArgs {
+    /// "long_term" | "scratchpad" | "daily" | "note"
+    pub target: String,
+    /// required when target == "note"
+    pub name: Option<String>,
+    /// substring to replace; must occur exactly once in the target file
+    pub old_str: Option<String>,
+    /// replacement text (empty string deletes the matched substring)
+    #[serde(default)]
+    pub new_str: String,
+}
+
+pub struct MemoryEdit {
+    pub permission: Option<PermCheck>,
+    pub ask_tx: Option<AskSender>,
+}
+impl MemoryEdit {
+    pub fn new(permission: Option<PermCheck>, ask_tx: Option<AskSender>) -> Self {
+        Self { permission, ask_tx }
+    }
+}
+impl Tool for MemoryEdit {
+    const NAME: &'static str = "memory_edit";
+    type Error = ToolError;
+    type Args = MemoryEditArgs;
+    type Output = String;
+
+    async fn definition(&self, _p: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Replace a unique substring in a memory file in place. \
+target=long_term (MEMORY.md), scratchpad, daily (a day's log; pass name=YYYY-MM-DD to edit an \
+earlier day, defaults to today), or note (name=<stem>). old_str must \
+occur EXACTLY once in the target file, matched literally (no fuzzy matching); if it matches zero or \
+multiple times the edit fails and nothing is written, so include enough surrounding text to make it \
+unique. The match is replaced with new_str verbatim, with no newline cleanup: set new_str to an \
+empty string to delete the matched text, and include the trailing newline in old_str to delete a \
+whole line. Omit old_str entirely to delete a whole note file (requires target=note and name=<stem>); \
+omitting old_str for long_term/scratchpad/daily is rejected and changes nothing. Use memory_write to \
+append or overwrite; use this to surgically fix or remove existing content."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target":  { "type": "string", "description": "long_term, scratchpad, daily, or note" },
+                    "name":    { "type": "string", "description": "note stem, required for note" },
+                    "old_str": { "type": "string", "description": "substring to replace; must occur exactly once. Omit to delete the whole note (target=note only)" },
+                    "new_str": { "type": "string", "description": "replacement text; empty string deletes the matched substring" }
+                },
+                "required": ["target", "new_str"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: MemoryEditArgs) -> Result<String, ToolError> {
+        tracing::debug!(
+            "tool memory_edit: target={}, has_old={}",
+            args.target,
+            args.old_str.is_some(),
+        );
+        check_perm(&self.permission, &self.ask_tx, Self::NAME, &args.target).await?;
+        let target = match args.target.as_str() {
+            "long_term" => WriteTarget::LongTerm,
+            "scratchpad" => WriteTarget::Scratchpad,
+            "daily" => WriteTarget::Daily,
+            "note" => WriteTarget::Note,
+            other => return Err(ToolError::Msg(format!("unknown target: {other}"))),
+        };
+        Mem::open()
+            .edit(
+                target,
+                args.name.as_deref(),
+                args.old_str.as_deref(),
+                &args.new_str,
+            )
             .map_err(|e| ToolError::Msg(e.to_string()))
     }
 }
@@ -731,7 +1182,18 @@ daily (name=YYYY-MM-DD, omit for today), note (name=<stem>), or list (enumerate 
         let body = match args.source.as_str() {
             "long_term" => Mem::read_capped(&m.memory_md()),
             "scratchpad" => Mem::read_capped(&m.scratchpad()),
-            "daily" => Mem::read_capped(&m.daily_file(args.name.as_deref().unwrap_or(&m.today))),
+            "daily" => {
+                // `name` is caller-supplied; validate before splicing it into a
+                // path, since `daily_file` does no sanitization (an unchecked
+                // name would traverse out of the memory store).
+                let date = args.name.as_deref().unwrap_or(&m.today);
+                if !is_safe_daily_name(date) {
+                    return Err(ToolError::Msg(
+                        "invalid daily date name (expected YYYY-MM-DD)".into(),
+                    ));
+                }
+                Mem::read_capped(&m.daily_file(date))
+            }
             "note" => {
                 let name = args
                     .name
@@ -742,23 +1204,10 @@ daily (name=YYYY-MM-DD, omit for today), note (name=<stem>), or list (enumerate 
                     .ok_or_else(|| ToolError::Msg("invalid note name".into()))?;
                 Mem::read_capped(&p)
             }
-            "list" => {
-                // Global root yields MEMORY.md only (projects/ is a dir, skipped);
-                // notes_dir()/daily_dir() are the current project's, so listing is
-                // automatically scoped to global + current project.
-                let mut names = Vec::new();
-                for dir in [m.root.clone(), m.notes_dir(), m.daily_dir()] {
-                    if let Ok(rd) = fs::read_dir(&dir) {
-                        for e in rd.flatten() {
-                            if e.path().extension().is_some_and(|x| x == "md") {
-                                names.push(e.path().display().to_string());
-                            }
-                        }
-                    }
-                }
-                names.sort();
-                names.join("\n")
-            }
+            // Global root yields MEMORY.md only (projects/ is a dir, skipped);
+            // notes/daily are the current project's, so listing is automatically
+            // scoped to global + current project. See `Mem::list`.
+            "list" => m.list().join("\n"),
             other => return Err(ToolError::Msg(format!("unknown source: {other}"))),
         };
         Ok(body)

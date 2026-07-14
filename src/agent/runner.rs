@@ -9,6 +9,8 @@ use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingCha
 use tokio::sync::mpsc;
 
 use crate::event::{AgentEvent, BtwEvent};
+#[cfg(feature = "hooks")]
+use crate::extras::hooks::LoopInfo;
 use crate::retry::{self, RetryConfig};
 use crate::session::{MessageRole, Session};
 
@@ -313,6 +315,11 @@ pub fn spawn_agent<M, P>(
     prompt: String,
     history: Vec<Message>,
     retry_config: RetryConfig,
+    // `--loop` iteration/active state, for the `Stop` hook envelope's
+    // `loop_iteration`/`loop_active` fields (per-iteration reset of
+    // `stop_hook_active`/the block cap falls out for free: each iteration is
+    // a fresh call to this function). `None` outside loop mode.
+    #[cfg(feature = "hooks")] loop_info: Option<LoopInfo>,
 ) -> AgentRunner
 where
     M: CompletionModel + 'static,
@@ -337,6 +344,16 @@ where
         let mut last_tool_name: Option<String> = None;
         let mut empty_response_count: u32 = 0;
         const MAX_EMPTY_RESPONSES: u32 = 3;
+        // Overrides the next continuation message (bottom of the outer
+        // `loop`); set when a `Stop` hook forces continuation instead of the
+        // default re-injected `retry_prompt`.
+        let mut next_instruction: Option<String> = None;
+        #[cfg(feature = "hooks")]
+        let mut stop_hook_active = false;
+        #[cfg(feature = "hooks")]
+        let mut consecutive_stop_blocks: u32 = 0;
+        #[cfg(feature = "hooks")]
+        const MAX_STOP_BLOCKS: u32 = 8;
 
         let mut stream: StreamingResult<M::StreamingResponse> = {
             let mut attempt: usize = 0;
@@ -455,6 +472,28 @@ where
                         );
 
                         if !response_text.is_empty() {
+                            #[cfg(feature = "hooks")]
+                            if let crate::extras::hooks::StopGate::Continue { reason } =
+                                crate::extras::hooks::dispatch_stop(
+                                    stop_hook_active,
+                                    loop_info.map(|info| u64::from(info.iteration)),
+                                    loop_info.map(|info| info.active),
+                                )
+                                .await
+                            {
+                                consecutive_stop_blocks += 1;
+                                if consecutive_stop_blocks <= MAX_STOP_BLOCKS {
+                                    stop_hook_active = true;
+                                    tracing::info!(
+                                        "hooks: Stop hook forced continuation ({consecutive_stop_blocks}/{MAX_STOP_BLOCKS}): {reason}"
+                                    );
+                                    next_instruction = Some(reason);
+                                    break;
+                                }
+                                tracing::warn!(
+                                    "hooks: Stop block cap ({MAX_STOP_BLOCKS}) reached without progress; forcing release"
+                                );
+                            }
                             let _ = event_tx
                                 .send(AgentEvent::Done {
                                     response: CompactString::from(response_text),
@@ -511,9 +550,12 @@ where
                 "agent injecting continue prompt, tool_interactions={}",
                 tool_interactions.len(),
             );
+            let injected_prompt = next_instruction
+                .take()
+                .unwrap_or_else(|| retry_prompt.clone());
             stream = continue_prompt_injector(
                 &agent,
-                &retry_prompt,
+                &injected_prompt,
                 &retry_history,
                 &tool_interactions,
                 &retry_config,
@@ -528,12 +570,24 @@ where
     }
 }
 
+/// Headless (`-p`, `--loop`) counterpart to [`spawn_agent`]'s turn loop.
+/// Deliberately drives its own manual loop instead of rig's
+/// `.multi_turn(max_turns)` combinator: `multi_turn` is an opaque black box
+/// that only ever yields a single terminal `FinalResponse` for the whole
+/// session, with no seam to inject "one more turn" after it — exactly what a
+/// `Stop` hook needs to do. The agent's own `default_max_turns` (set at
+/// construction, see `agent::builder::build_agent_inner`) still bounds
+/// internal tool-call round trips per call, same as [`spawn_agent`], which
+/// never used `.multi_turn()` either.
 pub async fn run_print<M, P>(
     agent: &Agent<M, P>,
     prompt: &str,
-    max_turns: usize,
     pure_stdout: bool,
     retry_config: &RetryConfig,
+    // `--loop` iteration/active state, for the `Stop` hook envelope's
+    // `loop_iteration`/`loop_active` fields; see `runner::spawn_agent`.
+    // `None` for plain `-p` one-shot runs.
+    #[cfg(feature = "hooks")] loop_info: Option<LoopInfo>,
 ) -> anyhow::Result<(String, rig::completion::Usage)>
 where
     M: CompletionModel + 'static,
@@ -542,79 +596,143 @@ where
 {
     let mut stream = retry::retry_stream_chat(retry_config, || {
         let p = prompt.to_string();
-        async move {
-            agent
-                .stream_chat(p, Vec::<Message>::new())
-                .multi_turn(max_turns)
-                .await
-        }
+        async move { agent.stream_chat(p, Vec::<Message>::new()).await }
     })
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    #[cfg(feature = "hooks")]
+    let retry_history: Vec<Message> = Vec::new();
+    #[cfg(feature = "hooks")]
+    let mut tool_interactions: Vec<Message> = Vec::new();
     let mut full_response = String::new();
     let mut last_tool_name: Option<String> = None;
     let mut usage = rig::completion::Usage::new();
+    // Set true only when a `Stop` hook forces another turn; drives the outer
+    // loop. Stays false (single pass, no continuation) in the hooks-off build.
+    let mut continue_turn = true;
+    #[cfg(feature = "hooks")]
+    let mut next_instruction: Option<String> = None;
+    #[cfg(feature = "hooks")]
+    let mut stop_hook_active = false;
+    #[cfg(feature = "hooks")]
+    let mut consecutive_stop_blocks: u32 = 0;
+    #[cfg(feature = "hooks")]
+    const MAX_STOP_BLOCKS: u32 = 8;
 
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text))) => {
-                full_response.push_str(&text.text);
-                print!("{}", text.text);
-                let _ = std::io::Write::flush(&mut std::io::stdout());
-            }
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Reasoning(
-                r,
-            ))) => {
-                eprint!("{}", r.display_text());
-                let _ = std::io::Write::flush(&mut std::io::stderr());
-            }
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
-                tool_call,
-                ..
-            })) if pure_stdout => {
-                let name = &tool_call.function.name;
-                last_tool_name = Some(name.clone());
-                let summary = format_tool_args_summary(&tool_call.function.arguments);
-                println!("\n◈ {} {}", name, summary);
-                let _ = std::io::Write::flush(&mut std::io::stdout());
-            }
-            Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
-                tool_result,
-                ..
-            })) if pure_stdout => {
-                let name = last_tool_name.take().unwrap_or_default();
-                let mut output = String::new();
-                for c in tool_result.content.iter() {
-                    if let ToolResultContent::Text(t) = c {
-                        if !output.is_empty() {
-                            output.push('\n');
-                        }
-                        output.push_str(&t.text);
-                    }
-                }
-                if !output.is_empty() {
-                    println!("◈ {} result:", name);
-                    let lines: Vec<&str> = output.lines().collect();
-                    if lines.len() > 40 {
-                        let truncated: Vec<&str> = lines.iter().take(40).copied().collect();
-                        println!("{}", truncated.join("\n"));
-                        println!("(truncated {} more lines)", lines.len().saturating_sub(40));
-                    } else {
-                        println!("{}", output);
-                    }
+    while continue_turn {
+        continue_turn = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
+                    text,
+                ))) => {
+                    full_response.push_str(&text.text);
+                    print!("{}", text.text);
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
+                Ok(MultiTurnStreamItem::StreamAssistantItem(
+                    StreamedAssistantContent::Reasoning(r),
+                )) => {
+                    eprint!("{}", r.display_text());
+                    let _ = std::io::Write::flush(&mut std::io::stderr());
+                }
+                Ok(MultiTurnStreamItem::StreamAssistantItem(
+                    StreamedAssistantContent::ToolCall { tool_call, .. },
+                )) => {
+                    if pure_stdout {
+                        let name = &tool_call.function.name;
+                        last_tool_name = Some(name.clone());
+                        let summary = format_tool_args_summary(&tool_call.function.arguments);
+                        println!("\n◈ {} {}", name, summary);
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                    }
+                    #[cfg(feature = "hooks")]
+                    tool_interactions.push(tool_call.clone().into());
+                }
+                Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
+                    tool_result,
+                    ..
+                })) => {
+                    if pure_stdout {
+                        let name = last_tool_name.take().unwrap_or_default();
+                        let mut output = String::new();
+                        for c in tool_result.content.iter() {
+                            if let ToolResultContent::Text(t) = c {
+                                if !output.is_empty() {
+                                    output.push('\n');
+                                }
+                                output.push_str(&t.text);
+                            }
+                        }
+                        if !output.is_empty() {
+                            println!("◈ {} result:", name);
+                            let lines: Vec<&str> = output.lines().collect();
+                            if lines.len() > 40 {
+                                let truncated: Vec<&str> = lines.iter().take(40).copied().collect();
+                                println!("{}", truncated.join("\n"));
+                                println!(
+                                    "(truncated {} more lines)",
+                                    lines.len().saturating_sub(40)
+                                );
+                            } else {
+                                println!("{}", output);
+                            }
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                        }
+                    }
+                    #[cfg(feature = "hooks")]
+                    tool_interactions.push(tool_result.clone().into());
+                }
+                Ok(MultiTurnStreamItem::FinalResponse(res)) => {
+                    usage = res.usage();
+                    #[cfg(feature = "hooks")]
+                    if let crate::extras::hooks::StopGate::Continue { reason } =
+                        crate::extras::hooks::dispatch_stop(
+                            stop_hook_active,
+                            loop_info.map(|info| u64::from(info.iteration)),
+                            loop_info.map(|info| info.active),
+                        )
+                        .await
+                    {
+                        consecutive_stop_blocks += 1;
+                        if consecutive_stop_blocks <= MAX_STOP_BLOCKS {
+                            stop_hook_active = true;
+                            tracing::info!(
+                                "hooks: Stop hook forced continuation ({consecutive_stop_blocks}/{MAX_STOP_BLOCKS}): {reason}"
+                            );
+                            next_instruction = Some(reason);
+                            continue_turn = true;
+                        } else {
+                            tracing::warn!(
+                                "hooks: Stop block cap ({MAX_STOP_BLOCKS}) reached without progress; forcing release"
+                            );
+                        }
+                    }
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    break;
+                }
             }
-            Ok(MultiTurnStreamItem::FinalResponse(res)) => {
-                usage = res.usage();
-                break;
-            }
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                break;
-            }
+        }
+
+        #[cfg(feature = "hooks")]
+        if continue_turn {
+            let injected_prompt = next_instruction
+                .take()
+                .unwrap_or_else(|| prompt.to_string());
+            full_response.clear();
+            stream = continue_prompt_injector(
+                agent,
+                &injected_prompt,
+                &retry_history,
+                &tool_interactions,
+                retry_config,
+            )
+            .await;
         }
     }
 

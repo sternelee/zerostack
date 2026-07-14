@@ -235,21 +235,33 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
             )),
         ]);
 
-        let mut builder = builder.tools(base_tools.into_vec());
+        let mut all_tools: Vec<Box<dyn rig::tool::ToolDyn>> = base_tools.into_vec();
 
         #[cfg(feature = "subagents")]
         if cfg.task_enabled.unwrap_or(true) {
             use crate::extras::subagents::task_tool::TaskTool;
-            builder = builder.tool(TaskTool::new(permission.clone(), ask_tx.clone()));
+            all_tools.push(Box::new(TaskTool::new(permission.clone(), ask_tx.clone())));
         }
 
         #[cfg(feature = "memory")]
         {
-            use crate::extras::memory::{MemoryRead, MemorySearch, MemoryWrite};
-            builder = builder
-                .tool(MemoryWrite::new(permission.clone(), ask_tx.clone()))
-                .tool(MemoryRead::new(permission.clone(), ask_tx.clone()))
-                .tool(MemorySearch::new(permission.clone(), ask_tx.clone()));
+            use crate::extras::memory::{MemoryEdit, MemoryRead, MemorySearch, MemoryWrite};
+            all_tools.push(Box::new(MemoryWrite::new(
+                permission.clone(),
+                ask_tx.clone(),
+            )));
+            all_tools.push(Box::new(MemoryEdit::new(
+                permission.clone(),
+                ask_tx.clone(),
+            )));
+            all_tools.push(Box::new(MemoryRead::new(
+                permission.clone(),
+                ask_tx.clone(),
+            )));
+            all_tools.push(Box::new(MemorySearch::new(
+                permission.clone(),
+                ask_tx.clone(),
+            )));
         }
 
         #[cfg(feature = "mcp")]
@@ -263,31 +275,29 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
             let mcp_tools = manager
                 .collect_tools(permission.clone(), ask_tx.clone())
                 .await;
-            if !mcp_tools.is_empty() {
-                let dyn_tools: Vec<Box<dyn rig::tool::ToolDyn>> = mcp_tools
-                    .into_iter()
-                    .map(|t| Box::new(t) as Box<dyn rig::tool::ToolDyn>)
-                    .collect();
-                builder = builder.tools(dyn_tools);
+            for t in mcp_tools {
+                all_tools.push(Box::new(t) as Box<dyn rig::tool::ToolDyn>);
             }
         }
 
         #[cfg(feature = "advisor")]
         if crate::extras::advisor::with_config(|c| c.enabled) {
             use crate::extras::advisor::AdvisorTool;
-            builder = builder.tool(AdvisorTool::new());
+            all_tools.push(Box::new(AdvisorTool::new()));
         }
 
-        // Append extension-registered tools.
         #[cfg(feature = "extensions")]
         {
             let extension_tools = crate::extension::registry::collect_tools();
-            if !extension_tools.is_empty() {
-                builder = builder.tools(extension_tools);
+            for t in extension_tools {
+                all_tools.push(t);
             }
         }
 
-        builder.build()
+        #[cfg(feature = "hooks")]
+        let all_tools = crate::extras::hooks::wrap_from_global(all_tools, permission.clone());
+
+        builder.tools(all_tools).build()
     }
 }
 

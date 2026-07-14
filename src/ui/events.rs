@@ -107,7 +107,7 @@ pub fn render_session(
             "Ready to code; type a request or '/' for commands",
             Color::White,
         )?;
-        renderer.write_line("Run /welcome or /help to get started", Color::White)?;
+        renderer.write_line("Run /welcome or /tutor to get started", Color::White)?;
         renderer.write_line("", Color::White)?;
         renderer.write_line("", Color::White)?;
     }
