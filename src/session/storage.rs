@@ -26,7 +26,8 @@ fn dirs_path() -> PathBuf {
 
 pub fn data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("ZS_DATA_DIR") {
-        return PathBuf::from(dir);
+        let expanded = crate::fs::expand_tilde(&dir.to_string_lossy());
+        return PathBuf::from(expanded);
     }
     let base = dirs::data_dir().unwrap_or_else(home_fallback);
     base.join("zerostack")
@@ -34,7 +35,8 @@ pub fn data_dir() -> PathBuf {
 
 pub(crate) fn config_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("ZS_CONFIG_DIR") {
-        return PathBuf::from(dir);
+        let expanded = crate::fs::expand_tilde(&dir.to_string_lossy());
+        return PathBuf::from(expanded);
     }
     data_dir()
 }
