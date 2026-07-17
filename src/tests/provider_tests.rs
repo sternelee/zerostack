@@ -2,12 +2,19 @@ use crate::auth::ProviderKind;
 use crate::config::{ApiStyle, CustomProviderConfig};
 use crate::provider::ModelEntry;
 use crate::provider::{
-    expand_env, is_agent_model, merge_extra_body, openrouter_anthropic_routing, resolve_api_style,
-    resolve_provider_config, serialize_conversation,
+    AnyClient, create_client, expand_env, is_agent_model, merge_extra_body,
+    openrouter_anthropic_routing, resolve_api_style, resolve_provider_config,
+    serialize_conversation,
 };
 use crate::session::{MessageRole, SessionMessage};
 use compact_str::CompactString;
+use rig::client::CompletionClient;
+use rig::completion::Prompt;
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::mpsc;
+use std::time::Duration;
 
 fn cfg(api_style: Option<ApiStyle>) -> CustomProviderConfig {
     CustomProviderConfig {
@@ -229,6 +236,72 @@ fn resolve_custom_provider() {
     let cfg = resolve_provider_config("my-gw", &custom).unwrap();
     assert_eq!(cfg.kind, ProviderKind::OpenAI);
     assert_eq!(cfg.base_url.as_deref(), Some("https://mygw.example/v1"));
+}
+
+#[tokio::test]
+async fn anthropic_custom_base_appends_v1_messages() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (request_tx, request_rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let count = stream.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        let request_line = String::from_utf8_lossy(&request)
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        request_tx.send(request_line).unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+    });
+
+    let mut custom = HashMap::new();
+    custom.insert(
+        "anthropic-capture".to_string(),
+        CustomProviderConfig {
+            provider_type: "anthropic".into(),
+            base_url: format!("http://{address}/anthropic"),
+            api_key_env: None,
+            danger_accept_invalid_certs: None,
+            api_style: None,
+            headers: HashMap::new(),
+            timeout_secs: None,
+            model: None,
+        },
+    );
+
+    let client = create_client("anthropic-capture", Some("test-key"), &custom, None).unwrap();
+    let AnyClient::Anthropic(client) = client else {
+        panic!("expected an Anthropic client");
+    };
+    let agent = client.agent("MiniMax-M3").max_tokens(16).build();
+    assert!(agent.prompt("hello").await.is_err());
+
+    server.join().unwrap();
+    assert_eq!(
+        request_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        "POST /anthropic/v1/messages HTTP/1.1"
+    );
 }
 
 #[test]

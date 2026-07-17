@@ -1,5 +1,5 @@
 {% set name = "zerostack-bin" %}
-{% set version = "1.6.1" %}
+{% set version = "1.7.0" %}
 
 package:
   name: {{ name }}
@@ -7,9 +7,9 @@ package:
 
 source:
   - url: https://github.com/gi-dellav/zerostack/releases/download/v{{ version }}/zerostack-x86_64-unknown-linux-musl.tar.gz  # [linux and x86_64]
-    sha256: 854232371f44f1493c9b5f0046656a9c4f1a9376b2c7a050f5555657708d5ec3
+    sha256: bee067458568c2b021dced37d91377301ee356d792b855c119f48f03cd698364
   - url: https://github.com/gi-dellav/zerostack/releases/download/v{{ version }}/zerostack-aarch64-unknown-linux-musl.tar.gz  # [linux and aarch64]
-    sha256: d23fd7e51d582773a7cae4804767c547edcc69ea04e3f545d53210811b474237
+    sha256: 0b1e28ed7552c38ebbea1f1c918ec1c3e5d4bab299c010b416aef1e2f74a9213
   - url: https://raw.githubusercontent.com/gi-dellav/zerostack/v{{ version }}/LICENSE
     sha256: 3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986
 

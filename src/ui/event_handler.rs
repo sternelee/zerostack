@@ -17,6 +17,7 @@ use crate::sandbox::Sandbox;
 use crate::session::storage::save_session;
 use crate::session::{MessageRole, Session};
 use crate::ui::events::sanitize_output;
+use crate::ui::feed::BlockStyle;
 use crate::ui::renderer::Renderer;
 use crate::ui::slash::handle_compress;
 
@@ -116,7 +117,7 @@ pub async fn handle_agent_event(
     agent_rx: &mut Option<mpsc::Receiver<AgentEvent>>,
     agent_line_started: &mut bool,
     response_buf: &mut String,
-    response_start_line: &mut Option<usize>,
+    response_start_block: &mut Option<usize>,
     was_reasoning: &mut bool,
     show_reasoning: bool,
     agent: &mut Option<AnyAgent>,
@@ -149,7 +150,7 @@ pub async fn handle_agent_event(
                 *agent_line_started = false;
                 *was_reasoning = false;
                 response_buf.clear();
-                *response_start_line = None;
+                *response_start_block = None;
             }
             let safe = sanitize_output(&text);
             response_buf.push_str(&safe);
@@ -167,20 +168,13 @@ pub async fn handle_agent_event(
                 return Ok(());
             }
 
-            let max_width = renderer.line_width();
-            let mut styled = crate::ui::markdown::markdown_to_styled(response_buf, max_width);
-
-            if !styled.is_empty() {
-                styled[0].text = CompactString::from(format!("< {}", styled[0].text));
+            if response_start_block.is_none() {
+                renderer.feed_mut().push_block(BlockStyle::Agent, "");
+                *response_start_block = Some(renderer.feed().block_count() - 1);
             }
-
-            if let Some(start) = *response_start_line {
-                renderer.replace_from(start, styled);
-            } else {
-                let start = renderer.buffer_len();
-                *response_start_line = Some(start);
-                renderer.replace_from(start, styled);
-            }
+            renderer
+                .feed_mut()
+                .replace_last(BlockStyle::Agent, response_buf.as_str());
             renderer.render_viewport()?;
             *agent_line_started = true;
         }
@@ -191,7 +185,7 @@ pub async fn handle_agent_event(
                 *agent_line_started = false;
             }
             response_buf.clear();
-            *response_start_line = None;
+            *response_start_block = None;
             session.add_tool_call(&name, &args);
             save_session_if_enabled(session, cli, renderer)?;
             let line = format!(
@@ -306,7 +300,7 @@ pub async fn handle_agent_event(
                 agent_rx,
                 agent_line_started,
                 response_buf,
-                response_start_line,
+                response_start_block,
                 was_reasoning,
                 agent,
                 client,
@@ -370,7 +364,7 @@ pub async fn handle_agent_event(
                 *agent_line_started = false;
             }
             response_buf.clear();
-            *response_start_line = None;
+            *response_start_block = None;
             renderer.write_line(&format!("retrying... ({}/{})", attempt, max), Color::Yellow)?;
         }
         AgentEvent::Error(e) => {
@@ -384,7 +378,7 @@ pub async fn handle_agent_event(
             *agent_rx = None;
             *agent_line_started = false;
             response_buf.clear();
-            *response_start_line = None;
+            *response_start_block = None;
             save_session_if_enabled(session, cli, renderer)?;
         }
     }
@@ -420,7 +414,7 @@ async fn handle_agent_done(
     agent_rx: &mut Option<mpsc::Receiver<AgentEvent>>,
     agent_line_started: &mut bool,
     response_buf: &mut String,
-    response_start_line: &mut Option<usize>,
+    response_start_block: &mut Option<usize>,
     was_reasoning: &mut bool,
     agent: &mut Option<AnyAgent>,
     client: &mut AnyClient,
@@ -436,17 +430,15 @@ async fn handle_agent_done(
     *was_reasoning = false;
 
     if !response_buf.is_empty() {
-        let max_width = renderer.line_width();
-        let mut styled = crate::ui::markdown::markdown_to_styled(response_buf, max_width);
-        if !styled.is_empty() {
-            styled[0].text = CompactString::from(format!("< {}", styled[0].text));
+        if let Some(start) = *response_start_block {
+            renderer.feed_mut().truncate_blocks(start + 1);
         }
-        if let Some(start) = *response_start_line {
-            renderer.replace_from(start, styled);
-            renderer.render_viewport()?;
-        }
+        renderer
+            .feed_mut()
+            .replace_last(BlockStyle::Agent, response_buf.as_str());
+        renderer.render_viewport()?;
     } else if !*agent_line_started {
-        renderer.write("< ", C_AGENT)?;
+        renderer.feed_mut().push_line(BlockStyle::Agent, "< ");
     }
 
     renderer.write_line("", Color::White)?;
@@ -483,7 +475,7 @@ async fn handle_agent_done(
     session.set_calibration(context_input_tokens, output_tokens);
     *agent_line_started = false;
     response_buf.clear();
-    *response_start_line = None;
+    *response_start_block = None;
 
     #[cfg(feature = "loop")]
     let loop_running = loop_state.as_ref().is_some_and(|ls| ls.active);

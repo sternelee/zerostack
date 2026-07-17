@@ -26,6 +26,10 @@ The model is set with `--model` or `ZS_MODEL`:
 zerostack --provider openai --model gpt-4o
 ```
 
+## Provider Recipes
+
+- [MiniMax](../providers/Minimax.md)
+
 ## Custom Providers
 
 Custom providers let you point zerostack at any OpenAI-compatible API (vLLM,

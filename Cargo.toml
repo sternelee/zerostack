@@ -1,10 +1,16 @@
 [workspace]
-members = [".", "crates/extension-api", "crates/gui", "tests/extensions/test-echo", "tests/extensions/pi-simplify"]
+members = [
+  ".",
+  "crates/extension-api",
+  "crates/gui",
+  "tests/extensions/test-echo",
+  "tests/extensions/pi-simplify",
+]
 default-members = [".", "crates/extension-api", "crates/gui"]
 resolver = "3"
 
 [workspace.package]
-version = "1.7.0-rc1"
+version = "1.7.0"
 edition = "2024"
 license = "GPL-3.0-only"
 homepage = "https://github.com/gi-dellav/zerostack"
@@ -23,24 +29,33 @@ readme = "README.md"
 keywords = ["ai", "cli", "dev"]
 
 [features]
-default = ['loop', 'git-worktree', 'mcp', 'subagents', 'archmd', 'status-signals', 'multithread', 'extensions']
+default = [
+  'loop',
+  'git-worktree',
+  'mcp',
+  'subagents',
+  'archmd',
+  'status-signals',
+  'multithread',
+  'extensions',
+]
 status-signals = []
 loop = []
 git-worktree = []
 mcp = [
-    "dep:rmcp",
-    "rmcp?/client",
-    "rmcp?/transport-child-process",
-    "rmcp?/transport-streamable-http-client-reqwest",
-    "rmcp?/auth",
+  "dep:rmcp",
+  "rmcp?/client",
+  "rmcp?/transport-child-process",
+  "rmcp?/transport-streamable-http-client-reqwest",
+  "rmcp?/auth",
 ]
 acp = ["dep:agent-client-protocol", "dep:blocking"]
-memory = []                              
+memory = []
 subagents = []
 archmd = []
-multithread = ["tokio/rt-multi-thread"]  
-multimodal = ["rig/image"]               
-pdf = ["multimodal", "rig/pdf"]   
+multithread = ["tokio/rt-multi-thread"]
+multimodal = ["rig/image"]
+pdf = ["multimodal", "rig/pdf"]
 advisor = []
 extensions = ["dep:wasmtime", "dep:wasmtime-wasi", "zerostack-extension-api"]
 hooks = []
@@ -48,9 +63,9 @@ hooks = []
 [dependencies]
 rig = { version = "0.39", features = ["rmcp"] }
 rmcp = { version = "2.0", optional = true, default-features = false, features = [
-    "client",
-    "transport-child-process",
-    "transport-streamable-http-client-reqwest",
+  "client",
+  "transport-child-process",
+  "transport-streamable-http-client-reqwest",
 ] }
 clap = { version = "4", features = ["derive", "env"] }
 crossterm = "0.29"
@@ -59,12 +74,12 @@ serde_json = "1"
 serde_yaml_ng = "0.10"
 toml = "1.1"
 tokio = { version = "1", features = [
-    "rt",
-    "macros",
-    "sync",
-    "time",
-    "process",
-    "fs",
+  "rt",
+  "macros",
+  "sync",
+  "time",
+  "process",
+  "fs",
 ] }
 anyhow = "1"
 tracing = "0.1"
@@ -86,8 +101,14 @@ http = "1"
 agent-client-protocol = { version = "1.0.1", optional = true }
 blocking = { version = "1", optional = true }
 mimalloc = { version = "0.1", default-features = false }
-wasmtime = { version = "46", optional = true, default-features = false, features = ["runtime", "cranelift", "component-model"] }
-wasmtime-wasi = { version = "46", optional = true, default-features = false, features = ["p2"] }
+wasmtime = { version = "46", optional = true, default-features = false, features = [
+  "runtime",
+  "cranelift",
+  "component-model",
+] }
+wasmtime-wasi = { version = "46", optional = true, default-features = false, features = [
+  "p2",
+] }
 zerostack-extension-api = { path = "crates/extension-api", optional = true }
 
 [profile.dev]

@@ -25,6 +25,8 @@ mod crc_tests;
 #[cfg(test)]
 mod edit_tests;
 #[cfg(test)]
+mod feed_tests;
+#[cfg(test)]
 mod grep_tests;
 #[cfg(all(test, feature = "hooks"))]
 mod hooks;
