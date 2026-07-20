@@ -797,14 +797,17 @@ async fn run() -> anyhow::Result<()> {
     let arch_msg: Option<String> = None;
 
     // Initialize extension manager (for both headless and interactive).
+    // Always initialize so auto-discovered extensions (global + project-local
+    // directories) are loaded even when no --extension flags are passed.
     #[cfg(feature = "extensions")]
     {
         let extension_paths: Vec<std::path::PathBuf> = cli.extension.clone();
-        if !extension_paths.is_empty() {
-            crate::extension::registry::init_from_paths(&extension_paths)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            tracing::info!("extensions initialized");
-        }
+        crate::extension::registry::init_from_paths(&extension_paths)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        tracing::info!(
+            count = extension_paths.len(),
+            "extensions initialized"
+        );
     }
 
     if cli.print {
