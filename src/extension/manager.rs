@@ -201,6 +201,16 @@ impl ExtensionManager {
     pub fn errors(&self) -> &[(PathBuf, String)] {
         &self.errors
     }
+
+    /// Get the current session name.
+    pub fn get_session_name(&self) -> String {
+        self.host.get_session_name()
+    }
+
+    /// Set the session name.
+    pub fn set_session_name(&self, name: &str) {
+        self.host.set_session_name(name);
+    }
 }
 
 /// Look for `extension.toml` adjacent to the .wasm file, or one directory up.

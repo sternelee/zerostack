@@ -4,6 +4,7 @@ members = [
   "crates/extension-api",
   "tests/extensions/test-echo",
   "tests/extensions/pi-simplify",
+  "tests/extensions/session-name",
 ]
 default-members = [".", "crates/extension-api"]
 resolver = "3"

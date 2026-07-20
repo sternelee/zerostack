@@ -52,6 +52,7 @@ fn default_entrypoint() -> String {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[derive(Default)]
 pub struct Capabilities {
     #[serde(default = "Capabilities::tools_default")]
     pub tools: bool,
@@ -71,20 +72,6 @@ pub struct Capabilities {
     pub session: bool,
 }
 
-impl Default for Capabilities {
-    fn default() -> Self {
-        Self {
-            tools: false,
-            commands: false,
-            lifecycle: false,
-            provider: false,
-            ui: false,
-            exec: false,
-            http: false,
-            session: false,
-        }
-    }
-}
 
 impl Capabilities {
     fn tools_default() -> bool {

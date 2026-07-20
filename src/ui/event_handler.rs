@@ -398,6 +398,15 @@ async fn handle_agent_done(
         }
     }
 
+    // Sync session name from extensions before persisting.
+    #[cfg(feature = "extensions")]
+    {
+        let ext_name = crate::extension::registry::get_session_name();
+        if !ext_name.is_empty() && ext_name != ui.session.name.as_str() {
+            ui.session.name = compact_str::CompactString::new(&ext_name);
+        }
+    }
+
     if !ui.cli.no_session
         && let Err(e) = save_session(ui.session)
     {

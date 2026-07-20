@@ -13,6 +13,7 @@ pub(crate) mod settings;
 
 pub(crate) use providers::warm_model_cache;
 
+use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use crate::cli::Cli;
@@ -482,7 +483,7 @@ pub async fn handle_slash(
                     if let Some(s) = skills.get(name) {
                         write_result(
                             ctx.renderer,
-                            &format!("  /skill:{name: <30} — {}", s.meta.description),
+                            format!("  /skill:{name: <30} — {}", s.meta.description),
                         );
                     }
                 }
@@ -547,6 +548,12 @@ pub async fn handle_slash(
                     let mut out = output;
                     out.push('\n');
                     ctx.renderer.write(&out, crate::ui::C_TOOL)?;
+                    // Sync session name from extension to session object.
+                    let ext_name = crate::extension::registry::get_session_name();
+                    if !ext_name.is_empty() && ext_name != ctx.session.name.as_str() {
+                        ctx.session.name = CompactString::new(&ext_name);
+                        crate::session::storage::save_session(ctx.session)?;
+                    }
                     return Ok(());
                 }
             }
