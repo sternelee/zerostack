@@ -1,5 +1,4 @@
 use compact_str::CompactString;
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 
@@ -37,30 +36,30 @@ impl Tool for WriteTodoList {
     type Args = TodoWriteArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "todo_write".to_string(),
-            description: "Create or update a structured task list to track progress in the current coding session. Use this for complex multi-step tasks. Replaces any existing todo list.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "todos": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "content": { "type": "string", "description": "Task description" },
-                                "status": { "type": "string", "description": "pending, in_progress, completed, or cancelled" },
-                                "priority": { "type": "string", "description": "high, medium, or low" }
-                            },
-                            "required": ["content", "status", "priority"]
+    fn description(&self) -> String {
+        "Create or update a structured task list to track progress in the current coding session. Use this for complex multi-step tasks. Replaces any existing todo list.".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": { "type": "string", "description": "Task description" },
+                            "status": { "type": "string", "description": "pending, in_progress, completed, or cancelled" },
+                            "priority": { "type": "string", "description": "high, medium, or low" }
                         },
-                        "description": "Full list of tasks to track"
-                    }
-                },
-                "required": ["todos"]
-            }),
-        }
+                        "required": ["content", "status", "priority"]
+                    },
+                    "description": "Full list of tasks to track"
+                }
+            },
+            "required": ["todos"]
+        })
     }
 
     async fn call(&self, args: TodoWriteArgs) -> Result<String, ToolError> {

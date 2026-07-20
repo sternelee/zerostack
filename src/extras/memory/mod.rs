@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 
 use chrono::Local;
 use regex::RegexBuilder;
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::Deserialize;
 
@@ -1002,10 +1001,8 @@ impl Tool for MemoryWrite {
     type Args = MemoryWriteArgs;
     type Output = String;
 
-    async fn definition(&self, _p: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Persist durable memory to disk. target=long_term writes curated facts/\
+    fn description(&self) -> String {
+        "Persist durable memory to disk. target=long_term writes curated facts/\
 preferences/decisions to MEMORY.md (always loaded next session), one fact per line; long_term \
 appends are deduplicated (whitespace-insensitive) so a line already present is skipped. \
 target=scratchpad maintains a \
@@ -1013,18 +1010,20 @@ per-project checklist (use `- [ ]` items; open ones are auto-injected, mode=over
 target=daily appends to today's running log. target=note saves reference material to \
 notes/<name>.md (find it later with memory_search, then read it in full with memory_read). \
 Prefer long_term for things that should always be remembered."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "target":  { "type": "string", "description": "long_term, scratchpad, daily, or note" },
-                    "content": { "type": "string", "description": "Markdown content to store (max 64KB; longer is truncated with a warning)" },
-                    "mode":    { "type": "string", "description": "append (default) or overwrite" },
-                    "name":    { "type": "string", "description": "filename stem, required for note" }
-                },
-                "required": ["target", "content"]
-            }),
-        }
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "target":  { "type": "string", "description": "long_term, scratchpad, daily, or note" },
+                "content": { "type": "string", "description": "Markdown content to store (max 64KB; longer is truncated with a warning)" },
+                "mode":    { "type": "string", "description": "append (default) or overwrite" },
+                "name":    { "type": "string", "description": "filename stem, required for note" }
+            },
+            "required": ["target", "content"]
+        })
     }
 
     async fn call(&self, args: MemoryWriteArgs) -> Result<String, ToolError> {
@@ -1079,10 +1078,8 @@ impl Tool for MemoryEdit {
     type Args = MemoryEditArgs;
     type Output = String;
 
-    async fn definition(&self, _p: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Replace a unique substring in a memory file in place. \
+    fn description(&self) -> String {
+        "Replace a unique substring in a memory file in place. \
 target=long_term (MEMORY.md), scratchpad, daily (a day's log; pass name=YYYY-MM-DD to edit an \
 earlier day, defaults to today), or note (name=<stem>). old_str must \
 occur EXACTLY once in the target file, matched literally (no fuzzy matching); if it matches zero or \
@@ -1092,18 +1089,20 @@ empty string to delete the matched text, and include the trailing newline in old
 whole line. Omit old_str entirely to delete a whole note file (requires target=note and name=<stem>); \
 omitting old_str for long_term/scratchpad/daily is rejected and changes nothing. Use memory_write to \
 append or overwrite; use this to surgically fix or remove existing content."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "target":  { "type": "string", "description": "long_term, scratchpad, daily, or note" },
-                    "name":    { "type": "string", "description": "note stem, required for note" },
-                    "old_str": { "type": "string", "description": "substring to replace; must occur exactly once. Omit to delete the whole note (target=note only)" },
-                    "new_str": { "type": "string", "description": "replacement text; empty string deletes the matched substring" }
-                },
-                "required": ["target", "new_str"]
-            }),
-        }
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "target":  { "type": "string", "description": "long_term, scratchpad, daily, or note" },
+                "name":    { "type": "string", "description": "note stem, required for note" },
+                "old_str": { "type": "string", "description": "substring to replace; must occur exactly once. Omit to delete the whole note (target=note only)" },
+                "new_str": { "type": "string", "description": "replacement text; empty string deletes the matched substring" }
+            },
+            "required": ["target", "new_str"]
+        })
     }
 
     async fn call(&self, args: MemoryEditArgs) -> Result<String, ToolError> {
@@ -1154,21 +1153,21 @@ impl Tool for MemoryRead {
     type Args = MemoryReadArgs;
     type Output = String;
 
-    async fn definition(&self, _p: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Read a memory file: source=long_term (MEMORY.md), scratchpad, \
+    fn description(&self) -> String {
+        "Read a memory file: source=long_term (MEMORY.md), scratchpad, \
 daily (name=YYYY-MM-DD, omit for today), note (name=<stem>), or list (enumerate everything)."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "source": { "type": "string", "description": "long_term, scratchpad, daily, note, or list" },
-                    "name":   { "type": "string", "description": "note stem or YYYY-MM-DD" }
-                },
-                "required": ["source"]
-            }),
-        }
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "source": { "type": "string", "description": "long_term, scratchpad, daily, note, or list" },
+                "name":   { "type": "string", "description": "note stem or YYYY-MM-DD" }
+            },
+            "required": ["source"]
+        })
     }
 
     async fn call(&self, args: MemoryReadArgs) -> Result<String, ToolError> {
@@ -1234,22 +1233,22 @@ impl Tool for MemorySearch {
     type Args = MemorySearchArgs;
     type Output = String;
 
-    async fn definition(&self, _p: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Case-insensitive keyword search across all memory files (long-term, \
+    fn description(&self) -> String {
+        "Case-insensitive keyword search across all memory files (long-term, \
 notes, daily logs, including older ones). Space-separated words are treated as separate terms; a \
 line matches if it contains ANY term, and files matching more distinct terms rank higher. Matches \
 are returned with surrounding context and the file path; to read a relevant file in full, follow \
 up with memory_read. Use to recall older context that is not auto-injected. If a search returns \
 'No matches', try again with synonyms, broader concepts, or shorter keywords."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": { "query": { "type": "string" } },
-                "required": ["query"]
-            }),
-        }
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "query": { "type": "string" } },
+            "required": ["query"]
+        })
     }
 
     async fn call(&self, args: MemorySearchArgs) -> Result<String, ToolError> {

@@ -190,10 +190,11 @@ async fn run() -> anyhow::Result<()> {
     }
 
     let version_changed = docs::ensure_global()?;
+    let is_interactive = !cli.print;
     #[cfg(feature = "acp")]
-    let is_interactive = !cli.acp_enabled && !cli.print && !cli.loop_mode;
-    #[cfg(not(feature = "acp"))]
-    let is_interactive = !cli.print && !cli.loop_mode;
+    let is_interactive = is_interactive && !cli.acp_enabled;
+    #[cfg(feature = "loop")]
+    let is_interactive = is_interactive && !cli.loop_mode;
 
     // ── Hooks: load settings.json config, apply trust, install dispatcher ──
     // Done this early (before provider/API-key resolution) so `--hooks-test`
@@ -995,18 +996,20 @@ async fn run() -> anyhow::Result<()> {
         }
 
         ui::run_interactive(
-            client,
+            crate::ui::state::UiContext::new(
+                &cli,
+                &cfg,
+                &mut session,
+                &mut context,
+                client,
+                permission,
+                ask_tx,
+                sandbox,
+                status_signals,
+            ),
             None,
-            &cli,
-            &cfg,
-            &mut session,
-            &mut context,
-            permission,
-            ask_tx,
             ask_rx,
-            sandbox,
             arch_msg,
-            status_signals,
             #[cfg(feature = "advisor")]
             handoff_rx,
         )
@@ -1132,6 +1135,7 @@ fn print_config(cli: &cli::Cli, cfg: &config::Config) {
         }
     };
 
+    #[cfg_attr(not(feature = "subagents"), allow(unused_mut))]
     let mut limit_entries: Vec<(&str, String)> = vec![
         ("max-tokens", max_tokens.to_string()),
         ("max-agent-turns", max_agent_turns.to_string()),

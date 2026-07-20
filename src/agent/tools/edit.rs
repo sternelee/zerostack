@@ -1,4 +1,3 @@
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
 use crate::agent::tools::crc::crc32_hex;
@@ -484,49 +483,44 @@ impl Tool for EditTool {
     type Args = EditArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        let (desc, params) = match edit_system() {
-            EditSystem::Similarity => (
-                "Edit a file using aider-style SEARCH/REPLACE blocks. Each block finds exact text and replaces it. Multiple blocks in one call are applied atomically. If the search text is not an exact match, whitespace normalization and fuzzy matching are attempted as fallbacks.".to_string(),
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
-                        "block": { "type": "string", "description": "One or more SEARCH/REPLACE blocks:\n<<<<<<< SEARCH\nexisting code to find\n=======\nreplacement code\n>>>>>>> REPLACE\n\nInclude multiple blocks for separate edits to the same file." }
-                    },
-                    "required": ["path", "block"]
-                }),
-            ),
-            EditSystem::Hashedit => (
-                "Edit a file using tag-based line references. Copy tagged lines from read output. Edit is CAS-guarded via file-level CRC-32 hash. All edits in one call are applied atomically.".to_string(),
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
-                        "file_crc": { "type": "string", "description": "8-char hex CRC-32 from the read output header [CRC: ...]" },
-                        "edits": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "line": { "type": "string", "description": "For single-line edits: copy-paste the tagged line from read output. Format: 'N|TAG content'" },
-                                    "lines": { "type": "string", "description": "For range edits: copy-paste multiple tagged lines from read output. Newline-separated." },
-                                    "text": { "type": "string", "description": "Replacement text. Use empty string to delete." }
-                                },
-                                "required": ["text"]
-                            },
-                            "description": "Array of edit operations"
-                        }
-                    },
-                    "required": ["path", "file_crc", "edits"]
-                }),
-            ),
-        };
+    fn description(&self) -> String {
+        match edit_system() {
+            EditSystem::Similarity => "Edit a file using aider-style SEARCH/REPLACE blocks. Each block finds exact text and replaces it. Multiple blocks in one call are applied atomically. If the search text is not an exact match, whitespace normalization and fuzzy matching are attempted as fallbacks.".to_string(),
+            EditSystem::Hashedit => "Edit a file using tag-based line references. Copy tagged lines from read output. Edit is CAS-guarded via file-level CRC-32 hash. All edits in one call are applied atomically.".to_string(),
+        }
+    }
 
-        ToolDefinition {
-            name: "edit".to_string(),
-            description: desc,
-            parameters: params,
+    fn parameters(&self) -> serde_json::Value {
+        match edit_system() {
+            EditSystem::Similarity => serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
+                    "block": { "type": "string", "description": "One or more SEARCH/REPLACE blocks:\n<<<<<<< SEARCH\nexisting code to find\n=======\nreplacement code\n>>>>>>> REPLACE\n\nInclude multiple blocks for separate edits to the same file." }
+                },
+                "required": ["path", "block"]
+            }),
+            EditSystem::Hashedit => serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
+                    "file_crc": { "type": "string", "description": "8-char hex CRC-32 from the read output header [CRC: ...]" },
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "line": { "type": "string", "description": "For single-line edits: copy-paste the tagged line from read output. Format: 'N|TAG content'" },
+                                "lines": { "type": "string", "description": "For range edits: copy-paste multiple tagged lines from read output. Newline-separated." },
+                                "text": { "type": "string", "description": "Replacement text. Use empty string to delete." }
+                            },
+                            "required": ["text"]
+                        },
+                        "description": "Array of edit operations"
+                    }
+                },
+                "required": ["path", "file_crc", "edits"]
+            }),
         }
     }
 

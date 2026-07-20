@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rig::completion::ToolDefinition;
 use rig::tool::{ToolDyn, ToolError};
 use rig::wasm_compat::WasmBoxedFuture;
 
@@ -18,14 +17,12 @@ impl ToolDyn for EchoTool {
         "echo_tool".to_string()
     }
 
-    fn definition<'a>(&'a self, _prompt: String) -> WasmBoxedFuture<'a, ToolDefinition> {
-        Box::pin(async move {
-            ToolDefinition {
-                name: "echo_tool".to_string(),
-                description: String::new(),
-                parameters: serde_json::json!({}),
-            }
-        })
+    fn description(&self) -> String {
+        String::new()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({})
     }
 
     fn call<'a>(&'a self, args: String) -> WasmBoxedFuture<'a, Result<String, ToolError>> {
@@ -45,14 +42,12 @@ impl ToolDyn for PermCheckingTool {
         "bash".to_string()
     }
 
-    fn definition<'a>(&'a self, _prompt: String) -> WasmBoxedFuture<'a, ToolDefinition> {
-        Box::pin(async move {
-            ToolDefinition {
-                name: "bash".to_string(),
-                description: String::new(),
-                parameters: serde_json::json!({}),
-            }
-        })
+    fn description(&self) -> String {
+        String::new()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({})
     }
 
     fn call<'a>(&'a self, args: String) -> WasmBoxedFuture<'a, Result<String, ToolError>> {
@@ -84,14 +79,12 @@ impl ToolDyn for JsonCommandPermCheckingTool {
         "bash".to_string()
     }
 
-    fn definition<'a>(&'a self, _prompt: String) -> WasmBoxedFuture<'a, ToolDefinition> {
-        Box::pin(async move {
-            ToolDefinition {
-                name: "bash".to_string(),
-                description: String::new(),
-                parameters: serde_json::json!({}),
-            }
-        })
+    fn description(&self) -> String {
+        String::new()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({})
     }
 
     fn call<'a>(&'a self, args: String) -> WasmBoxedFuture<'a, Result<String, ToolError>> {
@@ -116,14 +109,12 @@ impl ToolDyn for AlwaysFailsTool {
         "always_fails_tool".to_string()
     }
 
-    fn definition<'a>(&'a self, _prompt: String) -> WasmBoxedFuture<'a, ToolDefinition> {
-        Box::pin(async move {
-            ToolDefinition {
-                name: "always_fails_tool".to_string(),
-                description: String::new(),
-                parameters: serde_json::json!({}),
-            }
-        })
+    fn description(&self) -> String {
+        String::new()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({})
     }
 
     fn call<'a>(&'a self, _args: String) -> WasmBoxedFuture<'a, Result<String, ToolError>> {

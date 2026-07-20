@@ -48,8 +48,8 @@ fn streamed_reasoning_text<R>(content: &StreamedAssistantContent<R>) -> Option<C
 /// is delivered as a single [`BtwEvent::Done`] (or [`BtwEvent::Error`]) tagged
 /// with `id`. Unlike [`spawn_agent`], it never registers a subagent event sink
 /// and never mutates the session.
-pub fn spawn_btw<M, P>(
-    agent: Agent<M, P>,
+pub fn spawn_btw<M>(
+    agent: Agent<M>,
     prompt: String,
     history: Vec<Message>,
     event_tx: mpsc::Sender<BtwEvent>,
@@ -59,7 +59,6 @@ pub fn spawn_btw<M, P>(
 where
     M: CompletionModel + 'static,
     M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
-    P: rig::agent::PromptHook<M> + 'static,
 {
     let join = tokio::spawn(async move {
         let stream_result = {
@@ -92,8 +91,8 @@ where
                     text,
                 ))) => acc.push_str(&text.text),
                 Ok(MultiTurnStreamItem::FinalResponse(res)) => {
-                    let response_text = res.response();
                     let usage = res.usage();
+                    let response_text = res.output;
                     let response = if response_text.is_empty() {
                         CompactString::from(acc.as_str())
                     } else {
@@ -261,8 +260,8 @@ fn document_media_type(mime: &str) -> DocumentMediaType {
     }
 }
 
-async fn continue_prompt_injector<M, P>(
-    agent: &Agent<M, P>,
+async fn continue_prompt_injector<M>(
+    agent: &Agent<M>,
     retry_prompt: &str,
     retry_history: &[Message],
     tool_interactions: &[Message],
@@ -271,7 +270,6 @@ async fn continue_prompt_injector<M, P>(
 where
     M: CompletionModel + 'static,
     M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
-    P: rig::agent::PromptHook<M> + 'static,
 {
     let mut new_history = retry_history.to_vec();
     new_history.extend_from_slice(tool_interactions);
@@ -310,8 +308,8 @@ only if the user's question is about what the main assistant is doing.)",
     snapshot
 }
 
-pub fn spawn_agent<M, P>(
-    agent: Agent<M, P>,
+pub fn spawn_agent<M>(
+    agent: Agent<M>,
     prompt: String,
     history: Vec<Message>,
     retry_config: RetryConfig,
@@ -324,7 +322,6 @@ pub fn spawn_agent<M, P>(
 where
     M: CompletionModel + 'static,
     M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
-    P: rig::agent::PromptHook<M> + 'static,
 {
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(32);
 
@@ -461,8 +458,8 @@ where
                         tool_interactions.push(tool_result.clone().into());
                     }
                     Ok(MultiTurnStreamItem::FinalResponse(res)) => {
-                        let response_text = res.response();
                         let usage = res.usage();
+                        let response_text = res.output;
                         tracing::info!(
                             "agent done: input_tokens={}, output_tokens={}, cached_input_tokens={}, cache_creation_input_tokens={}",
                             usage.input_tokens,
@@ -572,15 +569,15 @@ where
 
 /// Headless (`-p`, `--loop`) counterpart to [`spawn_agent`]'s turn loop.
 /// Deliberately drives its own manual loop instead of rig's
-/// `.multi_turn(max_turns)` combinator: `multi_turn` is an opaque black box
+/// `.max_turns(max_turns)` combinator: `max_turns` is an opaque black box
 /// that only ever yields a single terminal `FinalResponse` for the whole
 /// session, with no seam to inject "one more turn" after it — exactly what a
 /// `Stop` hook needs to do. The agent's own `default_max_turns` (set at
 /// construction, see `agent::builder::build_agent_inner`) still bounds
 /// internal tool-call round trips per call, same as [`spawn_agent`], which
-/// never used `.multi_turn()` either.
-pub async fn run_print<M, P>(
-    agent: &Agent<M, P>,
+/// never used `.max_turns()` either.
+pub async fn run_print<M>(
+    agent: &Agent<M>,
     prompt: &str,
     pure_stdout: bool,
     retry_config: &RetryConfig,
@@ -592,7 +589,6 @@ pub async fn run_print<M, P>(
 where
     M: CompletionModel + 'static,
     M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
-    P: rig::agent::PromptHook<M> + 'static,
 {
     let mut stream = retry::retry_stream_chat(retry_config, || {
         let p = prompt.to_string();
@@ -782,8 +778,8 @@ fn format_tool_args_summary(args_json: &serde_json::Value) -> String {
 /// Run an agent silently (no stdout/stderr printing), collecting the full
 /// response text. Used by subagent tasks.
 #[cfg(feature = "subagents")]
-pub async fn run_subagent<M, P>(
-    agent: &Agent<M, P>,
+pub async fn run_subagent<M>(
+    agent: &Agent<M>,
     prompt: &str,
     max_turns: usize,
     event_tx: Option<&mpsc::Sender<AgentEvent>>,
@@ -792,14 +788,13 @@ pub async fn run_subagent<M, P>(
 where
     M: CompletionModel + 'static,
     M::StreamingResponse: Send + Sync + Unpin + Clone + 'static,
-    P: rig::agent::PromptHook<M> + 'static,
 {
     let mut stream = retry::retry_stream_chat(retry_config, || {
         let p = prompt.to_string();
         async move {
             agent
                 .stream_chat(p, Vec::<Message>::new())
-                .multi_turn(max_turns)
+                .max_turns(max_turns)
                 .await
         }
     })
@@ -827,7 +822,7 @@ where
                 }
             }
             Ok(MultiTurnStreamItem::FinalResponse(res)) => {
-                full_response = res.response().to_string();
+                full_response = res.output.to_string();
                 break;
             }
             Ok(_) => {}

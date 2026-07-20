@@ -17,6 +17,7 @@ use crate::auth::{AuthResolver, ProviderKind};
 use crate::cli::Cli;
 use crate::config::{ApiStyle, Config, CustomProviderConfig};
 use crate::context::ContextFiles;
+#[cfg(any(feature = "hooks", feature = "subagents"))]
 use crate::event::AgentEvent;
 #[cfg(feature = "hooks")]
 use crate::extras::hooks::LoopInfo;
@@ -500,7 +501,7 @@ where
         async move {
             agent_ref
                 .stream_chat(p, Vec::<Message>::new())
-                .multi_turn(1)
+                .max_turns(1)
                 .await
         }
     })
@@ -515,7 +516,7 @@ where
                 rig::streaming::StreamedAssistantContent::Text(text),
             )) => response.push_str(&text.text),
             Ok(rig::agent::MultiTurnStreamItem::FinalResponse(res)) => {
-                response = res.response().to_string();
+                response = res.output.to_string();
                 break;
             }
             Err(e) => return Err(anyhow::anyhow!("Compression failed: {}", e)),

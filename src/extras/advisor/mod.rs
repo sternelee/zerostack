@@ -1,7 +1,6 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rig::completion::ToolDefinition;
 use rig::streaming::StreamingChat;
 use rig::tool::Tool;
 use serde::Deserialize;
@@ -104,20 +103,21 @@ impl Tool for AdvisorTool {
     type Args = AdvisorArgs;
     type Output = String;
 
-    async fn definition(&self, _p: String) -> ToolDefinition {
+    fn description(&self) -> String {
         let human_handoff = CONFIG
             .lock()
             .ok()
             .and_then(|g| g.as_ref().map(|c| c.human_handoff))
             .unwrap_or(false);
 
-        let desc = if human_handoff {
+        if human_handoff {
             "Consult the user for strategic guidance. \
 Call this before substantive work, before writing, before committing to an \
 interpretation, when stuck, or when considering a change of approach. \
 The user sees your full conversation so far. \
 Describe your question clearly — include relevant context, what you're \
 trying to do, what you've tried, and what you need guidance on."
+                .to_string()
         } else {
             "Consult an expert advisor model for strategic guidance. \
 The advisor receives your full conversation transcript automatically. \
@@ -125,24 +125,23 @@ Call this before substantive work, before writing, before committing to an \
 interpretation, when stuck, or when considering a change of approach. \
 Describe your question clearly — the advisor already sees the full \
 conversation, so focus your question on the specific decision you need help with."
-        };
+                .to_string()
+        }
+    }
 
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: desc.to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "Your question for the advisor. The advisor \
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "Your question for the advisor. The advisor \
             already sees the full conversation transcript. Focus on the specific decision, \
             approach, or problem you need guidance on."
-                    }
-                },
-                "required": ["question"]
-            }),
-        }
+                }
+            },
+            "required": ["question"]
+        })
     }
 
     async fn call(&self, args: AdvisorArgs) -> Result<String, ToolError> {
@@ -334,7 +333,7 @@ where
     let mut stream = retry::retry_stream_chat(&RetryConfig::default(), move || {
         let p = prompt.clone();
         let h: Vec<rig::completion::Message> = vec![];
-        async move { agent_ref.stream_chat(p, h).multi_turn(1).await }
+        async move { agent_ref.stream_chat(p, h).max_turns(1).await }
     })
     .await
     .map_err(|e| anyhow::anyhow!("Advisor call failed: {e}"))?;
@@ -343,7 +342,7 @@ where
     while let Some(item) = stream.next().await {
         match item {
             Ok(rig::agent::MultiTurnStreamItem::FinalResponse(res)) => {
-                response = res.response().to_string();
+                response = res.output.to_string();
                 break;
             }
             Err(e) => return Err(anyhow::anyhow!("Advisor call failed: {e}")),

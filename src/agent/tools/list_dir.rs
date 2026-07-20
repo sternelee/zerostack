@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use ignore::WalkBuilder;
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
 use crate::agent::tools::{
@@ -58,21 +57,21 @@ impl Tool for ListDirTool {
     type Args = ListDirArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "list_dir".to_string(),
-            description: "List files and directories in a directory. Respects .gitignore. Shows type, size, entry count for subdirectories. Sorted: directories first, then alphabetical.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Directory path (defaults to current working directory)"
-                    }
-                },
-                "required": []
-            }),
-        }
+    fn description(&self) -> String {
+        "List files and directories in a directory. Respects .gitignore. Shows type, size, entry count for subdirectories. Sorted: directories first, then alphabetical.".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Directory path (defaults to current working directory)"
+                }
+            },
+            "required": []
+        })
     }
 
     async fn call(&self, args: ListDirArgs) -> Result<String, ToolError> {
