@@ -2,11 +2,10 @@
 members = [
   ".",
   "crates/extension-api",
-  "crates/gui",
   "tests/extensions/test-echo",
   "tests/extensions/pi-simplify",
 ]
-default-members = [".", "crates/extension-api", "crates/gui"]
+default-members = [".", "crates/extension-api"]
 resolver = "3"
 
 [workspace.package]
