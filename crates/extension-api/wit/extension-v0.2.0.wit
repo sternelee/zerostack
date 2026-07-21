@@ -1,6 +1,9 @@
-/// zerostack Extension API v0.3.0
+/// zerostack Extension API v0.4.0
 ///
 /// WIT contract between zerostack host and Wasm extensions.
+///
+/// ## v0.4.0 changes (from v0.3.0)
+/// - Added `session-control` host import: get/set session name, set terminal title
 ///
 /// ## v0.3.0 changes (from v0.2.0)
 /// - Added `trigger-prompt` host import for extensions to inject agent prompts
@@ -10,7 +13,7 @@
 /// - Added optional `session-start` and `session-shutdown` exports
 /// - Tool/command names are now auto-namespaced as `ext_id__name`
 
-package zerostack:extension@0.3.0;
+package zerostack:extension@0.4.0;
 
 
 /// ── shared types ────────────────────────────────────────────
@@ -82,6 +85,17 @@ interface extension-context {
     get-context: func() -> extension-info;
 }
 
+interface session-control {
+    /// Get the current session name. Returns empty string if not set.
+    get-session-name: func() -> string;
+
+    /// Set the session name. This persists to the session file.
+    set-session-name: func(name: string) -> result<_, string>;
+
+    /// Set the terminal window title. The title is restored on session shutdown.
+    set-terminal-title: func(title: string);
+}
+
 /// ── world: the complete extension contract ─────────────────────
 
 world extension-world {
@@ -89,6 +103,7 @@ world extension-world {
     import command-registry;
     import extension-context;
     import trigger-prompt;
+    import session-control;
 
     use types.{tool-output};
 

@@ -113,9 +113,7 @@ impl CoreEngine {
         };
 
         // Build the initial agent
-        if let Err(e) = engine.rebuild_agent().await {
-            return Err(e);
-        }
+        engine.rebuild_agent().await?;
 
         // Extract ask_rx so the runtime loop can select on it
         let ask_rx = engine.ask_rx.take();
@@ -248,11 +246,10 @@ impl CoreEngine {
                         } else {
                             Some(idx)
                         };
-                    } else if let Some(ref mut cur) = self.current_session_index {
-                        if *cur > idx {
+                    } else if let Some(ref mut cur) = self.current_session_index
+                        && *cur > idx {
                             *cur -= 1;
                         }
-                    }
                 }
                 let mut events = self.emit_session_list_updated();
                 events.extend(self.emit_session_history());
@@ -401,13 +398,12 @@ impl CoreEngine {
             UserAction::DropAllFiles => {
                 let count = self.context.extra_files.len();
                 self.context.extra_files.clear();
-                if count > 0 {
-                    if let Err(e) = self.rebuild_agent().await {
+                if count > 0
+                    && let Err(e) = self.rebuild_agent().await {
                         return vec![CoreEvent::Error {
                             message: CompactString::new(format!("rebuild failed: {e}")),
                         }];
                     }
-                }
                 vec![CoreEvent::CommandOutput {
                     text: CompactString::from(format!("dropped {} file(s)", count)),
                 }]
@@ -1027,11 +1023,10 @@ fn undo_last_exchange(session: &mut Session) -> usize {
         }
     }
     // Remove the trailing user message
-    if let Some(last) = session.messages.last() {
-        if last.role == MessageRole::User {
+    if let Some(last) = session.messages.last()
+        && last.role == MessageRole::User {
             session.messages.pop();
             removed += 1;
         }
-    }
     removed
 }

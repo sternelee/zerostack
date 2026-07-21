@@ -1,4 +1,3 @@
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
 use crate::agent::tools::crc::crc32_hex;
@@ -165,22 +164,20 @@ fn find_best_match(content: &str, search: &str) -> MatchResult {
     // Step 3: unicode-normalized match
     let content_uni = normalize_unicode(&content_norm);
     let search_uni = normalize_unicode(&search_norm);
-    if content_uni != content_norm || search_uni != search_norm {
-        if let Some(uni_pos) = content_uni.find(&search_uni) {
+    if (content_uni != content_norm || search_uni != search_norm)
+        && let Some(uni_pos) = content_uni.find(&search_uni) {
             let (byte_start, byte_end) = compute_byte_range(content, uni_pos, search_uni.len());
             return MatchResult::Normalized(byte_start, byte_end);
         }
-    }
 
     // Step 4: comment-prefix-stripped match
     let content_nocmt = strip_comment_prefixes(&content_norm);
     let search_nocmt = strip_comment_prefixes(&search_norm);
-    if content_nocmt != content_norm || search_nocmt != search_norm {
-        if let Some(cmt_pos) = content_nocmt.find(&search_nocmt) {
+    if (content_nocmt != content_norm || search_nocmt != search_norm)
+        && let Some(cmt_pos) = content_nocmt.find(&search_nocmt) {
             let (byte_start, byte_end) = compute_byte_range(content, cmt_pos, search_nocmt.len());
             return MatchResult::Normalized(byte_start, byte_end);
         }
-    }
 
     // Step 5: fuzzy line-level matching
     let search_lines: Vec<&str> = search.lines().collect();
@@ -484,49 +481,44 @@ impl Tool for EditTool {
     type Args = EditArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        let (desc, params) = match edit_system() {
-            EditSystem::Similarity => (
-                "Edit a file using aider-style SEARCH/REPLACE blocks. Each block finds exact text and replaces it. Multiple blocks in one call are applied atomically. If the search text is not an exact match, whitespace normalization and fuzzy matching are attempted as fallbacks.".to_string(),
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
-                        "block": { "type": "string", "description": "One or more SEARCH/REPLACE blocks:\n<<<<<<< SEARCH\nexisting code to find\n=======\nreplacement code\n>>>>>>> REPLACE\n\nInclude multiple blocks for separate edits to the same file." }
-                    },
-                    "required": ["path", "block"]
-                }),
-            ),
-            EditSystem::Hashedit => (
-                "Edit a file using tag-based line references. Copy tagged lines from read output. Edit is CAS-guarded via file-level CRC-32 hash. All edits in one call are applied atomically.".to_string(),
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
-                        "file_crc": { "type": "string", "description": "8-char hex CRC-32 from the read output header [CRC: ...]" },
-                        "edits": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "line": { "type": "string", "description": "For single-line edits: copy-paste the tagged line from read output. Format: 'N|TAG content'" },
-                                    "lines": { "type": "string", "description": "For range edits: copy-paste multiple tagged lines from read output. Newline-separated." },
-                                    "text": { "type": "string", "description": "Replacement text. Use empty string to delete." }
-                                },
-                                "required": ["text"]
-                            },
-                            "description": "Array of edit operations"
-                        }
-                    },
-                    "required": ["path", "file_crc", "edits"]
-                }),
-            ),
-        };
+    fn description(&self) -> String {
+        match edit_system() {
+            EditSystem::Similarity => "Edit a file using aider-style SEARCH/REPLACE blocks. Each block finds exact text and replaces it. Multiple blocks in one call are applied atomically. If the search text is not an exact match, whitespace normalization and fuzzy matching are attempted as fallbacks.".to_string(),
+            EditSystem::Hashedit => "Edit a file using tag-based line references. Copy tagged lines from read output. Edit is CAS-guarded via file-level CRC-32 hash. All edits in one call are applied atomically.".to_string(),
+        }
+    }
 
-        ToolDefinition {
-            name: "edit".to_string(),
-            description: desc,
-            parameters: params,
+    fn parameters(&self) -> serde_json::Value {
+        match edit_system() {
+            EditSystem::Similarity => serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
+                    "block": { "type": "string", "description": "One or more SEARCH/REPLACE blocks:\n<<<<<<< SEARCH\nexisting code to find\n=======\nreplacement code\n>>>>>>> REPLACE\n\nInclude multiple blocks for separate edits to the same file." }
+                },
+                "required": ["path", "block"]
+            }),
+            EditSystem::Hashedit => serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to the file (relative or absolute)" },
+                    "file_crc": { "type": "string", "description": "8-char hex CRC-32 from the read output header [CRC: ...]" },
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "line": { "type": "string", "description": "For single-line edits: copy-paste the tagged line from read output. Format: 'N|TAG content'" },
+                                "lines": { "type": "string", "description": "For range edits: copy-paste multiple tagged lines from read output. Newline-separated." },
+                                "text": { "type": "string", "description": "Replacement text. Use empty string to delete." }
+                            },
+                            "required": ["text"]
+                        },
+                        "description": "Array of edit operations"
+                    }
+                },
+                "required": ["path", "file_crc", "edits"]
+            }),
         }
     }
 

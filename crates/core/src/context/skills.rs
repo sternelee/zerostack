@@ -186,7 +186,7 @@ static SKILLS_CACHE: OnceLock<HashMap<String, Skill>> = OnceLock::new();
 /// Load all skills from standard locations (cached after first call).
 /// Returns a map of skill name → Skill.
 pub fn load_all() -> HashMap<String, Skill> {
-    SKILLS_CACHE.get_or_init(|| load_all_uncached()).clone()
+    SKILLS_CACHE.get_or_init(load_all_uncached).clone()
 }
 
 /// Force reload skills from disk (bypasses cache).
@@ -229,8 +229,8 @@ fn copy_embedded_skills_to(dest: &Path) -> anyhow::Result<()> {
             let dest_dir = dest.join(name);
             std::fs::create_dir_all(&dest_dir)?;
             for file in dir.files() {
-                if let Some(fname) = file.path().file_name().and_then(|s| s.to_str()) {
-                    if let Some(content) = file.contents_utf8() {
+                if let Some(fname) = file.path().file_name().and_then(|s| s.to_str())
+                    && let Some(content) = file.contents_utf8() {
                         let dest_path = dest_dir.join(fname);
                         let should_write = match std::fs::read_to_string(&dest_path) {
                             Ok(existing) => existing != content,
@@ -240,7 +240,6 @@ fn copy_embedded_skills_to(dest: &Path) -> anyhow::Result<()> {
                             std::fs::write(&dest_path, content)?;
                         }
                     }
-                }
             }
         }
     }

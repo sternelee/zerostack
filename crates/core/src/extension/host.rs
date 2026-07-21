@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wasmtime::component::Linker;
@@ -33,6 +34,8 @@ const NAMESPACE_SEPARATOR: &str = "__";
 pub struct ExtensionHost {
     engine: Engine,
     instances: HashMap<ExtensionId, LoadedExtension>,
+    /// Shared session state: (session_name, terminal_title)
+    session_state: Arc<Mutex<(String, String)>>,
 }
 
 struct LoadedExtension {
@@ -51,12 +54,24 @@ pub struct ExtGuestState {
     pub host_context: ExtensionInfo,
     /// Queued prompts from trigger-prompt calls (drained after command dispatch).
     pub queued_prompts: Vec<String>,
+    /// Shared session state: (session_name, terminal_title)
+    pub session_state: Arc<Mutex<(String, String)>>,
     wasi_ctx: wasmtime_wasi::WasiCtx,
     wasi_table: wasmtime_wasi::ResourceTable,
 }
 
 impl ExtGuestState {
     fn new(extension_id: &str) -> Self {
+        Self::new_with_session_state(
+            extension_id,
+            Arc::new(Mutex::new((String::new(), String::new()))),
+        )
+    }
+
+    fn new_with_session_state(
+        extension_id: &str,
+        session_state: Arc<Mutex<(String, String)>>,
+    ) -> Self {
         let wasi_ctx = wasmtime_wasi::WasiCtxBuilder::new()
             .inherit_stdout()
             .inherit_stderr()
@@ -73,6 +88,7 @@ impl ExtGuestState {
                 project_trusted: false,
             },
             queued_prompts: Vec::new(),
+            session_state,
             wasi_ctx,
             wasi_table: wasmtime_wasi::ResourceTable::new(),
         }
@@ -105,17 +121,17 @@ impl self::zerostack::extension::tool_registry::Host for ExtGuestState {
         &mut self,
         def: ToolDefinition,
     ) -> Result<(), wasmtime::component::__internal::String> {
-        let name: String = def.name.into();
+        let name: String = def.name;
         let namespaced = namespaced_tool_name(&self.extension_id, &name);
 
         // Reject duplicate bare name if another extension already registered it.
         self.tools.push(RegisteredTool {
             name: namespaced,
-            label: def.label.into(),
-            description: def.description.into(),
-            parameters_schema: def.parameters_schema.into(),
-            prompt_snippet: def.prompt_snippet.map(Into::into),
-            prompt_guidelines: def.prompt_guidelines.into_iter().map(Into::into).collect(),
+            label: def.label,
+            description: def.description,
+            parameters_schema: def.parameters_schema,
+            prompt_snippet: def.prompt_snippet,
+            prompt_guidelines: def.prompt_guidelines.into_iter().collect(),
             extension_id: self.extension_id.clone(),
         });
         Ok(())
@@ -138,13 +154,13 @@ impl self::zerostack::extension::command_registry::Host for ExtGuestState {
         &mut self,
         def: CommandDefinition,
     ) -> Result<(), wasmtime::component::__internal::String> {
-        let name: String = def.name.into();
+        let name: String = def.name;
         let namespaced = namespaced_tool_name(&self.extension_id, &name);
         self.commands.insert(
             namespaced.clone(),
             RegisteredCommand {
                 name: namespaced,
-                description: def.description.into(),
+                description: def.description,
                 extension_id: self.extension_id.clone(),
             },
         );
@@ -177,12 +193,42 @@ impl self::zerostack::extension::trigger_prompt::Host for ExtGuestState {
         prompt: wasmtime::component::__internal::String,
         _deliver_as: wasmtime::component::__internal::String,
     ) -> Result<(), wasmtime::component::__internal::String> {
-        self.queued_prompts.push(prompt.into());
+        self.queued_prompts.push(prompt);
         Ok(())
     }
 }
 
 impl self::zerostack::extension::types::Host for ExtGuestState {}
+
+// ── Host impl: session_control ────────────────────────────────
+
+impl self::zerostack::extension::session_control::Host for ExtGuestState {
+    fn get_session_name(&mut self) -> wasmtime::component::__internal::String {
+        self.session_state
+            .lock()
+            .map(|s| s.0.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_session_name(
+        &mut self,
+        name: wasmtime::component::__internal::String,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        let name: String = name;
+        if let Ok(mut s) = self.session_state.lock() {
+            s.0 = name;
+        }
+        Ok(())
+    }
+
+    fn set_terminal_title(&mut self, title: wasmtime::component::__internal::String) {
+        let title: String = title;
+        if let Ok(mut s) = self.session_state.lock() {
+            s.1 = title.clone();
+        }
+        print!("\x1b]0;{title}\x07");
+    }
+}
 
 // ── ExtensionHost ──────────────────────────────────────────────
 
@@ -196,6 +242,22 @@ impl ExtensionHost {
         Ok(Self {
             engine,
             instances: HashMap::new(),
+            session_state: Arc::new(Mutex::new((String::new(), String::new()))),
+        })
+    }
+
+    pub fn new_with_session_state(
+        session_state: Arc<Mutex<(String, String)>>,
+    ) -> Result<Self, String> {
+        let mut config = Config::default();
+        config.consume_fuel(true);
+        config.max_wasm_stack(512 * 1024);
+
+        let engine = Engine::new(&config).map_err(|e| e.to_string())?;
+        Ok(Self {
+            engine,
+            instances: HashMap::new(),
+            session_state,
         })
     }
 
@@ -230,7 +292,10 @@ impl ExtensionHost {
         >(&mut linker, |state: &mut ExtGuestState| state)
         .map_err(|e| format!("failed to add extension imports to linker: {e}"))?;
 
-        let mut store = Store::new(&self.engine, ExtGuestState::new(extension_id));
+        let mut store = Store::new(
+            &self.engine,
+            ExtGuestState::new_with_session_state(extension_id, self.session_state.clone()),
+        );
         store.set_fuel(GUEST_FUEL).map_err(|e| e.to_string())?;
         store.limiter(|state| state as &mut dyn wasmtime::ResourceLimiter);
 
@@ -388,7 +453,7 @@ impl ExtensionHost {
                 // Strip namespace prefix to get the bare name.
                 let bare = tool
                     .name
-                    .rsplitn(2, NAMESPACE_SEPARATOR)
+                    .rsplit(NAMESPACE_SEPARATOR)
                     .next()
                     .unwrap_or(&tool.name);
                 if bare == tool_name && !candidates.iter().any(|(eid, _)| eid == id) {
@@ -447,9 +512,9 @@ impl ExtensionHost {
         let mut candidates: Vec<(String, String)> = Vec::new();
         for (id, inst) in self.instances.iter() {
             let state = inst.store.data();
-            for (cmd_name, _) in &state.commands {
+            for cmd_name in state.commands.keys() {
                 let bare = cmd_name
-                    .rsplitn(2, NAMESPACE_SEPARATOR)
+                    .rsplit(NAMESPACE_SEPARATOR)
                     .next()
                     .unwrap_or(cmd_name);
                 if bare == command_name && !candidates.iter().any(|(eid, _)| eid == id) {

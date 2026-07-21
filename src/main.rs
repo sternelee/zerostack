@@ -188,10 +188,11 @@ async fn run() -> anyhow::Result<()> {
     }
 
     let version_changed = docs::ensure_global()?;
+    let is_interactive = !cli.print;
     #[cfg(feature = "acp")]
-    let is_interactive = !cli.acp_enabled && !cli.print && !cli.loop_mode;
-    #[cfg(not(feature = "acp"))]
-    let is_interactive = !cli.print && !cli.loop_mode;
+    let is_interactive = is_interactive && !cli.acp_enabled;
+    #[cfg(feature = "loop")]
+    let is_interactive = is_interactive && !cli.loop_mode;
 
     // ── Hooks: load settings.json config, apply trust, install dispatcher ──
     // Done this early (before provider/API-key resolution) so `--hooks-test`
@@ -793,6 +794,19 @@ async fn run() -> anyhow::Result<()> {
     #[cfg(not(feature = "archmd"))]
     let arch_msg: Option<String> = None;
 
+    // Initialize extension manager (for both headless and interactive).
+    // Always initialize so auto-discovered extensions (global + project-local
+    // directories) are loaded even when no --extension flags are passed.
+    #[cfg(feature = "extensions")]
+    {
+        let extension_paths: Vec<std::path::PathBuf> = cli.extension.clone();
+        zerostack_core::extension::registry::init_from_paths(&extension_paths)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        tracing::info!(
+            count = extension_paths.len(),
+            "extensions initialized"
+        );
+    }
     if cli.print {
         let msg = cli.message.join(" ");
         if msg.starts_with('!') {
@@ -951,18 +965,20 @@ async fn run() -> anyhow::Result<()> {
             session.add_message(MessageRole::User, &initial_msg);
         }
         ui::run_interactive(
-            client,
+            crate::ui::state::UiContext::new(
+                &cli,
+                &cfg,
+                &mut session,
+                &mut context,
+                client,
+                permission,
+                ask_tx,
+                sandbox,
+                status_signals,
+            ),
             None,
-            &cli,
-            &cfg,
-            &mut session,
-            &mut context,
-            permission,
-            ask_tx,
             ask_rx,
-            sandbox,
             arch_msg,
-            status_signals,
             #[cfg(feature = "advisor")]
             handoff_rx,
         )
@@ -1088,6 +1104,7 @@ fn print_config(cli: &cli::Cli, cfg: &config::Config) {
         }
     };
 
+    #[cfg_attr(not(feature = "subagents"), allow(unused_mut))]
     let mut limit_entries: Vec<(&str, String)> = vec![
         ("max-tokens", max_tokens.to_string()),
         ("max-agent-turns", max_agent_turns.to_string()),

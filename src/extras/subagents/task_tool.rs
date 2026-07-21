@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use futures::future::join_all;
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::Deserialize;
 
@@ -45,10 +44,8 @@ impl Tool for TaskTool {
     type Args = TaskArgs;
     type Output = String;
 
-    async fn definition(&self, _p: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Search and investigate the codebase via a fresh-context subagent. \
+    fn description(&self) -> String {
+        "Search and investigate the codebase via a fresh-context subagent. \
 Use for any cross-file question: where is X used, how does Y work, \
 find/list/count all X across the codebase, what calls Z, audit Q. \
 The subagent reads, greps, finds files, lists directories, accesses memory, \
@@ -58,19 +55,21 @@ enumerates completely without truncation gaps or synthesis errors across partial
 Multiple prompts run in parallel. \
 Skip only for known-location work: reading one identified file, \
 editing in a known location, grepping for a literal you will act on immediately."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "prompts": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Investigation prompt for the subagent. Use one for a focused question, or multiple to run independent investigations in parallel. Examples: 'List all tests in this project', 'Where is config loaded?', 'How does the agent loop work?'"
-                    }
-                },
-                "required": ["prompts"]
-            }),
-        }
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "prompts": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Investigation prompt for the subagent. Use one for a focused question, or multiple to run independent investigations in parallel. Examples: 'List all tests in this project', 'Where is config loaded?', 'How does the agent loop work?'"
+                }
+            },
+            "required": ["prompts"]
+        })
     }
 
     async fn call(&self, args: TaskArgs) -> Result<String, ToolError> {

@@ -13,6 +13,7 @@ pub(crate) mod settings;
 
 pub(crate) use providers::warm_model_cache;
 
+use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use crate::cli::Cli;
@@ -26,6 +27,7 @@ use crate::session::{MessageRole, Session};
 use crate::ui::events::render_session;
 use crate::ui::input::InputEditor;
 use crate::ui::renderer::Renderer;
+use crate::ui::state::{AgentBuildCtx, AgentRunState, ChainState, SlashState, UiContext};
 
 pub(crate) const C_AGENT: crossterm::style::Color = crossterm::style::Color::White;
 pub(crate) const C_RESULT: crossterm::style::Color = crossterm::style::Color::DarkGrey;
@@ -54,33 +56,32 @@ pub struct SlashCtx<'a> {
 }
 
 impl SlashCtx<'_> {
+    /// Borrow the pieces [`AgentBuildCtx::rebuild_agent`] needs.
+    fn agent_build_ctx(&self) -> AgentBuildCtx<'_> {
+        AgentBuildCtx {
+            cli: self.cli,
+            cfg: self.cfg,
+            context: self.context,
+            client: self.client,
+            permission: self.permission,
+            ask_tx: self.ask_tx,
+            sandbox: self.sandbox,
+            #[cfg(feature = "mcp")]
+            mcp_manager: self.mcp_manager,
+        }
+    }
+
     pub async fn rebuild_agent(&mut self) {
-        let model = self.client.completion_model(self.session.model.to_string());
-        let temperature =
-            crate::config::resolve_temperature(self.cli, self.cfg, &self.session.model);
-        let extra_body = crate::config::resolve_extra_body(self.cfg, &self.session.model);
         #[cfg(feature = "advisor")]
         {
             crate::extras::advisor::update_client(self.client.clone());
             crate::extras::advisor::set_session_messages(self.session.messages.clone());
         }
-        *self.agent = Some(
-            crate::provider::build_agent(
-                model,
-                self.cli,
-                self.cfg,
-                self.context,
-                self.permission.clone(),
-                self.ask_tx.clone(),
-                self.sandbox.clone(),
-                *self.reasoning_enabled,
-                temperature,
-                extra_body,
-                #[cfg(feature = "mcp")]
-                self.mcp_manager,
-            )
-            .await,
-        );
+        let new_agent = self
+            .agent_build_ctx()
+            .rebuild_agent(&self.session.model, *self.reasoning_enabled)
+            .await;
+        *self.agent = Some(new_agent);
     }
 
     pub async fn rebuild_agent_with_client(
@@ -94,32 +95,16 @@ impl SlashCtx<'_> {
             &self.cfg.custom_providers_map(),
             self.cfg.api_keys.as_ref(),
         )?;
-        let model = self.client.completion_model(self.session.model.to_string());
-        let temperature =
-            crate::config::resolve_temperature(self.cli, self.cfg, &self.session.model);
-        let extra_body = crate::config::resolve_extra_body(self.cfg, &self.session.model);
         #[cfg(feature = "advisor")]
         {
             crate::extras::advisor::update_client(self.client.clone());
             crate::extras::advisor::set_session_messages(self.session.messages.clone());
         }
-        *self.agent = Some(
-            crate::provider::build_agent(
-                model,
-                self.cli,
-                self.cfg,
-                self.context,
-                self.permission.clone(),
-                self.ask_tx.clone(),
-                self.sandbox.clone(),
-                new_reasoning,
-                temperature,
-                extra_body,
-                #[cfg(feature = "mcp")]
-                self.mcp_manager,
-            )
-            .await,
-        );
+        let new_agent = self
+            .agent_build_ctx()
+            .rebuild_agent(&self.session.model, new_reasoning)
+            .await;
+        *self.agent = Some(new_agent);
         Ok(())
     }
 
@@ -164,31 +149,16 @@ impl SlashCtx<'_> {
                 }
             }
         } else {
-            let model = self.client.completion_model(new_model.to_string());
-            let temperature = crate::config::resolve_temperature(self.cli, self.cfg, &new_model);
-            let extra_body = crate::config::resolve_extra_body(self.cfg, &new_model);
             #[cfg(feature = "advisor")]
             {
                 crate::extras::advisor::update_client(self.client.clone());
                 crate::extras::advisor::set_session_messages(self.session.messages.clone());
             }
-            *self.agent = Some(
-                crate::provider::build_agent(
-                    model,
-                    self.cli,
-                    self.cfg,
-                    self.context,
-                    self.permission.clone(),
-                    self.ask_tx.clone(),
-                    self.sandbox.clone(),
-                    *self.reasoning_enabled,
-                    temperature,
-                    extra_body,
-                    #[cfg(feature = "mcp")]
-                    self.mcp_manager,
-                )
-                .await,
-            );
+            let new_agent = self
+                .agent_build_ctx()
+                .rebuild_agent(&new_model, *self.reasoning_enabled)
+                .await;
+            *self.agent = Some(new_agent);
         }
 
         self.session.input_token_cost = qmc.input_token_cost;
@@ -214,47 +184,38 @@ impl SlashCtx<'_> {
 /// Free-function variant of [`SlashCtx::switch_to_prompt_model`] for call
 /// sites that don't have a `SlashCtx` (dot commands, chain transitions,
 /// startup). Returns `true` if a model switch occurred.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_prompt_model(
     prompt_name: &str,
-    cfg: &Config,
-    cli: &Cli,
-    client: &mut AnyClient,
-    session: &mut Session,
+    ui: &mut UiContext<'_>,
     agent: &mut Option<AnyAgent>,
-    context: &ContextFiles,
-    permission: &Option<PermCheck>,
-    ask_tx: &Option<AskSender>,
-    sandbox: &Sandbox,
     reasoning_enabled: bool,
     renderer: &mut Renderer,
-    #[cfg(feature = "mcp")] mcp_manager: Option<&crate::extras::mcp::McpClientManager>,
 ) -> bool {
-    let qm_name = match cfg.resolve_prompt_model(prompt_name) {
+    let qm_name = match ui.cfg.resolve_prompt_model(prompt_name) {
         Some(name) => name,
         None => return false,
     };
 
-    let qm = crate::config::quick_models_map(cfg);
+    let qm = crate::config::quick_models_map(ui.cfg);
     let Some(qmc) = qm.get(qm_name) else {
         return false;
     };
 
     let new_model = compact_str::CompactString::from(&*qmc.model);
-    let provider_changed = qmc.provider != session.provider;
+    let provider_changed = qmc.provider != ui.session.provider;
 
-    session.model = new_model.clone();
+    ui.session.model = new_model.clone();
 
     if provider_changed {
         match crate::provider::create_client(
             &qmc.provider,
-            cli.api_key.as_deref(),
-            &cfg.custom_providers_map(),
-            cfg.api_keys.as_ref(),
+            ui.cli.api_key.as_deref(),
+            &ui.cfg.custom_providers_map(),
+            ui.cfg.api_keys.as_ref(),
         ) {
             Ok(new_client) => {
-                *client = new_client;
-                session.provider = compact_str::CompactString::from(&*qmc.provider);
+                ui.client = new_client;
+                ui.session.provider = compact_str::CompactString::from(&*qmc.provider);
                 // Fall through to rebuild agent below
             }
             Err(e) => {
@@ -270,39 +231,25 @@ pub(crate) async fn apply_prompt_model(
         }
     }
 
-    let model = client.completion_model(new_model.to_string());
-    let temperature = crate::config::resolve_temperature(cli, cfg, &new_model);
-    let extra_body = crate::config::resolve_extra_body(cfg, &new_model);
     #[cfg(feature = "advisor")]
     {
-        crate::extras::advisor::update_client(client.clone());
-        crate::extras::advisor::set_session_messages(session.messages.clone());
+        crate::extras::advisor::update_client(ui.client.clone());
+        crate::extras::advisor::set_session_messages(ui.session.messages.clone());
     }
     *agent = Some(
-        crate::provider::build_agent(
-            model,
-            cli,
-            cfg,
-            context,
-            permission.clone(),
-            ask_tx.clone(),
-            sandbox.clone(),
-            reasoning_enabled,
-            temperature,
-            extra_body,
-            #[cfg(feature = "mcp")]
-            mcp_manager,
-        )
-        .await,
+        ui.agent_build_ctx()
+            .rebuild_agent(&new_model, reasoning_enabled)
+            .await,
     );
 
-    session.input_token_cost = qmc.input_token_cost;
-    session.output_token_cost = qmc.output_token_cost;
-    session.update_context_window(cfg.resolve_context_window(
-        &session.provider,
-        &session.model,
-        &qm,
-    ));
+    ui.session.input_token_cost = qmc.input_token_cost;
+    ui.session.output_token_cost = qmc.output_token_cost;
+    ui.session
+        .update_context_window(ui.cfg.resolve_context_window(
+            &ui.session.provider,
+            &ui.session.model,
+            &qm,
+        ));
 
     let _ = renderer.write_line(
         &format!(
@@ -352,45 +299,36 @@ pub fn undo_last(session: &mut Session) -> usize {
     removed
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn handle_compress(
     instructions: Option<&str>,
     auto: bool,
     agent: &mut Option<AnyAgent>,
-    client: &mut AnyClient,
     renderer: &mut Renderer,
-    session: &mut Session,
-    cli: &Cli,
-    cfg: &Config,
-    context: &mut ContextFiles,
+    ui: &mut UiContext<'_>,
     reasoning_enabled: bool,
-    permission: &Option<PermCheck>,
-    ask_tx: &Option<AskSender>,
-    sandbox: &Sandbox,
-    #[cfg(feature = "mcp")] mcp_manager: Option<&crate::extras::mcp::McpClientManager>,
 ) -> anyhow::Result<()> {
     // Mirror the auto-compaction trigger's reserve exactly (including memory's
     // effective_reserve) so the budget gate here can never disagree with the
     // gate that decided to call us.
-    let qm = crate::config::quick_models_map(cfg);
+    let qm = crate::config::quick_models_map(ui.cfg);
     #[cfg(feature = "memory")]
     let reserve = crate::extras::memory::effective_reserve(
-        cfg.resolve_reserve_tokens(&session.model, &qm),
-        context.memory.as_deref(),
+        ui.cfg.resolve_reserve_tokens(&ui.session.model, &qm),
+        ui.context.memory.as_deref(),
     );
     #[cfg(not(feature = "memory"))]
-    let reserve = cfg.resolve_reserve_tokens(&session.model, &qm);
-    let keep_recent = cfg.resolve_keep_recent_tokens();
-    let max_tokens = session.context_window.saturating_sub(reserve);
+    let reserve = ui.cfg.resolve_reserve_tokens(&ui.session.model, &qm);
+    let keep_recent = ui.cfg.resolve_keep_recent_tokens();
+    let max_tokens = ui.session.context_window.saturating_sub(reserve);
 
     // Auto-compaction only makes sense when actually over budget; manual
     // /compress is the user's explicit intent, so it skips the budget gate and
     // proceeds regardless of how full the context is.
-    if auto && session.effective_context_tokens() <= max_tokens {
+    if auto && ui.session.effective_context_tokens() <= max_tokens {
         return Ok(());
     }
 
-    let cut_idx = crate::session::Session::select_compaction_cut(&session.messages, keep_recent);
+    let cut_idx = crate::session::Session::select_compaction_cut(&ui.session.messages, keep_recent);
 
     // Nothing old enough to summarize (everything is within keep_recent). This
     // is a real physical limit even when forced, so report it for manual runs;
@@ -411,12 +349,13 @@ pub async fn handle_compress(
     }
     renderer.write_line("", crossterm::style::Color::White)?;
 
-    let messages_to_summarize = &session.messages[..cut_idx];
-    let previous_summary = session.compactions.last().map(|c| c.summary.as_str());
+    let messages_to_summarize = &ui.session.messages[..cut_idx];
+    let previous_summary = ui.session.compactions.last().map(|c| c.summary.as_str());
 
-    let summary = client
+    let summary = ui
+        .client
         .compress_messages(
-            &session.model,
+            &ui.session.model,
             messages_to_summarize,
             previous_summary,
             instructions,
@@ -434,30 +373,15 @@ pub async fn handle_compress(
         &summary,
         Some(cut_idx), // = first_kept_index: how many messages were summarized
     );
-    session.compress(summary, cut_idx, tokens_before);
+    ui.session.compress(summary, cut_idx, tokens_before);
 
-    let model = client.completion_model(session.model.to_string());
-    let temperature = crate::config::resolve_temperature(cli, cfg, &session.model);
-    let extra_body = crate::config::resolve_extra_body(cfg, &session.model);
     *agent = Some(
-        crate::provider::build_agent(
-            model,
-            cli,
-            cfg,
-            context,
-            permission.clone(),
-            ask_tx.clone(),
-            sandbox.clone(),
-            reasoning_enabled,
-            temperature,
-            extra_body,
-            #[cfg(feature = "mcp")]
-            mcp_manager,
-        )
-        .await,
+        ui.agent_build_ctx()
+            .rebuild_agent(&ui.session.model, reasoning_enabled)
+            .await,
     );
 
-    render_session(renderer, session, cli, cfg, context)?;
+    render_session(renderer, ui.session, ui.cli, ui.cfg, ui.context)?;
     renderer.write_line(
         &format!(
             "compressed {} messages (saved ~{} tokens)",
@@ -469,48 +393,40 @@ pub async fn handle_compress(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn handle_slash(
     text: &str,
-    agent: &mut Option<AnyAgent>,
-    client: &mut AnyClient,
     renderer: &mut Renderer,
-    session: &mut Session,
-    cli: &Cli,
-    cfg: &Config,
-    context: &mut ContextFiles,
-    show_reasoning: &mut bool,
-    reasoning_enabled: &mut bool,
-    is_running: &mut bool,
     input: &mut InputEditor,
-    permission: &Option<PermCheck>,
-    ask_tx: &Option<AskSender>,
-    todo_tools_enabled: &mut bool,
-    sandbox: &Sandbox,
-    #[cfg(feature = "loop")] loop_state: &mut Option<crate::extras::r#loop::LoopState>,
-    #[cfg(feature = "mcp")] mcp_manager: Option<&crate::extras::mcp::McpClientManager>,
+    run: &mut AgentRunState,
+    ui: &mut UiContext<'_>,
+    slash: &mut SlashState,
+    chain: &mut ChainState,
 ) -> anyhow::Result<()> {
+    // `chain` only feeds `SlashCtx::loop_state`; without the loop feature it
+    // has no consumer here.
+    #[cfg(not(feature = "loop"))]
+    let _ = &chain;
     let parts: SmallVec<[&str; 3]> = text.trim().splitn(3, ' ').collect();
     let mut ctx = SlashCtx {
-        agent,
-        client,
+        agent: &mut run.agent,
+        client: &mut ui.client,
         renderer,
-        session,
-        cli,
-        cfg,
-        context,
-        show_reasoning,
-        reasoning_enabled,
-        is_running,
+        session: ui.session,
+        cli: ui.cli,
+        cfg: ui.cfg,
+        context: ui.context,
+        show_reasoning: &mut slash.show_reasoning,
+        reasoning_enabled: &mut slash.reasoning_enabled,
+        is_running: &mut run.is_running,
         input,
-        permission,
-        ask_tx,
-        todo_tools_enabled,
-        sandbox,
+        permission: &ui.permission,
+        ask_tx: &ui.ask_tx,
+        todo_tools_enabled: &mut slash.todo_tools_enabled,
+        sandbox: &ui.sandbox,
         #[cfg(feature = "loop")]
-        loop_state,
+        loop_state: &mut chain.loop_state,
         #[cfg(feature = "mcp")]
-        mcp_manager,
+        mcp_manager: ui.mcp_manager.as_ref(),
     };
 
     match parts[0] {
@@ -540,12 +456,72 @@ pub async fn handle_slash(
         "/init" => init::handle(&parts, &mut ctx).await,
         "/review" => review::handle(&parts, &mut ctx).await,
         "/memory" => memory::handle(&parts, &mut ctx).await,
+        "/regen-skills" => {
+            match crate::context::skills::regen() {
+                Ok(()) => {
+                    ctx.context.skills = crate::context::skills::reload_skills();
+                    write_ok(ctx.renderer, "Skills regenerated. Use /skills to see them.");
+                }
+                Err(e) => {
+                    write_error(ctx.renderer, format!("failed to regenerate skills: {e}"));
+                }
+            }
+            Ok(())
+        }
+        "/skills" => {
+            let skills = &ctx.context.skills;
+            if skills.is_empty() {
+                write_result(
+                    ctx.renderer,
+                    "No skills loaded. Add skills to ~/.local/share/zerostack/skills/ or .zerostack/skills/",
+                );
+            } else {
+                write_ok(ctx.renderer, "Available skills:");
+                let mut names: Vec<&str> = skills.keys().map(|s| s.as_str()).collect();
+                names.sort();
+                for name in names {
+                    if let Some(s) = skills.get(name) {
+                        write_result(
+                            ctx.renderer,
+                            format!("  /skill:{name: <30} — {}", s.meta.description),
+                        );
+                    }
+                }
+                write_result(ctx.renderer, "");
+                write_result(ctx.renderer, "Use /skill:<name> to load full instructions.");
+            }
+            Ok(())
+        }
         "/compress" | "/compact" | "/loop" | "/worktree" | "/wt-merge" | "/wt-exit" => {
             features::handle(&parts, &mut ctx).await
         }
         #[cfg(feature = "hooks")]
         "/hooks" => hooks::handle(&parts, &mut ctx).await,
         _ => {
+            // Try extension commands first.
+            #[cfg(feature = "extensions")]
+            {
+                let cmd_name = parts[0].strip_prefix('/').unwrap_or(parts[0]);
+                let full_args = if parts.len() > 1 {
+                    text[parts[0].len()..].trim().to_string()
+                } else {
+                    String::new()
+                };
+                let (output, queued_prompts) =
+                    zerostack_core::extension::registry::dispatch_with_prompts(cmd_name, &full_args);
+                if let Some(out) = output {
+                    let mut out_buf = out;
+                    out_buf.push('\n');
+                    ctx.renderer.write(&out_buf, crate::ui::C_TOOL)?;
+                    // Sync session name from extension to session object.
+                    let ext_name = zerostack_core::extension::registry::get_session_name();
+                    if !ext_name.is_empty() && ext_name != ctx.session.name.as_str() {
+                        ctx.session.name = CompactString::new(&ext_name);
+                        crate::session::storage::save_session(ctx.session)?;
+                    }
+                    return Ok(());
+                }
+            }
             write_error(
                 ctx.renderer,
                 format!("unknown command: {} (try /help)", parts[0]),

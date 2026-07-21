@@ -73,6 +73,20 @@ pub struct Cli {
     #[arg(long = "no-tools", help = "Disable all tools")]
     pub no_tools: bool,
 
+    #[cfg(feature = "extensions")]
+    #[arg(
+        short = 'E',
+        long = "extension",
+        help = "Load an extension from a .wasm file (repeatable)"
+    )]
+    pub extension: Vec<std::path::PathBuf>,
+
+    #[arg(
+        long = "skill",
+        help = "Load a skill directory or single SKILL.md file (repeatable)"
+    )]
+    pub skill: Vec<std::path::PathBuf>,
+
     #[arg(long = "no-color", help = "Disable colored TUI output")]
     pub no_color: bool,
 

@@ -8,6 +8,8 @@ use crate::extension::{ExtensionMeta, RegisteredTool};
 
 /// Top-level extension manager. Owns the ExtensionHost and coordinates
 /// extension discovery, loading, queries, and teardown.
+use std::sync::{Arc, Mutex};
+
 pub struct ExtensionManager {
     host: ExtensionHost,
     /// Metadata for loaded extensions by id.
@@ -19,12 +21,15 @@ pub struct ExtensionManager {
     session_id: String,
     model_name: String,
     project_trusted: bool,
+    /// Shared session state: (session_name, terminal_title)
+    session_state: Arc<Mutex<(String, String)>>,
 }
 
 impl ExtensionManager {
     /// Create a new ExtensionManager with an empty host.
     pub fn new() -> Result<Self, String> {
-        let host = ExtensionHost::new()?;
+        let session_state = Arc::new(Mutex::new((String::new(), String::new())));
+        let host = ExtensionHost::new_with_session_state(session_state.clone())?;
         Ok(Self {
             host,
             extensions: Vec::new(),
@@ -35,6 +40,7 @@ impl ExtensionManager {
             session_id: String::new(),
             model_name: String::new(),
             project_trusted: false,
+            session_state,
         })
     }
 
@@ -200,6 +206,21 @@ impl ExtensionManager {
 
     pub fn errors(&self) -> &[(PathBuf, String)] {
         &self.errors
+    }
+
+    /// Get the current session name.
+    pub fn get_session_name(&self) -> String {
+        self.session_state
+            .lock()
+            .map(|s| s.0.clone())
+            .unwrap_or_default()
+    }
+
+    /// Set the session name.
+    pub fn set_session_name(&self, name: &str) {
+        if let Ok(mut s) = self.session_state.lock() {
+            s.0 = name.to_string();
+        }
     }
 }
 

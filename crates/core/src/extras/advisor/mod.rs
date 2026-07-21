@@ -334,7 +334,7 @@ where
     let mut stream = retry::retry_stream_chat(&RetryConfig::default(), move || {
         let p = prompt.clone();
         let h: Vec<rig::completion::Message> = vec![];
-        async move { agent_ref.stream_chat(p, h).multi_turn(1).await }
+        async move { agent_ref.stream_chat(p, h).max_turns(1).await }
     })
     .await
     .map_err(|e| anyhow::anyhow!("Advisor call failed: {e}"))?;
@@ -343,7 +343,7 @@ where
     while let Some(item) = stream.next().await {
         match item {
             Ok(rig::agent::MultiTurnStreamItem::FinalResponse(res)) => {
-                response = res.response().to_string();
+                response = res.output().to_string();
                 break;
             }
             Err(e) => return Err(anyhow::anyhow!("Advisor call failed: {e}")),

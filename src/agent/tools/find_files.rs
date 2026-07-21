@@ -1,6 +1,5 @@
 use ignore::WalkBuilder;
 use regex::Regex;
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
 use crate::agent::tools::{
@@ -30,25 +29,25 @@ impl Tool for FindFilesTool {
     type Args = FindFilesArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "find_files".to_string(),
-            description: "Recursively find files matching a regex pattern in their filename. Respects .gitignore. Skips node_modules and target.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "Regex pattern to match file names against"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Directory to search in (defaults to current working directory)"
-                    }
+    fn description(&self) -> String {
+        "Recursively find files matching a regex pattern in their filename. Respects .gitignore. Skips node_modules and target.".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Regex pattern to match file names against"
                 },
-                "required": ["pattern"]
-            }),
-        }
+                "path": {
+                    "type": "string",
+                    "description": "Directory to search in (defaults to current working directory)"
+                }
+            },
+            "required": ["pattern"]
+        })
     }
 
     async fn call(&self, args: FindFilesArgs) -> Result<String, ToolError> {

@@ -7,10 +7,11 @@ use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::style::{
     Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
-use crossterm::terminal::{Clear, ClearType, ScrollUp};
+use crossterm::terminal::{Clear, ClearType};
 use regex::Regex;
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 
+use super::feed::{BlockStyle, Feed, style_from_color};
 use super::markdown::word_wrap;
 use super::statusline::StatusSpan;
 use super::utils::{char_display_width, display_width, resolve_color};
@@ -50,12 +51,10 @@ pub struct ChainPrompt {
 }
 
 pub struct Renderer {
-    cursor_row: u16,
-    col: u16,
     spinner_frame: u8,
-    buffer: Vec<LineEntry>,
+    feed: Feed,
     partial: CompactString,
-    partial_color: Color,
+    partial_style: BlockStyle,
     scroll_offset: usize,
     input_scroll_offset: usize,
     input_vscroll_offset: usize,
@@ -90,12 +89,10 @@ pub struct Renderer {
 impl Renderer {
     pub fn new() -> io::Result<Self> {
         Ok(Renderer {
-            cursor_row: 0,
-            col: 0,
             spinner_frame: 0,
-            buffer: Vec::new(),
+            feed: Feed::new(),
             partial: CompactString::new(""),
-            partial_color: Color::White,
+            partial_style: BlockStyle::Plain,
             scroll_offset: 0,
             input_scroll_offset: 0,
             input_vscroll_offset: 0,
@@ -154,20 +151,6 @@ impl Renderer {
         Ok(())
     }
 
-    /// Position the cursor at the chat content column on row `r`, accounting for
-    /// the left margin. At the start of a line it first paints the margin gutter.
-    fn move_to_content(&self, stdout: &mut impl Write, r: u16) -> io::Result<()> {
-        if self.chat_margin > 0 && self.col == 0 {
-            stdout.execute(MoveTo(0, r))?;
-            if let Some(bg) = self.chat_bg {
-                write!(stdout, "{}", SetBackgroundColor(self.color(bg)))?;
-            }
-            self.write_chat_margin(stdout)?;
-        }
-        stdout.execute(MoveTo(self.col + self.chat_margin, r))?;
-        Ok(())
-    }
-
     pub fn set_background_colors(
         &mut self,
         chat_bg: Option<Color>,
@@ -192,26 +175,34 @@ impl Renderer {
         cols.saturating_sub(1 + self.chat_margin) as usize
     }
 
+    #[cfg(test)]
     pub fn line_width(&self) -> usize {
         self.max_line_width()
     }
 
-    pub fn buffer_len(&self) -> usize {
-        self.buffer.len()
+    fn chat_lines(&self, width: usize) -> Vec<LineEntry> {
+        let mut lines = self.feed.lines(width);
+        if !self.partial.is_empty() {
+            let color = self.partial_style.color();
+            for chunk in word_wrap(&self.partial, width) {
+                lines.push(LineEntry { text: chunk, color });
+            }
+        }
+        lines
     }
 
-    pub fn replace_from(&mut self, start: usize, lines: Vec<LineEntry>) {
-        self.commit_partial();
-        self.buffer.truncate(start);
-        self.buffer.extend(lines);
-        self.cursor_row = self.buffer.len() as u16;
-        self.col = 0;
-        self.partial.clear();
-        let visible = self.visible_lines();
-        let max_offset = self.buffer.len().saturating_sub(visible);
-        if self.scroll_offset > max_offset {
-            self.scroll_offset = max_offset;
-        }
+    pub fn buffer_len(&self) -> usize {
+        self.chat_lines(self.max_line_width()).len()
+    }
+
+    /// Access the underlying feed for callers that want to push semantic blocks
+    /// directly (e.g., session rendering or streaming agent responses).
+    pub fn feed(&self) -> &Feed {
+        &self.feed
+    }
+
+    pub fn feed_mut(&mut self) -> &mut Feed {
+        &mut self.feed
     }
 
     pub fn visible_lines(&self) -> usize {
@@ -244,14 +235,13 @@ impl Renderer {
     }
 
     pub fn buffer_line_at_row(&self, row: u16) -> Option<usize> {
-        let (cols, _rows) = self.terminal_size();
-        let max_width = cols.saturating_sub(1 + self.chat_margin) as usize;
-        let visible = self.visible_lines();
-        let total = self.buffer.len();
+        let width = self.max_line_width();
+        let total = self.chat_lines(width).len();
         if total == 0 {
             return None;
         }
 
+        let visible = self.visible_lines();
         let auto_scroll = self.scroll_offset == 0;
         let pad = if auto_scroll && total < visible {
             visible - total
@@ -265,32 +255,11 @@ impl Renderer {
         let start = if auto_scroll {
             total.saturating_sub(visible)
         } else {
-            total.saturating_sub(self.scroll_offset + visible)
+            total.saturating_sub((self.scroll_offset + visible).min(total))
         };
         let start = start.min(total.saturating_sub(visible));
 
-        let mut visual_row: u16 = pad as u16;
-        let mut buf_idx = start;
-
-        while buf_idx < total {
-            let entry = &self.buffer[buf_idx];
-            let text = &entry.text;
-
-            let wrapped_rows = if display_width(text) > max_width {
-                word_wrap(text, max_width).len() as u16
-            } else {
-                1
-            };
-
-            if visual_row + wrapped_rows > row {
-                return Some(buf_idx);
-            }
-
-            visual_row += wrapped_rows;
-            buf_idx += 1;
-        }
-
-        None
+        Some(start + (row as usize) - pad)
     }
 
     pub fn clear_selection(&mut self) {
@@ -299,8 +268,9 @@ impl Renderer {
         self.selection_end = None;
     }
 
-    pub fn link_url_at(&self, buf_idx: usize, col: u16) -> Option<&str> {
-        let entry = self.buffer.get(buf_idx)?;
+    pub fn link_url_at(&self, buf_idx: usize, col: u16) -> Option<String> {
+        let lines = self.chat_lines(self.max_line_width());
+        let entry = lines.get(buf_idx)?;
         let text: &str = &entry.text;
         let click_col = col.saturating_sub(self.chat_margin) as usize;
         for m in URL_RE.find_iter(text) {
@@ -308,7 +278,7 @@ impl Renderer {
             let url_start = display_width(prefix);
             let url_end = url_start + display_width(m.as_str());
             if click_col >= url_start && click_col < url_end {
-                return Some(m.as_str());
+                return Some(m.as_str().to_string());
             }
         }
         None
@@ -320,9 +290,10 @@ impl Renderer {
             (Some(s), Some(e)) => (e, s),
             _ => return None,
         };
+        let lines = self.chat_lines(self.max_line_width());
         let mut result = String::new();
         for i in start..=end {
-            if let Some(entry) = self.buffer.get(i) {
+            if let Some(entry) = lines.get(i) {
                 if !result.is_empty() {
                     result.push('\n');
                 }
@@ -336,20 +307,10 @@ impl Renderer {
         }
     }
 
-    fn wrap_line(&self, line: &str, max_width: usize) -> SmallVec<[CompactString; 4]> {
-        word_wrap(line, max_width)
-    }
-
     fn commit_partial(&mut self) {
         if !self.partial.is_empty() {
-            let max_width = self.max_line_width();
-            let c = self.partial_color;
-            for chunk in self.wrap_line(&self.partial, max_width) {
-                self.buffer.push(LineEntry {
-                    text: chunk,
-                    color: c,
-                });
-            }
+            self.feed
+                .push_block(self.partial_style, self.partial.as_str());
             self.partial.clear();
         }
     }
@@ -423,7 +384,7 @@ impl Renderer {
 
     pub fn scroll_line_up(&mut self) {
         let visible = self.visible_lines();
-        let max_offset = self.buffer.len().saturating_sub(visible);
+        let max_offset = self.buffer_len().saturating_sub(visible);
         if self.scroll_offset < max_offset {
             self.scroll_offset += 1;
         }
@@ -438,7 +399,7 @@ impl Renderer {
     pub fn scroll_page_up(&mut self) {
         let visible = self.visible_lines();
         let page = visible.saturating_sub(2).max(1);
-        let max_offset = self.buffer.len().saturating_sub(visible);
+        let max_offset = self.buffer_len().saturating_sub(visible);
         self.scroll_offset = (self.scroll_offset + page).min(max_offset);
     }
 
@@ -454,7 +415,7 @@ impl Renderer {
 
     pub fn scroll_to_top(&mut self) {
         let visible = self.visible_lines();
-        self.scroll_offset = self.buffer.len().saturating_sub(visible);
+        self.scroll_offset = self.buffer_len().saturating_sub(visible);
     }
 
     pub fn scroll_to_bottom(&mut self) -> io::Result<()> {
@@ -464,8 +425,6 @@ impl Renderer {
 
     fn sync_to_buffer(&mut self) -> io::Result<()> {
         self.commit_partial();
-        self.col = 0;
-        self.cursor_row = self.buffer.len() as u16;
         self.render_viewport()
     }
 
@@ -473,7 +432,8 @@ impl Renderer {
         let (cols, _rows) = self.terminal_size();
         let max_width = cols.saturating_sub(1 + self.chat_margin) as usize;
         let visible = self.visible_lines();
-        let total = self.buffer.len();
+        let buffer = self.chat_lines(max_width);
+        let total = buffer.len();
         let mut stdout = io::stdout();
         write!(stdout, "{}", Hide)?;
 
@@ -504,49 +464,40 @@ impl Renderer {
         }
 
         while (visual_row as usize) < visible && buf_idx < total {
-            let entry = &self.buffer[buf_idx];
-            let text = &entry.text;
+            let entry = &buffer[buf_idx];
+            let chunk = &entry.text;
 
-            let wrapped = if display_width(text) > max_width {
-                word_wrap(text, max_width)
-            } else {
-                smallvec![text.clone()]
-            };
-
-            for chunk in &wrapped {
-                if (visual_row as usize) >= visible {
-                    break;
-                }
-
-                stdout.execute(MoveTo(0, visual_row))?;
-
-                let is_selected = self.selection_active
-                    && if let (Some(s), Some(e)) = (self.selection_start, self.selection_end) {
-                        let lo = s.min(e);
-                        let hi = s.max(e);
-                        buf_idx >= lo && buf_idx <= hi
-                    } else {
-                        false
-                    };
-
-                if let Some(bg) = self.chat_bg {
-                    write!(stdout, "{}", SetBackgroundColor(self.color(bg)))?;
-                }
-                self.write_chat_margin(&mut stdout)?;
-                if is_selected {
-                    write!(stdout, "{}", SetAttribute(Attribute::Reverse))?;
-                }
-                write!(stdout, "{}", SetForegroundColor(self.color(entry.color)))?;
-                write!(stdout, "{}", wrap_urls_osc8(chunk))?;
-                if is_selected {
-                    write!(stdout, "{}", SetAttribute(Attribute::NoReverse))?;
-                }
-                write!(stdout, "{}", Clear(ClearType::UntilNewLine))?;
-                write!(stdout, "{}", ResetColor)?;
-
-                visual_row += 1;
+            if (visual_row as usize) >= visible {
+                break;
             }
 
+            stdout.execute(MoveTo(0, visual_row))?;
+
+            let is_selected = self.selection_active
+                && if let (Some(s), Some(e)) = (self.selection_start, self.selection_end) {
+                    let lo = s.min(e);
+                    let hi = s.max(e);
+                    buf_idx >= lo && buf_idx <= hi
+                } else {
+                    false
+                };
+
+            if let Some(bg) = self.chat_bg {
+                write!(stdout, "{}", SetBackgroundColor(self.color(bg)))?;
+            }
+            self.write_chat_margin(&mut stdout)?;
+            if is_selected {
+                write!(stdout, "{}", SetAttribute(Attribute::Reverse))?;
+            }
+            write!(stdout, "{}", SetForegroundColor(self.color(entry.color)))?;
+            write!(stdout, "{}", wrap_urls_osc8(chunk))?;
+            if is_selected {
+                write!(stdout, "{}", SetAttribute(Attribute::NoReverse))?;
+            }
+            write!(stdout, "{}", Clear(ClearType::UntilNewLine))?;
+            write!(stdout, "{}", ResetColor)?;
+
+            visual_row += 1;
             buf_idx += 1;
         }
 
@@ -585,74 +536,12 @@ impl Renderer {
         Ok(())
     }
 
-    fn ensure_room(&mut self) {
-        if self.scroll_offset > 0 {
-            return;
-        }
-        let (cols, _rows) = self.terminal_size();
-        let max_content = self.visible_lines() as u16;
-        if max_content < 2 {
-            return;
-        }
-        if self.cursor_row >= max_content {
-            let mut stdout = io::stdout();
-            let _ = stdout.execute(ScrollUp(1));
-            self.cursor_row = self.cursor_row.saturating_sub(1);
-            for &r in &[max_content.saturating_sub(1), max_content] {
-                let _ = stdout.execute(MoveTo(0, r));
-                if let Some(bg) = self.chat_bg {
-                    let _ = write!(stdout, "{}", SetBackgroundColor(self.color(bg)));
-                }
-                let _ = write!(stdout, "{}", " ".repeat(cols as usize));
-                let _ = write!(stdout, "{}", ResetColor);
-            }
-            let _ = stdout.flush();
-        }
-    }
-
-    fn content_row(&self) -> u16 {
-        let max_row = self.visible_lines().saturating_sub(1) as u16;
-        self.cursor_row.min(max_row)
-    }
-
-    pub fn resize(&mut self) {
-        let visible = self.visible_lines();
-        let max_offset = self.buffer.len().saturating_sub(visible);
-        if self.scroll_offset > max_offset {
-            self.scroll_offset = max_offset;
-        }
-    }
-
     pub fn write_line(&mut self, text: &str, color: Color) -> io::Result<()> {
         self.commit_partial();
-        let max_width = self.max_line_width();
-        for segment in text.split('\n') {
-            let wrapped = self.wrap_line(segment, max_width);
-            for chunk in &wrapped {
-                self.buffer.push(LineEntry {
-                    text: chunk.clone(),
-                    color,
-                });
-                if self.scroll_offset == 0 {
-                    self.ensure_room();
-                    let mut stdout = io::stdout();
-                    let r = self.content_row();
-                    stdout.execute(MoveTo(0, r))?;
-                    if let Some(bg) = self.chat_bg {
-                        write!(stdout, "{}", SetBackgroundColor(self.color(bg)))?;
-                    }
-                    write!(stdout, "{}", Clear(ClearType::CurrentLine))?;
-                    self.write_chat_margin(&mut stdout)?;
-                    write!(stdout, "{}", SetForegroundColor(self.color(color)))?;
-                    writeln!(stdout, "{}", chunk)?;
-                    write!(stdout, "{}", ResetColor)?;
-                    self.cursor_row = self.cursor_row.saturating_add(1);
-                    self.col = 0;
-                }
-            }
-        }
+        let style = style_from_color(color);
+        self.feed.push_block(style, text);
         if self.scroll_offset == 0 {
-            io::stdout().flush()?;
+            self.render_viewport()?;
         }
         Ok(())
     }
@@ -661,119 +550,30 @@ impl Renderer {
         if text.is_empty() {
             return Ok(());
         }
-        let max_width = self.max_line_width();
-        if max_width == 0 {
-            return Ok(());
-        }
+        let style = style_from_color(color);
         let parts: SmallVec<[&str; 4]> = text.split('\n').collect();
         let last = parts.len() - 1;
         for (i, segment) in parts.iter().enumerate() {
             if i < last {
-                let len_before = self.buffer.len();
-                self.commit_partial();
-                let had_content = len_before < self.buffer.len();
-                if !segment.is_empty() {
-                    self.partial_color = color;
-                    self.partial.push_str(segment);
+                // Complete line segment: finalize any partial and push it.
+                if !self.partial.is_empty() {
                     self.commit_partial();
-                } else if !had_content {
-                    self.buffer.push(LineEntry {
-                        text: CompactString::new(""),
-                        color,
-                    });
                 }
-                if self.scroll_offset == 0 {
-                    self.ensure_room();
-                    let mut stdout = io::stdout();
-                    let r = self.content_row();
-                    self.move_to_content(&mut stdout, r)?;
-                    if let Some(bg) = self.chat_bg {
-                        write!(stdout, "{}", SetBackgroundColor(self.color(bg)))?;
-                    }
-                    if !segment.is_empty() {
-                        write!(stdout, "{}", SetForegroundColor(self.color(color)))?;
-                        write!(stdout, "{}", segment)?;
-                        write!(stdout, "{}", ResetColor)?;
-                    }
-                    writeln!(stdout)?;
-                    self.cursor_row = self.cursor_row.saturating_add(1);
-                    self.col = 0;
-                }
-            } else if !segment.is_empty() {
-                let chars: SmallVec<[char; 64]> = segment.chars().collect();
-                let mut idx = 0;
-                while idx < chars.len() {
-                    let avail = max_width.saturating_sub(self.col as usize);
-                    if avail == 0 {
-                        self.commit_partial();
-                        if self.scroll_offset == 0 {
-                            self.cursor_row = self.cursor_row.saturating_add(1);
-                            self.col = 0;
-                        }
-                        continue;
-                    }
-                    // Collect chars that fit within avail display columns
-                    let mut end = idx;
-                    let mut w: usize = 0;
-                    while end < chars.len() {
-                        let cw = char_display_width(chars[end]);
-                        if w + cw > avail {
-                            break;
-                        }
-                        w += cw;
-                        end += 1;
-                    }
-                    // Try to break at a word boundary
-                    if end < chars.len() && end > idx {
-                        let mut break_at = end;
-                        for i in (idx..end).rev() {
-                            if chars[i] == ' ' {
-                                break_at = i + 1;
-                                break;
-                            }
-                        }
-                        if break_at != idx {
-                            end = break_at;
-                            // Recalculate width for the shortened chunk
-                            w = chars[idx..end].iter().map(|&c| char_display_width(c)).sum();
-                        }
-                    }
-                    let chunk: String = chars[idx..end].iter().collect();
-                    self.partial_color = color;
-                    self.partial.push_str(&chunk);
-                    if self.scroll_offset == 0 {
-                        self.ensure_room();
-                        let mut stdout = io::stdout();
-                        let r = self.content_row();
-                        self.move_to_content(&mut stdout, r)?;
-                        if let Some(bg) = self.chat_bg {
-                            write!(stdout, "{}", SetBackgroundColor(self.color(bg)))?;
-                        }
-                        write!(stdout, "{}", SetForegroundColor(self.color(color)))?;
-                        write!(stdout, "{}", wrap_urls_osc8(&chunk))?;
-                        write!(stdout, "{}", ResetColor)?;
-
-                        self.col = self.col.saturating_add(w as u16);
-                    }
-                    idx = end;
-                    if idx < chars.len() {
-                        self.commit_partial();
-                        if self.scroll_offset == 0 {
-                            self.cursor_row = self.cursor_row.saturating_add(1);
-                            self.col = 0;
-                        }
-                    }
-                }
+                self.feed.push_block(style, *segment);
+            } else {
+                // Last segment may still be incomplete; accumulate in partial.
+                self.partial_style = style;
+                self.partial.push_str(segment);
             }
         }
         if self.scroll_offset == 0 {
-            io::stdout().flush()?;
+            self.render_viewport()?;
         }
         Ok(())
     }
 
     pub fn clear_content(&mut self) -> io::Result<()> {
-        self.buffer.clear();
+        self.feed.clear();
         self.partial.clear();
         self.scroll_offset = 0;
         self.clear_selection();
@@ -785,9 +585,15 @@ impl Renderer {
         write!(stdout, "{}", ResetColor)?;
         stdout.execute(MoveTo(0, 0))?;
         stdout.flush()?;
-        self.cursor_row = 0;
-        self.col = 0;
         Ok(())
+    }
+
+    pub fn resize(&mut self) {
+        let visible = self.visible_lines();
+        let max_offset = self.buffer_len().saturating_sub(visible);
+        if self.scroll_offset > max_offset {
+            self.scroll_offset = max_offset;
+        }
     }
 
     fn clear_shrunk_rows(&self, old_height: usize, new_height: usize) -> io::Result<()> {

@@ -91,6 +91,51 @@ pub fn dispatch_command(name: &str, args: &str) -> Option<String> {
     dispatch_with_prompts(name, args).0
 }
 
+/// Get the current session name from the extension manager.
+pub fn get_session_name() -> String {
+    let Some(manager) = EXT_MANAGER.get() else {
+        return String::new();
+    };
+    let mgr = manager.lock().unwrap_or_else(|e| e.into_inner());
+    mgr.get_session_name()
+}
+
+/// Set the session name via the extension manager.
+pub fn set_session_name(name: &str) {
+    let Some(manager) = EXT_MANAGER.get() else {
+        return;
+    };
+    let mgr = manager.lock().unwrap_or_else(|e| e.into_inner());
+    mgr.set_session_name(name);
+}
+
+/// Update context on all loaded extensions.
+pub fn update_context(cwd: &str, session_id: &str, model_name: &str, project_trusted: bool) {
+    let Some(manager) = EXT_MANAGER.get() else {
+        return;
+    };
+    let mut mgr = manager.lock().unwrap_or_else(|e| e.into_inner());
+    mgr.update_context(cwd, session_id, model_name, project_trusted);
+}
+
+/// Call session_start on all loaded extensions.
+pub fn call_session_start() {
+    let Some(manager) = EXT_MANAGER.get() else {
+        return;
+    };
+    let mut mgr = manager.lock().unwrap_or_else(|e| e.into_inner());
+    mgr.call_session_start();
+}
+
+/// Call session_shutdown on all loaded extensions.
+pub fn call_session_shutdown() {
+    let Some(manager) = EXT_MANAGER.get() else {
+        return;
+    };
+    let mut mgr = manager.lock().unwrap_or_else(|e| e.into_inner());
+    mgr.call_session_shutdown();
+}
+
 /// Get slash-command names registered by loaded extensions (without "/" prefix).
 pub fn extension_command_names() -> Vec<String> {
     let Some(manager) = EXT_MANAGER.get() else {
@@ -100,6 +145,6 @@ pub fn extension_command_names() -> Vec<String> {
     mgr.list()
         .iter()
         .flat_map(|meta| meta.command_names.iter().cloned())
-        .map(|name| format!("/{}", name.rsplitn(2, "__").next().unwrap_or(&name)))
+        .map(|name| format!("/{}", name.rsplit("__").next().unwrap_or(&name)))
         .collect()
 }

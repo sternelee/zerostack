@@ -1,4 +1,3 @@
-use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use tokio::time::{Duration, timeout};
 
@@ -109,19 +108,20 @@ impl Tool for BashTool {
     type Args = BashArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "bash".to_string(),
-            description: "Execute a bash command in the current working directory. Returns stdout and stderr.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": { "type": "string", "description": "Bash command to execute" },
-                    "timeout": { "type": "integer", "description": "Timeout in milliseconds (optional)" }
-                },
-                "required": ["command"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Execute a bash command in the current working directory. Returns stdout and stderr."
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": { "type": "string", "description": "Bash command to execute" },
+                "timeout": { "type": "integer", "description": "Timeout in milliseconds (optional)" }
+            },
+            "required": ["command"]
+        })
     }
 
     async fn call(&self, args: BashArgs) -> Result<String, ToolError> {

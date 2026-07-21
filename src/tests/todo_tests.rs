@@ -13,22 +13,20 @@ fn reset_todo_list() {
 #[tokio::test]
 async fn definition_name() {
     let tool = WriteTodoList::new(None, None);
-    let def = tool.definition(String::new()).await;
-    assert_eq!(def.name, "todo_write");
+    assert_eq!(tool.name(), "todo_write");
 }
 
 #[tokio::test]
 async fn definition_description_non_empty() {
     let tool = WriteTodoList::new(None, None);
-    let def = tool.definition(String::new()).await;
-    assert!(!def.description.is_empty());
+    assert!(!tool.description().is_empty());
 }
 
 #[tokio::test]
 async fn definition_parameters_has_required_fields() {
     let tool = WriteTodoList::new(None, None);
-    let def = tool.definition(String::new()).await;
-    let params = def.parameters.as_object().unwrap();
+    let binding = tool.parameters();
+    let params = binding.as_object().unwrap();
     assert!(params.contains_key("properties"));
     let props = params["properties"].as_object().unwrap();
     assert!(props.contains_key("todos"));

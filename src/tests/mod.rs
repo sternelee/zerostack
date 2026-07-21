@@ -25,6 +25,8 @@ mod crc_tests;
 #[cfg(test)]
 mod edit_tests;
 #[cfg(test)]
+mod feed_tests;
+#[cfg(test)]
 mod grep_tests;
 #[cfg(all(test, feature = "hooks"))]
 mod hooks;
@@ -48,6 +50,8 @@ mod models_catalog_tests;
 mod multimodal_tests;
 #[cfg(test)]
 mod normalize_tests;
+#[cfg(test)]
+mod paste_burst_tests;
 #[cfg(test)]
 mod picker_tests;
 #[cfg(test)]

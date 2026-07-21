@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::fmt;
 
 use compact_str::CompactString;
-use rig::completion::ToolDefinition;
 use rig::tool::{ToolDyn, ToolError};
 use rig::wasm_compat::WasmBoxedFuture;
 use rmcp::model::{CallToolRequestParams, ContentBlock, JsonObject};
@@ -36,22 +35,16 @@ impl ToolDyn for McpTool {
         self.definition.name.to_string()
     }
 
-    fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
-        let name = self.definition.name.to_string();
-        let description = self
-            .definition
+    fn description(&self) -> String {
+        self.definition
             .description
             .clone()
             .unwrap_or(Cow::from(""))
-            .to_string();
-        let parameters = serde_json::to_value(&self.definition.input_schema).unwrap_or_default();
-        Box::pin(async move {
-            ToolDefinition {
-                name,
-                description,
-                parameters,
-            }
-        })
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::to_value(&self.definition.input_schema).unwrap_or_default()
     }
 
     fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use rig::completion::ToolDefinition;
 use rig::tool::{ToolDyn, ToolError};
 use rig::wasm_compat::WasmBoxedFuture;
 
@@ -50,11 +49,15 @@ impl ToolDyn for HookedTool {
     }
 
     // `WasmBoxedFuture` is the return type rig's `ToolDyn` trait requires for
-    // `definition`/`call`. On native targets (this crate never builds for
+    // `call`. On native targets (this crate never builds for
     // wasm32) it is a plain `Pin<Box<dyn Future + Send>>`; rig only drops the
     // `Send` bound on wasm32.
-    fn definition<'a>(&'a self, prompt: String) -> WasmBoxedFuture<'a, ToolDefinition> {
-        self.inner.definition(prompt)
+    fn description(&self) -> String {
+        self.inner.description()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        self.inner.parameters()
     }
 
     fn call<'a>(&'a self, args: String) -> WasmBoxedFuture<'a, Result<String, ToolError>> {

@@ -7,6 +7,7 @@ use smallvec::SmallVec;
 use crate::session::storage;
 
 pub mod prompts;
+pub mod skills;
 pub mod themes;
 
 pub(crate) fn load_embedded_files(embedded: &Dir, ext: &str) -> Vec<(String, String)> {
@@ -61,6 +62,7 @@ pub struct ContextFiles {
     pub current_prompt_name: Option<String>,
     pub themes: HashMap<String, String>,
     pub current_theme_name: Option<String>,
+    pub skills: HashMap<String, skills::Skill>,
     pub extra_files: Vec<std::path::PathBuf>,
     pub one_shot_restore: Option<String>,
     pub chain_declined: Vec<String>,
@@ -71,6 +73,7 @@ pub struct ContextFiles {
 }
 
 impl ContextFiles {
+    #[cfg(feature = "git-worktree")]
     pub fn reload(&mut self) {
         self.agents = walk_context_files().0;
         #[cfg(feature = "archmd")]
@@ -83,6 +86,7 @@ impl ContextFiles {
         }
         self.themes = themes::load();
         self.current_theme_name = crate::session::storage::load_theme_name();
+            self.skills = skills::load_all();
         #[cfg(feature = "memory")]
         {
             self.memory = crate::extras::memory::Mem::open().context_block();
@@ -92,6 +96,7 @@ impl ContextFiles {
 
 pub fn load(no_context_files: bool) -> ContextFiles {
     let _ = prompts::ensure_global();
+    let _ = skills::ensure_global();
     let _ = themes::ensure_global();
     let (agents, arch_candidate) = if no_context_files {
         (None, None)
@@ -114,6 +119,7 @@ pub fn load(no_context_files: bool) -> ContextFiles {
         current_prompt_name: None,
         themes: theme_map,
         current_theme_name: theme_name,
+        skills: skills::load_all(),
         extra_files: Vec::new(),
         one_shot_restore: None,
         chain_declined: Vec::new(),
@@ -142,6 +148,7 @@ const MAX_ANCESTOR_CONTEXT_BYTES: usize = 524_288;
 /// older separate load_agents / load_architecture performed.
 fn walk_context_files() -> (Option<String>, Option<String>) {
     let mut agent_parts: SmallVec<[String; 4]> = SmallVec::new();
+    #[cfg_attr(not(feature = "archmd"), allow(unused_mut))]
     let mut arch_parts: SmallVec<[String; 4]> = SmallVec::new();
     let mut total_bytes: usize = 0;
 

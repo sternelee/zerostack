@@ -3,7 +3,6 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use rig::completion::ToolDefinition;
 use rig::tool::{ToolDyn, ToolError};
 use std::sync::Mutex;
 
@@ -31,22 +30,13 @@ impl ToolDyn for ExtensionToolWrapper {
         self.definition.name.clone()
     }
 
-    fn definition<'a>(
-        &'a self,
-        _prompt: String,
-    ) -> Pin<Box<dyn std::future::Future<Output = ToolDefinition> + Send + 'a>> {
-        let name = self.definition.name.clone();
-        let description = self.definition.description.clone();
-        let params = serde_json::from_str(&self.definition.parameters_schema)
-            .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
+    fn description(&self) -> String {
+        self.definition.description.clone()
+    }
 
-        Box::pin(async move {
-            ToolDefinition {
-                name,
-                description,
-                parameters: params,
-            }
-        })
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::from_str(&self.definition.parameters_schema)
+            .unwrap_or(serde_json::json!({"type": "object", "properties": {}}))
     }
 
     fn call<'a>(
