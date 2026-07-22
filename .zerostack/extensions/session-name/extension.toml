@@ -1,0 +1,13 @@
+id = "zerostack/session-name"
+name = "Session Name"
+version = "0.1.0"
+schema_version = 2
+authors = ["zerostack contributors"]
+description = "Auto-generates concise session titles from conversation content. Register a /name command and a set-session-name tool."
+
+[extension]
+entrypoint = "session_name.wasm"
+
+[capabilities]
+tools = true
+commands = true
