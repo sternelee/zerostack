@@ -148,3 +148,26 @@ pub fn call_session_shutdown() {
     let mut mgr = manager.lock().unwrap_or_else(|e| e.into_inner());
     mgr.call_session_shutdown();
 }
+
+/// External context directories contributed by all loaded extensions,
+/// deduplicated. Consumed by the agent builder's preamble walker so each
+/// directory contributes its AGENTS.md / CLAUDE.md / `.agents/skills` to
+/// the system prompt on every turn.
+pub fn external_dirs() -> Vec<String> {
+    let Some(manager) = EXT_MANAGER.get() else {
+        return Vec::new();
+    };
+    let mgr = manager.lock().unwrap_or_else(|e| e.into_inner());
+    mgr.external_dirs()
+}
+
+/// Restore previously-persisted external directories onto a specific
+/// extension (matched by `extension_id`). Used after session rehydration so
+/// `/resume` reinstates the directories added during the prior session.
+pub fn restore_external_dirs(extension_id: &str, dirs: &[String]) -> Result<(), String> {
+    let Some(manager) = EXT_MANAGER.get() else {
+        return Err("extension manager not initialized".into());
+    };
+    let mut mgr = manager.lock().unwrap_or_else(|e| e.into_inner());
+    mgr.restore_external_dirs(extension_id, dirs)
+}

@@ -21,6 +21,14 @@ use crate::sandbox::Sandbox;
 /// `SUFFIX.md`. Extracted from [`build_agent_inner`] so its token cost can be
 /// estimated (see [`estimate_overhead`]) without building an `Agent`.
 pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String {
+    // Pull external dirs from extensions (e.g. `add-dir`) once at preamble
+    // build time. The session persists its own list, but the host is the
+    // canonical owner — extensions register/unregister via the
+    // `external-dirs` WIT interface and the host aggregates.
+    #[cfg(feature = "extensions")]
+    let external_dirs = collect_external_dirs();
+    #[cfg(not(feature = "extensions"))]
+    let external_dirs: Vec<String> = Vec::new();
     let reasoning_prefix = if reasoning_enabled {
         "You reason carefully and think step-by-step.\n\n"
     } else {
@@ -66,6 +74,81 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
         + crate::agent::prompt::MEMORY_TOOLS_PROMPT.len();
 
     let total_len = total_len + suffix.as_ref().map_or(0, |s| s.len() + 6); // "\n\n---\n\n"
+
+    // Cap external-directory context (per-file, mirrors extra-files cap) so a
+    // huge file from an added project can't blow up the system prompt.
+    const MAX_EXTERNAL_DIR_BYTES: usize = 524_288;
+    let external_dirs_content: Vec<String> = external_dirs
+        .iter()
+        .filter_map(|dir_str| {
+            let dir = std::path::Path::new(dir_str);
+            let mut parts: Vec<String> = Vec::new();
+            // Same files as `walk_context_files` scans locally, but only at
+            // the dir itself (we do not walk parents of an external dir).
+            for fname in ["AGENTS.md", "CLAUDE.md"] {
+                let path = dir.join(fname);
+                if let Some(content) = std::fs::read_to_string(&path).ok()
+                    && !content.trim().is_empty()
+                {
+                    let truncated = if content.len() > MAX_EXTERNAL_DIR_BYTES {
+                        let mut end = MAX_EXTERNAL_DIR_BYTES;
+                        while !content.is_char_boundary(end) && end > 0 {
+                            end -= 1;
+                        }
+                        let mut t = content[..end].to_string();
+                        t.push_str("\n\n[truncated — file exceeded preamble size limit]");
+                        t
+                    } else {
+                        content
+                    };
+                    parts.push(format!(
+                        "# {} (from external dir: {})\n{}:\n{}",
+                        fname, dir_str, fname, truncated
+                    ));
+                }
+            }
+            #[cfg(feature = "archmd")]
+            {
+                let path = dir.join("ARCHITECTURE.md");
+                if let Some(content) = std::fs::read_to_string(&path).ok()
+                    && !content.trim().is_empty()
+                {
+                    let truncated = if content.len() > MAX_EXTERNAL_DIR_BYTES {
+                        let mut end = MAX_EXTERNAL_DIR_BYTES;
+                        while !content.is_char_boundary(end) && end > 0 {
+                            end -= 1;
+                        }
+                        let mut t = content[..end].to_string();
+                        t.push_str("\n\n[truncated — file exceeded preamble size limit]");
+                        t
+                    } else {
+                        content
+                    };
+                    parts.push(format!(
+                        "# ARCHITECTURE.md (from external dir: {dir_str})\n{content}",
+                        content = truncated
+                    ));
+                }
+            }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n\n"))
+            }
+        })
+        .collect();
+    let external_dirs_len: usize = external_dirs_content
+        .iter()
+        .map(
+            |s| s.len() + 4 /* "\n\n---\n\n" */ + 4, /* "## External directory context\n" */
+        )
+        .sum::<usize>()
+        + if external_dirs_content.is_empty() {
+            0
+        } else {
+            32 // "\n\n## External directory context\n"
+        };
+    let total_len = total_len + external_dirs_len;
 
     // Add extra files content to preamble budget. Cap each file to prevent a
     // huge file from blowing up the system prompt past the context window.
@@ -129,6 +212,14 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
         preamble.push_str("\n\nCurrent working directory: ");
         preamble.push_str(&cwd);
     }
+    // External directory context (added by extensions such as add-dir).
+    if !external_dirs_content.is_empty() {
+        preamble.push_str("\n\n## External directory context\n");
+        for content in &external_dirs_content {
+            preamble.push_str("\n\n---\n\n");
+            preamble.push_str(content);
+        }
+    }
     for content in &extra_files_content {
         preamble.push_str("\n\n---\n\n");
         preamble.push_str(content);
@@ -151,6 +242,15 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
 /// the provider's first usage report folds those into the calibration anchor.
 pub fn estimate_overhead(context: &ContextFiles, reasoning_enabled: bool) -> u64 {
     crate::session::Session::estimate_tokens(&build_preamble(context, reasoning_enabled))
+}
+
+/// Collect external directories contributed by all loaded extensions,
+/// deduplicated, in insertion order. The `build_preamble` walker reads this
+/// list on every turn to inject AGENTS.md / CLAUDE.md / `.agents/skills`
+/// content from each entry into the system prompt.
+#[cfg(feature = "extensions")]
+fn collect_external_dirs() -> Vec<String> {
+    crate::extension::registry::external_dirs()
 }
 
 /// Retain only the tools whose names appear in `allowlist`. An empty

@@ -1,0 +1,13 @@
+id = "zerostack/add-dir"
+name = "Add Directory"
+version = "0.1.0"
+schema_version = 2
+authors = ["zerostack contributors"]
+description = "Add external directories so their AGENTS.md / CLAUDE.md / skills are loaded into the agent preamble. Ported from pi-add-dir."
+
+[extension]
+entrypoint = "target/wasm32-wasip2/debug/add_dir.wasm"
+
+[capabilities]
+tools = true
+commands = true

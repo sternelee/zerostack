@@ -87,6 +87,13 @@ pub struct Session {
     pub model: CompactString,
     pub provider: CompactString,
     pub working_dir: CompactString,
+    /// External directories contributed by extensions (e.g. `add-dir`).
+    /// Stored canonically so `/resume` rehydrates the same context.
+    /// Currently informational / persistence hook — `extension::registry`
+    /// owns the live state during the session and the preamble walker
+    /// reads from there directly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_dirs: Vec<CompactString>,
     #[serde(default)]
     pub permission_allowlist: Vec<PermissionAllowEntry>,
     #[cfg(feature = "multimodal")]
@@ -192,6 +199,7 @@ impl Session {
             working_dir: std::env::current_dir()
                 .map(|p| CompactString::new(p.to_string_lossy()))
                 .unwrap_or_default(),
+            external_dirs: Vec::new(),
             permission_allowlist: Vec::new(),
             #[cfg(feature = "multimodal")]
             pending_media: Vec::new(),

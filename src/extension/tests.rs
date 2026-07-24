@@ -197,4 +197,222 @@ mod tests {
         assert!(!prompts.is_empty());
         assert!(prompts[0].contains("short, concise session title"));
     }
+
+    static ADD_DIR_ARTIFACT: LazyLock<std::path::PathBuf> = LazyLock::new(|| {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let artifact = manifest_dir
+            .join("target")
+            .join("wasm32-wasip2")
+            .join("debug")
+            .join("add_dir.wasm");
+
+        if !artifact.exists() {
+            let status = std::process::Command::new("cargo")
+                .args(["build", "-p", "add-dir", "--target", "wasm32-wasip2"])
+                .status()
+                .expect("failed to invoke cargo to build add-dir extension");
+            assert!(
+                status.success(),
+                "failed to build add-dir extension for integration tests"
+            );
+        }
+
+        assert!(
+            artifact.exists(),
+            "add-dir artifact not found at {artifact:?}"
+        );
+        artifact
+    });
+
+    /// Use a unique tempdir under target/ so the integration test is hermetic
+    /// and doesn't depend on the host's real cwd.
+    fn fresh_tmpdir(label: &str) -> std::path::PathBuf {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmpdirs");
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = base.join(format!(
+            "{label}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_load_add_dir_extension() {
+        let path = &*ADD_DIR_ARTIFACT;
+        let mut manager = ExtensionManager::new().unwrap();
+        let meta = manager.load_standalone(path).unwrap();
+        assert!(meta.command_names.iter().any(|n| n.contains("add-dir")));
+        assert!(meta.command_names.iter().any(|n| n.contains("remove-dir")));
+        assert!(
+            meta.command_names
+                .iter()
+                .any(|n| n.ends_with("dirs") || n.contains("__dirs"))
+        );
+        assert!(meta.tool_names.iter().any(|n| n.ends_with("add_directory")));
+        assert!(
+            meta.tool_names
+                .iter()
+                .any(|n| n.ends_with("remove_directory"))
+        );
+        assert!(
+            meta.tool_names
+                .iter()
+                .any(|n| n.ends_with("list_directories"))
+        );
+    }
+
+    #[test]
+    fn test_add_dir_tool_round_trip() {
+        let path = &*ADD_DIR_ARTIFACT;
+        let mut manager = ExtensionManager::new().unwrap();
+
+        // Pin the manager's cwd to a hermetic tempdir so the add-dir path
+        // resolution does not depend on the host filesystem.
+        let tmp = fresh_tmpdir("add-dir-roundtrip");
+        manager.update_context(&tmp.to_string_lossy(), "test-session", "test-model", true);
+
+        manager.load_standalone(path).unwrap();
+
+        // Initially no external dirs.
+        assert!(manager.external_dirs().is_empty());
+
+        let (content, _, is_error) = manager
+            .execute_tool(
+                "add_dir__add_directory",
+                &format!(r#"{{"path":"{0}"}}"#, tmp.to_string_lossy()),
+            )
+            .unwrap();
+        assert!(!is_error, "{content}");
+        assert!(content.contains("added"));
+
+        let dirs = manager.external_dirs();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0], tmp.canonicalize().unwrap().to_string_lossy());
+
+        // Listing via the tool returns the same dir.
+        let (list_content, _, is_error) = manager
+            .execute_tool("add_dir__list_directories", "{}")
+            .unwrap();
+        assert!(!is_error, "{list_content}");
+        assert!(list_content.contains("1 external directory"));
+
+        // Removing via the tool removes the entry.
+        let (rm_content, _, is_error) = manager
+            .execute_tool(
+                "add_dir__remove_directory",
+                &format!(r#"{{"path":"{0}"}}"#, tmp.to_string_lossy()),
+            )
+            .unwrap();
+        assert!(!is_error, "{rm_content}");
+        assert!(manager.external_dirs().is_empty());
+    }
+
+    #[test]
+    fn test_add_dir_command_lists_current_dirs() {
+        let path = &*ADD_DIR_ARTIFACT;
+        let mut manager = ExtensionManager::new().unwrap();
+        let tmp = fresh_tmpdir("add-dir-cmd-list");
+        manager.update_context(&tmp.to_string_lossy(), "test-session", "test-model", true);
+        manager.load_standalone(path).unwrap();
+
+        // Pre-add via the tool so we have a known state to render.
+        manager
+            .execute_tool(
+                "add_dir__add_directory",
+                &format!(r#"{{"path":"{0}"}}"#, tmp.to_string_lossy()),
+            )
+            .unwrap();
+
+        let output = manager
+            .dispatch_command("add_dir__dirs", "")
+            .unwrap()
+            .expect("dirs command handled");
+        assert!(output.contains("external directory"));
+        assert!(output.contains(&tmp.canonicalize().unwrap().to_string_lossy().to_string()));
+
+        // /dirs with empty list returns the empty hint.
+        manager
+            .execute_tool(
+                "add_dir__remove_directory",
+                &format!(r#"{{"path":"{0}"}}"#, tmp.to_string_lossy()),
+            )
+            .unwrap();
+        let output = manager
+            .dispatch_command("add_dir__dirs", "")
+            .unwrap()
+            .expect("dirs command handled");
+        assert!(output.contains("no external directories"));
+    }
+
+    #[test]
+    fn test_remove_dir_command_shows_paths() {
+        let path = &*ADD_DIR_ARTIFACT;
+        let mut manager = ExtensionManager::new().unwrap();
+        let tmp = fresh_tmpdir("add-dir-rm-show");
+        manager.update_context(&tmp.to_string_lossy(), "test-session", "test-model", true);
+        manager.load_standalone(path).unwrap();
+
+        // No args + list is empty → "nothing to remove".
+        let output = manager
+            .dispatch_command("add_dir__remove-dir", "")
+            .unwrap()
+            .expect("handled");
+        assert!(output.contains("nothing to remove"));
+
+        // Add one then run /remove-dir with no args → list.
+        manager
+            .execute_tool(
+                "add_dir__add_directory",
+                &format!(r#"{{"path":"{0}"}}"#, tmp.to_string_lossy()),
+            )
+            .unwrap();
+        let output = manager
+            .dispatch_command("add_dir__remove-dir", "")
+            .unwrap()
+            .expect("handled");
+        assert!(output.contains("current directories:"));
+    }
+
+    #[test]
+    fn test_add_dir_command_missing_arg_shows_suggestions() {
+        let path = &*ADD_DIR_ARTIFACT;
+        let mut manager = ExtensionManager::new().unwrap();
+        let tmp = fresh_tmpdir("add-dir-suggest");
+        manager.update_context(&tmp.to_string_lossy(), "test-session", "test-model", true);
+        manager.load_standalone(path).unwrap();
+
+        let output = manager
+            .dispatch_command("add_dir__add-dir", "")
+            .unwrap()
+            .expect("handled");
+        // Either we get a 'usage' line (no suggestions) or a 'suggestions' list.
+        assert!(
+            output.starts_with("usage") || output.contains("suggestions"),
+            "unexpected output: {output}",
+        );
+    }
+
+    #[test]
+    fn test_no_such_directory_is_error() {
+        let path = &*ADD_DIR_ARTIFACT;
+        let mut manager = ExtensionManager::new().unwrap();
+        let tmp = fresh_tmpdir("add-dir-noexist");
+        manager.update_context(&tmp.to_string_lossy(), "test-session", "test-model", true);
+        manager.load_standalone(path).unwrap();
+
+        let bogus = tmp.join("does-not-exist-xyz");
+        let err = manager
+            .execute_tool(
+                "add_dir__add_directory",
+                &format!(r#"{{"path":"{0}"}}"#, bogus.to_string_lossy()),
+            )
+            .unwrap_err();
+        assert!(err.contains("cannot add") || err.contains("does-not-exist"));
+    }
 }

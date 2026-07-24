@@ -211,6 +211,20 @@ impl ExtensionManager {
     pub fn set_session_name(&self, name: &str) {
         self.host.set_session_name(name);
     }
+
+    /// Forward to the host — see `ExtensionHost::external_dirs`.
+    pub fn external_dirs(&self) -> Vec<String> {
+        self.host.external_dirs()
+    }
+
+    /// Forward to the host — see `ExtensionHost::restore_external_dirs`.
+    pub fn restore_external_dirs(
+        &mut self,
+        extension_id: &str,
+        dirs: &[String],
+    ) -> Result<(), String> {
+        self.host.restore_external_dirs(extension_id, dirs)
+    }
 }
 
 /// Look for `extension.toml` adjacent to the .wasm file, or one directory up.

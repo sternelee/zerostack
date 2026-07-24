@@ -2,6 +2,14 @@
 ///
 /// WIT contract between zerostack host and Wasm extensions.
 ///
+/// ## v0.4.0 changes (additive)
+/// - Added `external-dirs` host import: add/remove/list directories whose
+///   AGENTS.md, CLAUDE.md, and skills are loaded into the agent preamble.
+///   The wasm package version is **deliberately unchanged at 0.4.0**: the
+///   new interface is additive, so existing pre-built `.wasm` artifacts
+///   already installed by users continue to link successfully against the
+///   unchanged `tool-registry` / `command-registry` / etc. interfaces.
+///
 /// ## v0.4.0 changes (from v0.3.0)
 /// - Added `session-control` host import: get/set session name, set terminal title
 ///
@@ -96,6 +104,30 @@ interface session-control {
     set-terminal-title: func(title: string);
 }
 
+/// `external-dirs` lets an extension augment the agent's context with
+/// directories outside the current working directory. Each added directory
+/// contributes its `AGENTS.md`, `CLAUDE.md`, and `<dir>/.agents/skills/*/SKILL.md`
+/// (or `SKILLS.md` siblings) into the system prompt on subsequent turns.
+///
+/// Paths may be relative (resolved against `cwd` from extension-context) or
+/// absolute. The host canonicalises, deduplicates, and persists the list to the
+/// session file so `/resume` rehydrates the same context.
+interface external-dirs {
+    /// Add a directory. Returns an error if the path cannot be resolved or is
+    /// not a directory.
+    add-dir: func(path: string) -> result<_, string>;
+
+    /// Remove a previously-added directory. Returns an error if the path
+    /// was not in the list.
+    remove-dir: func(path: string) -> result<_, string>;
+
+    /// List all currently-added directories (canonical absolute paths).
+    list-dirs: func() -> list<string>;
+
+    /// Check whether a directory is already added.
+    has-dir: func(path: string) -> bool;
+}
+
 /// ── world: the complete extension contract ─────────────────────
 
 world extension-world {
@@ -104,6 +136,7 @@ world extension-world {
     import extension-context;
     import trigger-prompt;
     import session-control;
+    import external-dirs;
 
     use types.{tool-output};
 
