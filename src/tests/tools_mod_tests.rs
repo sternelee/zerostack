@@ -1,6 +1,16 @@
 use crate::agent::tools::{
     deny_repeated_reads, is_skip_dir, set_deny_repeated_reads, track_read, untrack_read_path,
 };
+use std::sync::{Mutex, MutexGuard};
+
+/// Serializes the tests that touch the global deny-repeated-reads flag and
+/// read tracker: they share process-wide state and would otherwise race
+/// under parallel test execution.
+static TRACK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn track_test_lock() -> MutexGuard<'static, ()> {
+    TRACK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[test]
 fn skip_node_modules() {
@@ -27,6 +37,7 @@ fn skip_other_dirs() {
 
 #[test]
 fn track_read_returns_none_when_deny_disabled() {
+    let _guard = track_test_lock();
     set_deny_repeated_reads(false);
     // clean up tracker from previous tests
     untrack_read_path("test_path");
@@ -37,6 +48,7 @@ fn track_read_returns_none_when_deny_disabled() {
 
 #[test]
 fn track_read_first_call_returns_none() {
+    let _guard = track_test_lock();
     set_deny_repeated_reads(true);
     untrack_read_path("test_path");
 
@@ -46,6 +58,7 @@ fn track_read_first_call_returns_none() {
 
 #[test]
 fn track_read_duplicate_returns_blocking_message() {
+    let _guard = track_test_lock();
     set_deny_repeated_reads(true);
     untrack_read_path("dup_path");
 
@@ -63,6 +76,7 @@ fn track_read_duplicate_returns_blocking_message() {
 
 #[test]
 fn track_read_different_offset_not_duplicate() {
+    let _guard = track_test_lock();
     set_deny_repeated_reads(true);
     untrack_read_path("diff_path");
 
@@ -75,6 +89,7 @@ fn track_read_different_offset_not_duplicate() {
 
 #[test]
 fn track_read_different_limit_not_duplicate() {
+    let _guard = track_test_lock();
     set_deny_repeated_reads(true);
     untrack_read_path("diff_path2");
 
@@ -87,6 +102,7 @@ fn track_read_different_limit_not_duplicate() {
 
 #[test]
 fn untrack_removes_matching_path() {
+    let _guard = track_test_lock();
     set_deny_repeated_reads(true);
 
     track_read("remove_me", 0, 10);
@@ -99,6 +115,7 @@ fn untrack_removes_matching_path() {
 
 #[test]
 fn untrack_does_not_affect_other_paths() {
+    let _guard = track_test_lock();
     set_deny_repeated_reads(true);
 
     track_read("keep_me", 0, 10);
@@ -113,6 +130,7 @@ fn untrack_does_not_affect_other_paths() {
 
 #[test]
 fn deny_repeated_reads_default() {
+    let _guard = track_test_lock();
     // Default should be true (after test setup)
     // Reset to default
     set_deny_repeated_reads(true);
@@ -121,6 +139,7 @@ fn deny_repeated_reads_default() {
 
 #[test]
 fn set_deny_repeated_reads_toggle() {
+    let _guard = track_test_lock();
     set_deny_repeated_reads(false);
     assert!(!deny_repeated_reads());
 
