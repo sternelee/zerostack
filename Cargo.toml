@@ -10,7 +10,7 @@ default-members = [".", "crates/extension-api"]
 resolver = "3"
 
 [workspace.package]
-version = "1.7.0"
+version = "1.7.1"
 edition = "2024"
 license = "GPL-3.0-only"
 homepage = "https://github.com/gi-dellav/zerostack"

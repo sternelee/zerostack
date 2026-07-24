@@ -55,6 +55,8 @@ mod paste_burst_tests;
 #[cfg(test)]
 mod picker_tests;
 #[cfg(test)]
+mod prompt_mode_tests;
+#[cfg(test)]
 mod provider_tests;
 #[cfg(test)]
 mod renderer_tests;
@@ -70,6 +72,8 @@ mod singleflight_tests;
 mod slash_add_tests;
 #[cfg(test)]
 mod slash_init_tests;
+#[cfg(test)]
+mod startup_prompt_mode_tests;
 #[cfg(all(test, unix))]
 mod status_signals_tests;
 #[cfg(test)]
@@ -78,6 +82,8 @@ mod statusline_tests;
 mod subagents_tests;
 #[cfg(test)]
 mod todo_tests;
+#[cfg(test)]
+mod tools_filter_tests;
 #[cfg(test)]
 mod tools_mod_tests;
 #[cfg(all(test, feature = "git-worktree"))]

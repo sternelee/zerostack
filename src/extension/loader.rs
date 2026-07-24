@@ -51,8 +51,7 @@ fn default_entrypoint() -> String {
     "extension.wasm".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct Capabilities {
     #[serde(default = "Capabilities::tools_default")]
     pub tools: bool,
@@ -71,7 +70,6 @@ pub struct Capabilities {
     #[serde(default)]
     pub session: bool,
 }
-
 
 impl Capabilities {
     fn tools_default() -> bool {

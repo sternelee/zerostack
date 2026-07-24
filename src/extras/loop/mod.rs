@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+pub(crate) mod headless;
 pub mod plan;
 pub mod transcript;
 

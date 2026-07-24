@@ -230,16 +230,17 @@ fn copy_embedded_skills_to(dest: &Path) -> anyhow::Result<()> {
             std::fs::create_dir_all(&dest_dir)?;
             for file in dir.files() {
                 if let Some(fname) = file.path().file_name().and_then(|s| s.to_str())
-                    && let Some(content) = file.contents_utf8() {
-                        let dest_path = dest_dir.join(fname);
-                        let should_write = match std::fs::read_to_string(&dest_path) {
-                            Ok(existing) => existing != content,
-                            Err(_) => true,
-                        };
-                        if should_write {
-                            std::fs::write(&dest_path, content)?;
-                        }
+                    && let Some(content) = file.contents_utf8()
+                {
+                    let dest_path = dest_dir.join(fname);
+                    let should_write = match std::fs::read_to_string(&dest_path) {
+                        Ok(existing) => existing != content,
+                        Err(_) => true,
+                    };
+                    if should_write {
+                        std::fs::write(&dest_path, content)?;
                     }
+                }
             }
         }
     }

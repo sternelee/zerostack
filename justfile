@@ -51,7 +51,7 @@ remove-hook:
 add-tag:
     #!/usr/bin/env bash
     set -euo pipefail
-    git push origin dev
+    git push origin HEAD
     VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
     git tag -a "v${VERSION}" -m "Release v${VERSION}"
     git push origin "v${VERSION}"
@@ -155,6 +155,44 @@ aur-regen-srcinfo:
     echo "Regenerated packaging/aur/.SRCINFO"
 
 # ---- Packaging: release workflow ----
+
+# Full release: bump version, sync, commit, push, tag, and publish to crates.io
+release BUMP:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        echo "Error: working tree is dirty. Commit or stash changes first." >&2
+        exit 1
+    fi
+
+    VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+    IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+
+    case "{{ BUMP }}" in
+        major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+        minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+        patch) PATCH=$((PATCH + 1)) ;;
+        *) echo "Error: BUMP must be one of: major, minor, patch" >&2; exit 1 ;;
+    esac
+
+    NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+    echo "Bumping version: ${VERSION} -> ${NEW_VERSION}"
+    sed -i "s/^version = \"${VERSION}\"/version = \"${NEW_VERSION}\"/" Cargo.toml
+
+    just pre-release
+
+    git commit -am "bump to v${NEW_VERSION}"
+    git push origin HEAD
+
+    git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
+    git push origin "v${NEW_VERSION}"
+    echo "Tag v${NEW_VERSION} pushed — CI release triggered."
+
+    cargo publish
+    echo ""
+    echo "=== release v${NEW_VERSION} done ==="
+    echo "Next: wait for CI, then run: just post-release"
 
 # Run after bumping Cargo.toml version (syncs version strings, no network needed)
 pre-release: sync-version

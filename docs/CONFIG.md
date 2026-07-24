@@ -189,6 +189,33 @@ Accepted top-level keys:
 | `acp_port`                | integer | TCP bind port for ACP server mode (equivalent to `--acp-port`, default: 7243).                                                                                               |
 | `colors`                  | object  | Background color overrides for the TUI. See the colors section below.                                                                                                       |
 
+## System Prompt Suffix (`SUFFIX.md`)
+
+You can append custom text to **every** system prompt by creating a
+`SUFFIX.md` file in the config directory (same location as `config.toml`):
+
+- Linux: `~/.config/zerostack/SUFFIX.md` (or `$ZS_CONFIG_DIR/SUFFIX.md`)
+- macOS: `~/Library/Application Support/zerostack/SUFFIX.md`
+
+If the file exists and contains non-whitespace content, its contents are
+appended at the very end of the system prompt preamble — **after** AGENTS.md,
+ARCHITECTURE.md, the active prompt, working directory, `/add`ed files,
+memory, and everything else. A `---` separator is inserted automatically.
+
+The suffix applies to **all** agent contexts:
+
+- The main interactive agent
+- Subagents (parallel task delegation)
+- The advisor tool (second-model consultation, if the `advisor` feature is enabled)
+- The conversation summarizer (compaction)
+- `/btw` side questions
+
+If the file is missing, empty, or whitespace-only, nothing is appended.
+
+Use cases: inject persistent rules, style preferences, team-wide policies,
+or provider-specific output formatting that should always be present
+regardless of which prompt or mode is active.
+
 ## Hooks
 
 Requires the `hooks` Cargo feature, which is **default-off** — a prebuilt

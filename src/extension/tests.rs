@@ -117,14 +117,16 @@ mod tests {
         let path = &*SESSION_NAME_ARTIFACT;
         let mut manager = ExtensionManager::new().unwrap();
         let meta = manager.load_standalone(path).unwrap();
-        assert!(meta
-            .command_names
-            .iter()
-            .any(|n| n.contains("session_name__name")));
-        assert!(meta
-            .tool_names
-            .iter()
-            .any(|n| n.contains("set_session_name")));
+        assert!(
+            meta.command_names
+                .iter()
+                .any(|n| n.contains("session_name__name"))
+        );
+        assert!(
+            meta.tool_names
+                .iter()
+                .any(|n| n.contains("set_session_name"))
+        );
     }
 
     #[test]
