@@ -310,6 +310,10 @@ impl self::zerostack::extension::host_calls::Host for ExtGuestState {
         } else {
             Some(std::path::PathBuf::from(&self.host_context.cwd))
         };
+        let cwd_for_msg: String = cwd
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
 
         let mut command = std::process::Command::new(&cmd);
         command.args(&arg_refs);
@@ -322,7 +326,25 @@ impl self::zerostack::extension::host_calls::Host for ExtGuestState {
                 stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
                 exit_code: out.status.code().unwrap_or(-1) as i32,
             }),
-            Err(e) => Err(format!("failed to run `{}`: {e}", cmd)),
+            Err(e) => {
+                tracing::error!(
+                    cmd = %cmd,
+                    args = ?arg_refs,
+                    cwd = %cwd_for_msg,
+                    error = %e,
+                    kind = ?e.kind(),
+                    raw_os_error = e.raw_os_error(),
+                    "host_calls::exec spawn failed"
+                );
+                Err(format!(
+                    "failed to run `{}` in `{}`: {} (kind={:?}, raw_os_error={:?})",
+                    cmd,
+                    cwd_for_msg,
+                    e,
+                    e.kind(),
+                    e.raw_os_error()
+                ))
+            }
         }
     }
 }

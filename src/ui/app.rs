@@ -1202,6 +1202,29 @@ impl<'a> App<'a> {
 
         self.handle_slash_result(result).await?;
         self.save_session()?;
+
+        // Slash commands dispatch can queue follow-up prompts via the
+        // `trigger-prompt` WIT interface (e.g. pi-simplify's `/simplify`
+        // queues a review prompt). If the agent is idle, drain the queue
+        // immediately so the follow-up turn starts without requiring the
+        // user to press Enter again — this matches pi's
+        // `pi.sendUserMessage(fullPrompt)` semantics.
+        if !self.run.is_running
+            && let Some(next) = self.run.pending_inputs.pop_front()
+        {
+            self.renderer.chain_prompt = None;
+            self.renderer.chain_but_mode = false;
+            self.chain.pending = None;
+            self.chain.label_msg = None;
+            for line in next.lines() {
+                self.renderer
+                    .write_line(&format!("> {}", sanitize_output(line)), Color::Green)?;
+            }
+            self.renderer.write_line("", Color::White)?;
+            self.start_main_run(&next).await;
+            self.refresh()?;
+        }
+
         Ok(())
     }
 

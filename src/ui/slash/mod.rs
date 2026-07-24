@@ -15,6 +15,7 @@ pub(crate) use providers::warm_model_cache;
 
 use compact_str::CompactString;
 use smallvec::SmallVec;
+use std::collections::VecDeque;
 
 use crate::cli::Cli;
 use crate::config::Config;
@@ -45,6 +46,11 @@ pub struct SlashCtx<'a> {
     pub reasoning_enabled: &'a mut bool,
     pub is_running: &'a mut bool,
     pub input: &'a mut InputEditor,
+    /// Follow-up prompts queued by extension slash commands
+    /// (`trigger-prompt` from the `trigger-prompt` WIT interface).
+    /// Each queued prompt becomes the next main agent run, picked up by the
+    /// event loop when the current run is idle (see [`AgentRunState::pending_inputs`]).
+    pub pending_inputs: &'a mut VecDeque<String>,
     pub permission: &'a Option<PermCheck>,
     pub ask_tx: &'a Option<AskSender>,
     pub todo_tools_enabled: &'a mut bool,
@@ -419,6 +425,7 @@ pub async fn handle_slash(
         reasoning_enabled: &mut slash.reasoning_enabled,
         is_running: &mut run.is_running,
         input,
+        pending_inputs: &mut run.pending_inputs,
         permission: &ui.permission,
         ask_tx: &ui.ask_tx,
         todo_tools_enabled: &mut slash.todo_tools_enabled,
@@ -542,12 +549,22 @@ pub async fn handle_slash(
                 } else {
                     String::new()
                 };
-                if let Some(output) =
-                    crate::extension::registry::dispatch_command(cmd_name, &full_args)
-                {
-                    let mut out = output;
-                    out.push('\n');
-                    ctx.renderer.write(&out, crate::ui::C_TOOL)?;
+                // Use the dual-return-value path so we can also drain any
+                // prompts the extension queued via `trigger-prompt`. Without
+                // this, an extension like `pi-simplify` would print the file
+                // list but never actually kick off the agent to review the
+                // code. See `AgentRunState::pending_inputs` for the drain.
+                let (output, queued_prompts) =
+                    crate::extension::registry::dispatch_with_prompts(cmd_name, &full_args);
+                if output.is_some() || !queued_prompts.is_empty() {
+                    if let Some(output) = output {
+                        let mut out = output;
+                        out.push('\n');
+                        ctx.renderer.write(&out, crate::ui::C_TOOL)?;
+                    }
+                    for prompt in queued_prompts {
+                        ctx.pending_inputs.push_back(prompt);
+                    }
                     // Sync session name from extension to session object.
                     let ext_name = crate::extension::registry::get_session_name();
                     if !ext_name.is_empty() && ext_name != ctx.session.name.as_str() {

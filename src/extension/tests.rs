@@ -198,6 +198,32 @@ mod tests {
         assert!(prompts[0].contains("short, concise session title"));
     }
 
+    /// Regression test for the `trigger-prompt` plumbing: a slash command
+    /// that calls `trigger_prompt::trigger_prompt(...)` during
+    /// `on_command` MUST surface its queued prompts alongside its user
+    /// facing output, so the TUI can drain them into
+    /// `AgentRunState::pending_inputs`. Previously the TUI used the
+    /// single-return-value `dispatch_command` API which silently dropped
+    /// these prompts (bug visible as `/simplify` printing the file list
+    /// but never actually kicking off the agent).
+    #[test]
+    fn test_dispatch_surfaces_queued_prompts() {
+        let path = &*SESSION_NAME_ARTIFACT;
+        let mut manager = ExtensionManager::new().unwrap();
+        manager.load_standalone(path).unwrap();
+
+        // Manually mirror `registry::dispatch_with_prompts` (the test
+        // would otherwise need a global EXT_MANAGER which other tests
+        // also touch).
+        let output = manager.dispatch_command("session_name__name", "").unwrap();
+        let prompts = manager.take_queued_prompts();
+
+        assert!(output.is_some(), "expected user-facing output");
+        assert!(output.unwrap().contains("generate a session name"));
+        assert!(!prompts.is_empty(), "expected trigger-prompt prompt queued");
+        assert!(prompts[0].contains("short, concise session title"));
+    }
+
     static ADD_DIR_ARTIFACT: LazyLock<std::path::PathBuf> = LazyLock::new(|| {
         let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let artifact = manifest_dir
