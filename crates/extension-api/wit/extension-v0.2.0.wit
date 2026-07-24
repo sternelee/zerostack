@@ -5,10 +5,14 @@
 /// ## v0.4.0 changes (additive)
 /// - Added `external-dirs` host import: add/remove/list directories whose
 ///   AGENTS.md, CLAUDE.md, and skills are loaded into the agent preamble.
-///   The wasm package version is **deliberately unchanged at 0.4.0**: the
-///   new interface is additive, so existing pre-built `.wasm` artifacts
-///   already installed by users continue to link successfully against the
-///   unchanged `tool-registry` / `command-registry` / etc. interfaces.
+/// - Added `host-calls` host import: lets extensions ask the host to run a
+///   command (`exec`) instead of trying to spawn through WASI's
+///   `wasi:cli/process` (which the host does not implement).
+///
+/// The wasm package version is **deliberately unchanged at 0.4.0**: both
+/// new interfaces are additive, so existing pre-built `.wasm` artifacts
+/// already installed by users continue to link successfully against the
+/// unchanged `tool-registry` / `command-registry` / etc. interfaces.
 ///
 /// ## v0.4.0 changes (from v0.3.0)
 /// - Added `session-control` host import: get/set session name, set terminal title
@@ -128,6 +132,32 @@ interface external-dirs {
     has-dir: func(path: string) -> bool;
 }
 
+/// `host-calls` lets an extension ask the host to perform a privileged
+/// operation that the WASI guest sandbox cannot do directly (process
+/// spawning, network I/O, etc.). The host implements these by routing to
+/// the same Rust stdlib facilities used by built-in tools, so permissions
+/// and sandboxing remain consistent.
+interface host-calls {
+    /// Captured stdout/stderr/exit-code of a host-spawned command.
+    record exec-output {
+        stdout: string,
+        stderr: string,
+        /// Exit status of the child. `-1` if the process could not be
+        /// spawned (in which case `stderr` contains the spawn error).
+        exit-code: s32,
+    }
+
+    /// Run a command via the host's stdlib `std::process::Command`. The
+    /// child inherits the host's `cwd`, `PATH`, and environment. Arguments
+    /// are passed positionally (no shell interpolation by the guest); use
+    /// `cmd = "sh"` and `args = ["-c", "..."]` if shell parsing is needed.
+    ///
+    /// Returns an error only if the host itself fails to build the
+    /// `Command`; a non-zero exit code is reported via `exec-output` and
+    /// is not an error.
+    exec: func(cmd: string, args: list<string>) -> result<exec-output, string>;
+}
+
 /// ── world: the complete extension contract ─────────────────────
 
 world extension-world {
@@ -137,6 +167,7 @@ world extension-world {
     import trigger-prompt;
     import session-control;
     import external-dirs;
+    import host-calls;
 
     use types.{tool-output};
 

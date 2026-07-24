@@ -415,4 +415,113 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("cannot add") || err.contains("does-not-exist"));
     }
+
+    // ── host-calls / pi-simplify ──────────────────────────────
+
+    static PI_SIMPLIFY_ARTIFACT: LazyLock<std::path::PathBuf> = LazyLock::new(|| {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let artifact = manifest_dir
+            .join("target")
+            .join("wasm32-wasip2")
+            .join("debug")
+            .join("pi_simplify.wasm");
+
+        if !artifact.exists() {
+            let status = std::process::Command::new("cargo")
+                .args(["build", "-p", "pi-simplify", "--target", "wasm32-wasip2"])
+                .status()
+                .expect("failed to invoke cargo to build pi-simplify extension");
+            assert!(
+                status.success(),
+                "failed to build pi-simplify extension for integration tests"
+            );
+        }
+
+        assert!(
+            artifact.exists(),
+            "pi-simplify artifact not found at {artifact:?}"
+        );
+        artifact
+    });
+
+    #[test]
+    fn test_load_pi_simplify_extension() {
+        let path = &*PI_SIMPLIFY_ARTIFACT;
+        let mut manager = ExtensionManager::new().unwrap();
+        let meta = manager.load_standalone(path).unwrap();
+        assert!(
+            meta.command_names.iter().any(|n| n.ends_with("__simplify")),
+            "pi-simplify did not register /simplify command: {:?}",
+            meta.command_names
+        );
+    }
+
+    /// `/simplify` runs `git diff --name-status` via `host-calls::exec`.
+    /// This was a runtime regression: `std::process::Command` on the
+    /// wasm32-wasip2 guest previously returned ENOSYS for `sh -c`,
+    /// because `wasi:cli/process` was never installed in the linker.
+    /// The fix routes through the host's stdlib via the new
+    /// `host-calls` interface. This test verifies the end-to-end path
+    /// against a hermetic temp git repo.
+    #[test]
+    fn test_pi_simplify_runs_git_via_host_calls() {
+        // Skip if git is not available on the host — the integration is
+        // about pi-simplify *invoking* git, not about git itself.
+        let git_ok = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !git_ok {
+            eprintln!("skipping: git not available on host");
+            return;
+        }
+
+        // Build the wasm artifact in case it's not already there.
+        let _ = &*PI_SIMPLIFY_ARTIFACT;
+
+        // Hermetic git repo with a single committed file and one
+        // unstaged change, so `git diff` returns a known entry.
+        let dir = fresh_tmpdir("pi-simplify-git");
+        let run_git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+        };
+        run_git(&["init", "-q"]);
+        run_git(&["config", "user.email", "test@example.com"]);
+        run_git(&["config", "user.name", "test"]);
+        std::fs::write(dir.join("stale.txt"), "old contents\n").unwrap();
+        run_git(&["add", "stale.txt"]);
+        run_git(&["commit", "-q", "-m", "init"]);
+        std::fs::write(dir.join("stale.txt"), "new contents\n").unwrap();
+
+        let path = &*PI_SIMPLIFY_ARTIFACT;
+        let mut manager = ExtensionManager::new().unwrap();
+        manager.update_context(&dir.to_string_lossy(), "test-session", "test-model", true);
+        manager.load_standalone(path).unwrap();
+
+        // The /simplify command should now succeed (it used to fail
+        // with "operation not supported on this platform") and report
+        // exactly the unstaged changed file.
+        let output = manager
+            .dispatch_command("pi_simplify__simplify", "")
+            .unwrap()
+            .expect("simplify command handled");
+
+        assert!(
+            !output.contains("operation not supported"),
+            "/simplify fell back to WASI subprocess: {output}"
+        );
+        assert!(
+            !output.contains("failed to run command"),
+            "/simplify failed: {output}"
+        );
+        assert!(
+            output.contains("stale.txt"),
+            "/simplify output missing changed file: {output}"
+        );
+    }
 }

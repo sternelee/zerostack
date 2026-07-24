@@ -6,7 +6,7 @@ authors = ["zerostack contributors"]
 description = "Add external directories so their AGENTS.md / CLAUDE.md / skills are loaded into the agent preamble. Ported from pi-add-dir."
 
 [extension]
-entrypoint = "target/wasm32-wasip2/debug/add_dir.wasm"
+entrypoint = "add_dir.wasm"
 
 [capabilities]
 tools = true

@@ -154,20 +154,27 @@ Do NOT add new features, change public APIs, or refactor code outside the listed
     )
 }
 
-/// Run a shell command and return stdout as String.
+/// Run a shell command via the host and return stdout as a String.
+///
+/// Routes through the `host-calls::exec` host import rather than
+/// `std::process::Command` because the WASI sandbox does not implement
+/// `wasi:cli/process` — calling `std::process::Command::new("sh")` from a
+/// wasm32-wasip2 guest yields "operation not supported on this platform".
 fn run_shell(cmd: &str) -> Result<String, String> {
-    std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .output()
-        .map(|output| {
-            if output.status.success() {
-                String::from_utf8_lossy(&output.stdout).into_owned()
-            } else {
-                String::new()
-            }
-        })
-        .map_err(|e| format!("failed to run command: {e}"))
+    let result = crate::zerostack::extension::host_calls::exec(
+        "sh",
+        &[String::from("-c"), String::from(cmd)],
+    )
+    .map_err(|e| format!("failed to run command: {e}"))?;
+
+    if result.exit_code == 0 {
+        Ok(result.stdout)
+    } else {
+        Err(format!(
+            "command exited with code {}: {}",
+            result.exit_code, result.stderr
+        ))
+    }
 }
 
 /// Handle the /simplify slash command.

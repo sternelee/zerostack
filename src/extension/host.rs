@@ -289,6 +289,44 @@ fn resolve_external_dir(cwd: &str, path: &str) -> Result<String, String> {
     Ok(canonical.to_string_lossy().into_owned())
 }
 
+// ── Host impl: host_calls ────────────────────────────────────
+
+impl self::zerostack::extension::host_calls::Host for ExtGuestState {
+    fn exec(
+        &mut self,
+        cmd: wasmtime::component::__internal::String,
+        args: wasmtime::component::__internal::Vec<wasmtime::component::__internal::String>,
+    ) -> Result<
+        self::zerostack::extension::host_calls::ExecOutput,
+        wasmtime::component::__internal::String,
+    > {
+        let cmd: String = cmd;
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+        // Run from the extension's cwd so commands like `git diff` resolve
+        // the user's project, not the host's working directory.
+        let cwd = if self.host_context.cwd.is_empty() {
+            std::env::current_dir().ok()
+        } else {
+            Some(std::path::PathBuf::from(&self.host_context.cwd))
+        };
+
+        let mut command = std::process::Command::new(&cmd);
+        command.args(&arg_refs);
+        if let Some(dir) = cwd {
+            command.current_dir(dir);
+        }
+        match command.output() {
+            Ok(out) => Ok(self::zerostack::extension::host_calls::ExecOutput {
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                exit_code: out.status.code().unwrap_or(-1) as i32,
+            }),
+            Err(e) => Err(format!("failed to run `{}`: {e}", cmd)),
+        }
+    }
+}
+
 // ── ExtensionHost ──────────────────────────────────────────────
 
 impl ExtensionHost {
