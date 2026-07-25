@@ -10,7 +10,7 @@ default-members = [".", "crates/extension-api"]
 resolver = "3"
 
 [workspace.package]
-version = "1.7.1"
+version = "1.7.2"
 edition = "2024"
 license = "GPL-3.0-only"
 homepage = "https://github.com/gi-dellav/zerostack"
@@ -36,11 +36,12 @@ default = [
   'subagents',
   'archmd',
   'status-signals',
-  'multithread',
+  'multithread', 'export',
   'extensions',
 ]
 status-signals = []
 loop = []
+export = []
 git-worktree = []
 mcp = [
   "dep:rmcp",
@@ -110,6 +111,18 @@ wasmtime-wasi = { version = "46", optional = true, default-features = false, fea
   "p2",
 ] }
 zerostack-extension-api = { path = "crates/extension-api", optional = true }
+
+[dev-dependencies]
+# Adds rig-core's `test_utils` module (scripted `CompletionModel` test
+# doubles) for the fake-model carrier under `src/tests/fake_model.rs`. The
+# edition-2024 resolver keeps dev-dependency features out of non-test builds,
+# so the release binary never compiles `test-utils`. Tradeoff: the normal dep
+# above requests `rmcp` and this one adds `test-utils`, so `cargo build`
+# (rig[rmcp]) and a following `cargo test` (rig[rmcp+test-utils]) ask for
+# different feature sets and rig is recompiled between them. That is the
+# accepted cost of a test-only feature; folding `test-utils` into the release
+# dep to skip the rebuild would instead ship dead test code in the binary.
+rig = { version = "0.40", features = ["test-utils"] }
 
 [profile.dev]
 opt-level = 1

@@ -9587,7 +9587,7 @@ checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[package]]
 name = "zerostack"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -9625,7 +9625,7 @@ dependencies = [
 
 [[package]]
 name = "zerostack-extension-api"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "serde",
  "serde_json",
