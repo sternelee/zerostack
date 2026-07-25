@@ -1544,9 +1544,69 @@ impl ShellState {
                             self.cursor_visible,
                         )
                     })
-                    .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+                    .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                         let key = ev.keystroke.key.as_str();
                         let mods = &ev.keystroke.modifiers;
+
+                        // Global modifier-combo shortcuts fire regardless of
+                        // what's in the buffer. We only intercept when the
+                        // platform modifier (Cmd on macOS, Ctrl elsewhere) is
+                        // held, so plain text typing still works as before.
+                        if (mods.platform || mods.control) && !mods.alt {
+                            match key.to_ascii_lowercase().as_str() {
+                                "l" => {
+                                    // Ctrl/Cmd+L — start a fresh session
+                                    // (mirrors the TUI's `/clear`). Send
+                                    // through the bridge so the engine owns
+                                    // the lifecycle.
+                                    let _ = this.bridge.send(UserAction::ClearSession);
+                                    this.input_text = SharedString::new("");
+                                    this.input_cursor = 0;
+                                    this.refresh_slash_popup();
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                                "r" => {
+                                    // Ctrl/Cmd+R — focus the sidebar search
+                                    // box so the user can immediately start
+                                    // filtering by name or path.
+                                    this.sidebar_search_focus.focus(window, cx);
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                                "j" => {
+                                    // Ctrl/Cmd+J — toggle focus between the
+                                    // chat input and the sidebar search so
+                                    // the user can jump between the two
+                                    // without taking their hand off the
+                                    // keyboard.
+                                    if this.sidebar_search_focus.is_focused(window) {
+                                        this.input_focus.focus(window, cx);
+                                    } else {
+                                        this.sidebar_search_focus.focus(window, cx);
+                                    }
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                                "k" => {
+                                    // Ctrl/Cmd+K — focus the input and
+                                    // prefill "/" so the slash picker pops
+                                    // up without an extra keystroke. Same
+                                    // idea as the TUI's command palette.
+                                    this.input_text = SharedString::new("/");
+                                    this.input_cursor = 1;
+                                    this.refresh_slash_popup();
+                                    this.input_focus.focus(window, cx);
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
 
                         // While the IME is composing preedit text (e.g. mid-pinyin),
                         // macOS routes printable keystrokes through the IME's
