@@ -175,6 +175,7 @@ impl CoreEngine {
                 provider: s.provider.clone(),
                 message_count: s.messages.len(),
                 created_at: s.created_at.clone(),
+                working_dir: s.working_dir.clone(),
             })
             .collect();
 
@@ -924,6 +925,7 @@ impl CoreEngine {
                 provider: s.provider.clone(),
                 message_count: s.messages.len(),
                 created_at: s.created_at.clone(),
+                working_dir: s.working_dir.clone(),
             })
             .collect();
         vec![CoreEvent::SessionListUpdated { sessions }]

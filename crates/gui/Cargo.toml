@@ -1,0 +1,33 @@
+[package]
+name = "zerostack-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "GPUI desktop frontend for zerostack"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "zerostack-gui"
+path = "src/main.rs"
+
+[dependencies]
+zerostack-core = { path = "../core", default-features = false }
+gpui = { path = "../../../../../Downloads/zed-main/crates/gpui" }
+gpui_platform = { path = "../../../../../Downloads/zed-main/crates/gpui_platform" }
+gpui_macros = { path = "../../../../../Downloads/zed-main/crates/gpui_macros" }
+tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
+compact_str = { version = "0.9", features = ["serde"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui_macos = { path = "../../../../../Downloads/zed-main/crates/gpui_macos", features = ["font-kit"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui_windows = { path = "../../../../../Downloads/zed-main/crates/gpui_windows" }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+gpui_linux = { path = "../../../../../Downloads/zed-main/crates/gpui_linux" }

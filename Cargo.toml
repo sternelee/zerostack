@@ -1,7 +1,9 @@
 [workspace]
 members = [
   ".",
+  "crates/core",
   "crates/extension-api",
+  "crates/gui",
   "tests/extensions/test-echo",
   "tests/extensions/pi-simplify",
   "tests/extensions/session-name",

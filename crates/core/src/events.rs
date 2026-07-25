@@ -172,6 +172,12 @@ pub struct SessionInfo {
     pub provider: CompactString,
     pub message_count: usize,
     pub created_at: CompactString,
+    /// Project directory the session was started in. Used by the GUI sidebar
+    /// to group sessions into a project → sessions tree. Empty means "no
+    /// project" (sessions that predated the field, or were created from a
+    /// process with no current working directory).
+    #[serde(default)]
+    pub working_dir: CompactString,
 }
 
 /// Token usage summary.

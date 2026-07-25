@@ -1,0 +1,9 @@
+#![deny(unsafe_code)]
+#![allow(clippy::type_complexity)]
+
+pub mod bridge;
+pub mod theme;
+pub mod view;
+
+pub use bridge::GuiBridge;
+pub use view::{ChatMessage, Role, ShellState};
