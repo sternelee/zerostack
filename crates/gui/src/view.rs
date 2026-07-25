@@ -15,9 +15,9 @@ use std::time::Duration;
 use compact_str::CompactString;
 use gpui::{
     App, Bounds, Context, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    GlobalElementId, KeyDownEvent, LayoutId, Pixels, Render, ScrollStrategy, SharedString, Style,
-    TitlebarOptions, UTF16Selection, UniformListScrollHandle, Window, WindowBounds, WindowOptions,
-    div, prelude::*, px, relative, rgb, rgba, size, uniform_list,
+    GlobalElementId, KeyDownEvent, LayoutId, Pixels, Render, ScrollHandle, ScrollStrategy,
+    SharedString, Style, TitlebarOptions, UTF16Selection, UniformListScrollHandle, Window,
+    WindowBounds, WindowOptions, div, prelude::*, px, relative, rgb, rgba, size, uniform_list,
 };
 use gpui_platform::application;
 use zerostack_core::events::CoreEvent;
@@ -260,7 +260,7 @@ pub struct ShellState {
     slash_popup_scroll: UniformListScrollHandle,
     /// Scroll handle for the chat message list. Long chats stay inside the column
     /// instead of pushing the input box off-screen.
-    chat_scroll: UniformListScrollHandle,
+    chat_scroll: ScrollHandle,
 
     /// Last `current_session_id` we already scrolled the sidebar to. We
     /// compare against it on every paint to decide whether a fresh scroll
@@ -359,7 +359,7 @@ impl ShellState {
             sidebar_search_focus: cx.focus_handle(),
             sidebar_scroll: UniformListScrollHandle::new(),
             slash_popup_scroll: UniformListScrollHandle::new(),
-            chat_scroll: UniformListScrollHandle::new(),
+            chat_scroll: ScrollHandle::new(),
             last_scrolled_session_id: SharedString::new(""),
             cursor_visible: true,
             slash_popup_visible: false,
@@ -614,13 +614,12 @@ impl ShellState {
                 self.is_thinking = false;
             }
         }
-        // Follow-tail: when new chat content arrives, jump to the last row so the
-        // user sees the new message. If the user scrolled up to read history, this
-        // only fires on a fresh message — between renders at the same length we
-        // don't disturb their scroll position.
+        // Follow-tail: when new chat content arrives, jump to the last message so
+        // the user sees the new message. The scrollable chat container now has the
+        // status bar as child 0 and the messages as children 1..=N, so the last
+        // message index is `self.chat.len()`.
         if self.chat.len() > prev_len {
-            self.chat_scroll
-                .scroll_to_item(self.chat.len() - 1, ScrollStrategy::Bottom);
+            self.chat_scroll.scroll_to_item(self.chat.len());
         }
     }
 
@@ -1164,7 +1163,7 @@ impl ShellState {
         div()
             .flex()
             .flex_col()
-            .w(px(280.0))
+            .w(px(320.0))
             .h_full()
             .bg(rgb(dark::SIDEBAR_BG))
             .border_r_1()
@@ -1275,99 +1274,88 @@ impl ShellState {
     }
 
     fn render_chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut col = div().flex_1().min_h_0().bg(rgb(dark::CHAT_BG));
+        let chat_scroll = self.chat_scroll.clone();
+        let messages = self.chat.clone();
+        let view_entity = cx.entity().clone();
 
-        // Lightweight status row at the top of the chat column: provider /
+        // Lightweight status row inside the chat scrollable area: provider /
         // model · mode · token total · live "thinking" / "idle" pill on the
-        // right. Kept intentionally minimal — it's a glanceable context line
-        // rather than a debug dump.
-        col = col.child(
+        // right. Putting it inside the same scrollable region as the messages
+        // means it scrolls together with the conversation rather than sitting
+        // as a fixed strip above the history.
+        let status_bar = div()
+            .flex()
+            .items_center()
+            .gap_4()
+            .px_5()
+            .py_3()
+            .border_b_1()
+            .border_color(rgb(dark::BORDER))
+            .text_xs()
+            .child(
+                div()
+                    .text_color(rgb(dark::TEXT_SECONDARY))
+                    .child(format!("{} / {}", self.status_provider, self.status_model)),
+            )
+            .child(
+                div()
+                    .text_color(rgb(dark::TEXT_MUTED))
+                    .child(format!("mode: {}", self.status_mode)),
+            )
+            .child(
+                div()
+                    .text_color(rgb(dark::TEXT_MUTED))
+                    .child(format!("tokens: {}", self.status_tokens)),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_color(if self.is_thinking {
+                        rgb(dark::ACCENT)
+                    } else {
+                        rgb(dark::TEXT_MUTED)
+                    })
+                    .child(if self.is_thinking {
+                        "thinking…"
+                    } else {
+                        "idle"
+                    }),
+            )
+            .into_any_element();
+
+        let message_children: Vec<gpui::AnyElement> = messages
+            .iter()
+            .map(|msg| render_message(msg, view_entity.clone()))
+            .collect();
+
+        div().flex_1().min_h_0().bg(rgb(dark::CHAT_BG)).child(
             div()
-                .flex()
-                .items_center()
-                .gap_4()
-                .px_5()
-                .py_3()
-                .border_b_1()
-                .border_color(rgb(dark::BORDER))
-                .text_xs()
+                .id("chat-scroll-area")
+                .flex_1()
+                .overflow_y_scroll()
+                .track_scroll(&chat_scroll)
                 .child(
                     div()
-                        .text_color(rgb(dark::TEXT_SECONDARY))
-                        .child(format!("{} / {}", self.status_provider, self.status_model)),
-                )
-                .child(
-                    div()
-                        .text_color(rgb(dark::TEXT_MUTED))
-                        .child(format!("mode: {}", self.status_mode)),
-                )
-                .child(
-                    div()
-                        .text_color(rgb(dark::TEXT_MUTED))
-                        .child(format!("tokens: {}", self.status_tokens)),
-                )
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .text_color(if self.is_thinking {
-                            rgb(dark::ACCENT)
-                        } else {
-                            rgb(dark::TEXT_MUTED)
-                        })
-                        .child(if self.is_thinking {
-                            "thinking…"
-                        } else {
-                            "idle"
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .px_6()
+                        .py_5()
+                        .child(status_bar)
+                        .children(message_children)
+                        .when(messages.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .py_20()
+                                    .text_color(rgb(dark::TEXT_MUTED))
+                                    .child("Ask anything to start."),
+                            )
                         }),
                 ),
-        );
-
-        // Chat list — render as a scrollable uniform_list so long histories stay
-        // inside the column instead of pushing the input box off-screen. The scroll
-        // handle follows the tail: every time `apply_event` adds new chat content
-        // it scrolls to the last row.
-        let chat_count = self.chat.len();
-        let chat_scroll = self.chat_scroll.clone();
-        let view_entity = cx.entity().clone();
-        if chat_count == 0 {
-            col = col.child(
-                div()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .text_color(rgb(dark::TEXT_MUTED))
-                    .child("Ask anything to start."),
-            );
-        } else {
-            let messages = self.chat.clone();
-            let view_entity_for_processor = view_entity.clone();
-            col = col.child(
-                div().flex_1().px_6().py_5().child(
-                    uniform_list(
-                        "chat-history",
-                        chat_count,
-                        cx.processor(
-                            move |_this,
-                                  range: std::ops::Range<usize>,
-                                  _window,
-                                  _cx|
-                                  -> Vec<gpui::AnyElement> {
-                                range
-                                    .map(|ix| {
-                                        let msg = &messages[ix];
-                                        render_message(msg, view_entity_for_processor.clone())
-                                    })
-                                    .collect()
-                            },
-                        ),
-                    )
-                    .gap_3()
-                    .size_full()
-                    .track_scroll(&chat_scroll),
-                ),
-            );
-        }
-        col
+        )
     }
 
     fn render_input(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2382,7 +2370,7 @@ fn render_project_row(
         .gap_2()
         .px_3()
         .py_2()
-        .mx_2()
+        .mx_1()
         .cursor_pointer()
         .bg(if active {
             rgb(dark::BUTTON_HOVER)
@@ -2424,6 +2412,7 @@ fn render_project_row(
                 .flex()
                 .flex_col()
                 .flex_1()
+                .min_w_0()
                 .gap_0()
                 .overflow_x_hidden()
                 .child(
@@ -2526,9 +2515,9 @@ fn render_session_row(
         .flex_col()
         .gap_0()
         .px_3()
-        .pl_6()
+        .pl_5()
         .py_1p5()
-        .mx_2()
+        .mx_1()
         .rounded_sm()
         .cursor_pointer()
         .bg(if is_active {
@@ -2552,6 +2541,8 @@ fn render_session_row(
                 .overflow_x_hidden()
                 .child(
                     div()
+                        .flex_1()
+                        .min_w_0()
                         .text_sm()
                         .overflow_x_hidden()
                         .text_color(primary_color)
