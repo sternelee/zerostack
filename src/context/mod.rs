@@ -102,7 +102,6 @@ pub fn load(no_context_files: bool) -> ContextFiles {
     if let Err(e) = themes::ensure_global() {
         tracing::warn!("failed to install default themes: {e}");
     }
-    let _ = skills::ensure_global();
     let (agents, arch_candidate) = if no_context_files {
         (None, None)
     } else {

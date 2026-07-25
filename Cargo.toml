@@ -40,8 +40,8 @@ default = [
   'archmd',
   'status-signals',
   'multithread',
-  'extensions',
   'export',
+  'extensions',
 ]
 status-signals = []
 loop = []
