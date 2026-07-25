@@ -167,6 +167,20 @@ pub fn find_session_by_name(name: &str) -> anyhow::Result<Option<Session>> {
     Ok(None)
 }
 
+/// Load a single session from disk by its id. This is used by the GUI when
+/// the user clicks a session that was discovered via a disk scan but is not
+/// currently resident in the engine's in-memory session list.
+pub fn load_session_by_id(id: &str) -> anyhow::Result<Option<Session>> {
+    let dir = session_dir();
+    let path = dir.join(format!("{id}.json"));
+    if !path.exists() {
+        return Ok(None);
+    }
+    let json = std::fs::read_to_string(&path)?;
+    let session = serde_json::from_str::<Session>(&json)?;
+    Ok(Some(session))
+}
+
 pub fn find_recent_sessions(limit: usize) -> anyhow::Result<Vec<Session>> {
     let dir = session_dir();
     if !dir.exists() {

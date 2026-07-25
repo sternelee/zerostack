@@ -15,6 +15,7 @@ use crate::permission::checker::{PermCheck, PermissionChecker};
 use crate::provider::{self, AnyAgent, AnyClient};
 use crate::retry::RetryConfig;
 use crate::sandbox::Sandbox;
+use crate::session::storage::load_session_by_id;
 use crate::session::{MessageRole, Session};
 
 pub struct CoreEngine {
@@ -235,6 +236,13 @@ impl CoreEngine {
                 if let Some(idx) = self.sessions.iter().position(|s| s.id == session_id) {
                     self.current_session_index = Some(idx);
                     let mut events = vec![CoreEvent::SessionChanged { session_id }];
+                    events.extend(self.emit_session_history());
+                    events
+                } else if let Ok(Some(session)) = load_session_by_id(session_id.as_str()) {
+                    self.sessions.push(session);
+                    self.current_session_index = Some(self.sessions.len() - 1);
+                    let mut events = self.emit_session_list_updated();
+                    events.push(CoreEvent::SessionChanged { session_id });
                     events.extend(self.emit_session_history());
                     events
                 } else {
