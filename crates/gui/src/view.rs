@@ -1220,7 +1220,7 @@ impl ShellState {
                                 .collect()
                         }),
                     )
-                    .flex_1()
+                    .size_full()
                     .track_scroll(&sidebar_scroll),
                 ),
             )
@@ -1275,7 +1275,7 @@ impl ShellState {
     }
 
     fn render_chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut col = div().flex().flex_col().h_full().bg(rgb(dark::CHAT_BG));
+        let mut col = div().flex_1().min_h_0().bg(rgb(dark::CHAT_BG));
 
         // Lightweight status row at the top of the chat column: provider /
         // model · mode · token total · live "thinking" / "idle" pill on the
@@ -1332,56 +1332,39 @@ impl ShellState {
         if chat_count == 0 {
             col = col.child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .px_6()
-                    .py_5()
                     .flex_1()
-                    .h_full()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .h_full()
-                            .text_color(rgb(dark::TEXT_MUTED))
-                            .child("Ask anything to start."),
-                    ),
+                    .items_center()
+                    .justify_center()
+                    .text_color(rgb(dark::TEXT_MUTED))
+                    .child("Ask anything to start."),
             );
         } else {
             let messages = self.chat.clone();
             let view_entity_for_processor = view_entity.clone();
             col = col.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .px_6()
-                    .py_5()
-                    .flex_1()
-                    .h_full()
-                    .child(
-                        uniform_list(
-                            "chat-history",
-                            chat_count,
-                            cx.processor(
-                                move |_this,
-                                      range: std::ops::Range<usize>,
-                                      _window,
-                                      _cx|
-                                      -> Vec<gpui::AnyElement> {
-                                    range
-                                        .map(|ix| {
-                                            let msg = &messages[ix];
-                                            render_message(msg, view_entity_for_processor.clone())
-                                        })
-                                        .collect()
-                                },
-                            ),
-                        )
-                        .gap_3()
-                        .track_scroll(&chat_scroll),
-                    ),
+                div().flex_1().px_6().py_5().child(
+                    uniform_list(
+                        "chat-history",
+                        chat_count,
+                        cx.processor(
+                            move |_this,
+                                  range: std::ops::Range<usize>,
+                                  _window,
+                                  _cx|
+                                  -> Vec<gpui::AnyElement> {
+                                range
+                                    .map(|ix| {
+                                        let msg = &messages[ix];
+                                        render_message(msg, view_entity_for_processor.clone())
+                                    })
+                                    .collect()
+                            },
+                        ),
+                    )
+                    .gap_3()
+                    .size_full()
+                    .track_scroll(&chat_scroll),
+                ),
             );
         }
         col
