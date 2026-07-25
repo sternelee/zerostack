@@ -27,6 +27,7 @@ use zerostack_core::events::UserAction;
 use crate::GuiBridge;
 use crate::markdown::{BlockKind, MarkdownBlock, MarkdownSpan, parse_markdown};
 use crate::theme::dark;
+use crate::tool_utils;
 
 /// The high-level shape of a row in the chat column. We collapse the engine's
 /// `ChatMessage` (which carries the role as a string) into this enum so the view layer
@@ -68,6 +69,36 @@ pub struct ChatMessage {
     /// Allow/Deny buttons can route the response back. For other roles it's
     /// `None` and the renderer ignores it.
     permission_id: Option<u64>,
+    /// Structured metadata for `Role::Tool` messages so we can render foldable
+    /// tool cards with name / args / status / result. When `None` the renderer
+    /// falls back to a plain text bubble (legacy / pre-structured events).
+    tool_meta: Option<ToolMeta>,
+}
+
+/// Lifecycle state of a tool invocation surfaced by the engine. Driven by
+/// the [`CoreEvent::ToolCall`] and [`CoreEvent::ToolResult`] events.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolStatus {
+    /// Tool was dispatched but the engine has not yet emitted a result.
+    Pending,
+    /// Tool finished successfully. `result` carries the output.
+    Ok,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolMeta {
+    pub name: SharedString,
+    /// One-line summary of the primary argument (path / command / pattern).
+    /// Mirrors the TUI's `format_tool_call_summary` so the GUI bubble shows
+    /// the same thing users see on the CLI.
+    pub args_summary: SharedString,
+    pub status: ToolStatus,
+    /// Output from [`CoreEvent::ToolResult`]. Empty while the tool is still
+    /// running or if the result was elided due to its size.
+    pub result: SharedString,
+    /// Whether the user has clicked the card to reveal the result body.
+    /// Defaults to `false`; toggled on click in `render_tool_card`.
+    pub expanded: bool,
 }
 
 impl ChatMessage {
@@ -76,6 +107,7 @@ impl ChatMessage {
             role: Role::User,
             content: text.into(),
             permission_id: None,
+            tool_meta: None,
         }
     }
 
@@ -84,6 +116,7 @@ impl ChatMessage {
             role: Role::Assistant,
             content: text.into(),
             permission_id: None,
+            tool_meta: None,
         }
     }
 
@@ -92,6 +125,7 @@ impl ChatMessage {
             role: Role::Tool,
             content: text.into(),
             permission_id: None,
+            tool_meta: None,
         }
     }
 
@@ -100,6 +134,7 @@ impl ChatMessage {
             role: Role::System,
             content: text.into(),
             permission_id: None,
+            tool_meta: None,
         }
     }
 
@@ -108,6 +143,39 @@ impl ChatMessage {
             role: Role::Permission,
             content: text.into(),
             permission_id: Some(id),
+            tool_meta: None,
+        }
+    }
+
+    /// Build a structured tool card used to render foldable tool bubbles.
+    pub fn tool_card(name: impl Into<SharedString>, args_summary: impl Into<SharedString>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: SharedString::new(""),
+            permission_id: None,
+            tool_meta: Some(ToolMeta {
+                name: name.into(),
+                args_summary: args_summary.into(),
+                status: ToolStatus::Pending,
+                result: SharedString::new(""),
+                expanded: false,
+            }),
+        }
+    }
+
+    /// Try to read the structured tool metadata. Returns `None` for any
+    /// role other than `Role::Tool`, or for tool bubbles that were created
+    /// before the structured form was introduced.
+    pub fn tool_meta(&self) -> Option<&ToolMeta> {
+        self.tool_meta.as_ref()
+    }
+
+    /// Mark the tool as finished and attach the engine output. A no-op on
+    /// non-tool messages and on tool bubbles that lack structured metadata.
+    pub fn complete_tool(&mut self, output: impl Into<SharedString>) {
+        if let Some(meta) = self.tool_meta.as_mut() {
+            meta.status = ToolStatus::Ok;
+            meta.result = output.into();
         }
     }
 }
@@ -491,6 +559,7 @@ impl ShellState {
                                 role: Role::Reasoning,
                                 content: self.reasoning_buffer.clone(),
                                 permission_id: None,
+                                tool_meta: None,
                             });
                             self.reasoning_idx = Some(self.chat.len() - 1);
                         }
@@ -502,16 +571,44 @@ impl ShellState {
                 }
             }
             CoreEvent::CompletionCall { .. } => {}
-            CoreEvent::ToolCall { name, .. } => {
+            CoreEvent::ToolCall { name, args } => {
+                // Push a structured tool card so the renderer can show name +
+                // args summary + status pill; we update it in place when the
+                // matching ToolResult shows up.
+                let summary = tool_utils::format_tool_call_summary(&name, &args);
                 self.chat
-                    .push(ChatMessage::tool(format!("calling {name}…")));
+                    .push(ChatMessage::tool_card(name.to_string(), summary));
                 self.streaming_assistant_idx = None;
             }
             CoreEvent::ToolResult { name, output } => {
-                self.chat
-                    .push(ChatMessage::tool(format!("{name} → {output}")));
+                // Find the most recent pending tool card with the same name and
+                // flip it to Ok state — keeps the timeline tight instead of
+                // producing two adjacent bubbles ("calling foo…" then "foo →").
+                let mut updated = false;
+                for msg in self.chat.iter_mut().rev() {
+                    if msg.role == Role::Tool
+                        && let Some(meta) = msg.tool_meta.as_ref()
+                        && meta.name.as_ref() == name.as_str()
+                        && meta.status == ToolStatus::Pending
+                    {
+                        msg.complete_tool(output.to_string());
+                        updated = true;
+                        break;
+                    }
+                }
+                if !updated {
+                    // Engine emitted a result without a matching call (rare,
+                    // e.g. retry / replay). Drop a plain fall-back so the user
+                    // still sees the output.
+                    self.chat
+                        .push(ChatMessage::tool(format!("{name} → {output}")));
+                }
             }
-            CoreEvent::SubagentToolCall { .. } => {}
+            CoreEvent::SubagentToolCall { name, args } => {
+                let summary = tool_utils::format_tool_call_summary(&name, &args);
+                self.chat
+                    .push(ChatMessage::tool_card(name.to_string(), summary));
+            }
             CoreEvent::PermissionNeeded {
                 id,
                 tool_name,
@@ -575,6 +672,7 @@ impl ShellState {
                         role: Role::from_engine(&m.role),
                         content: SharedString::new(m.content.as_str()),
                         permission_id: None,
+                        tool_meta: None,
                     })
                     .collect();
                 self.streaming_assistant_idx = None;
@@ -1991,6 +2089,7 @@ fn render_message(msg: &ChatMessage, view_entity: gpui::Entity<ShellState>) -> g
     match msg.role {
         Role::Reasoning => render_reasoning_card(msg),
         Role::Permission => render_permission_card(msg, view_entity),
+        Role::Tool if msg.tool_meta().is_some() => render_tool_card(msg, view_entity.clone()),
         _ => render_message_text(msg),
     }
 }
@@ -2271,6 +2370,153 @@ fn render_styled_span_run(flags: MarkdownFlags, text: String) -> gpui::AnyElemen
         d = d.text_color(rgb(dark::ACCENT)).underline();
     }
     d.child(text).into_any_element()
+}
+
+/// Foldable card for a tool invocation.
+///
+/// Layout: a left accent bar so the card reads as "this is structured
+/// output, different from prose", then a one-line header
+/// (`<name> <args summary>   <status pill>`) and an expandable body with the
+/// tool result. The header always shows; the body toggles on click. We use
+/// the message's position in `ShellState::chat` as a stable expansion key so
+/// each message hashes independently and we never lose state across diffs.
+fn render_tool_card(msg: &ChatMessage, view_entity: gpui::Entity<ShellState>) -> gpui::AnyElement {
+    // We can't keep a borrow across non-blocking updates on `msg`, so we
+    // copy out the fields we need to render before any callback closure.
+    let (name_str, args_str, result_str, status, is_expanded) = match msg.tool_meta() {
+        Some(m) => (
+            m.name.to_string(),
+            m.args_summary.to_string(),
+            m.result.to_string(),
+            m.status.clone(),
+            m.expanded,
+        ),
+        None => return render_message_text(msg),
+    };
+
+    let (status_label, status_fg) = match status {
+        ToolStatus::Pending => ("running", rgb(dark::WARNING)),
+        ToolStatus::Ok => ("done", rgb(dark::SUCCESS)),
+    };
+
+    let preview = tool_utils::preview_tool_result(result_str.as_str(), 240);
+
+    let body: gpui::AnyElement = if !is_expanded || preview.is_empty() {
+        // Collapsed or no result yet: nothing below the header.
+        div().into_any_element()
+    } else {
+        // Expanded: present the result with a code-style background so it
+        // visually separates from prose.
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .mt_2()
+            .p_2()
+            .rounded_sm()
+            .bg(rgb(dark::APP_BG))
+            .border_1()
+            .border_color(rgb(dark::BORDER))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(dark::TEXT_MUTED))
+                    .child("output"),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .font_family("ui-monospace")
+                    .text_xs()
+                    .text_color(rgb(dark::TEXT))
+                    .whitespace_normal()
+                    .child(preview),
+            )
+            .into_any_element()
+    };
+
+    // Header acts as the click target for expand/collapse.
+    let header_id = ElementId::Name(format!("tool-card-header-{name_str}").into());
+    let header = div()
+        .id(header_id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgb(dark::TEXT))
+                .child(name_str.clone()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_color(rgb(dark::TEXT_SECONDARY))
+                .whitespace_normal()
+                .child(args_str),
+        )
+        .child(
+            div()
+                .text_xs()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .border_1()
+                .border_color(status_fg)
+                .text_color(status_fg)
+                .child(status_label),
+        );
+
+    let view_for_toggle = view_entity;
+    let header_clickable = header.on_click(move |_event, _window, cx| {
+        view_for_toggle.update(cx, |state, cx| {
+            // Toggle the most recent tool card with this name. Newer tool
+            // invocations of the same name are exceedingly rare, so the
+            // newest-first walk is the right disambiguation.
+            for m in state.chat.iter_mut().rev() {
+                if m.role == Role::Tool
+                    && let Some(meta) = m.tool_meta.as_mut()
+                    && meta.name.as_ref() == name_str.as_str()
+                {
+                    meta.expanded = !meta.expanded;
+                    cx.notify();
+                    return;
+                }
+            }
+        });
+    });
+
+    div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .w_full()
+        .min_w_0()
+        .bg(rgb(dark::TOOL_BUBBLE_BG))
+        .px_4()
+        .py_3()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(dark::BORDER))
+        .child(
+            // Left accent bar so the card reads as structured output.
+            div().w(px(3.0)).h_full().bg(rgb(dark::ACCENT)).rounded_sm(),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .flex_1()
+                .min_w_0()
+                .child(header_clickable)
+                .child(body),
+        )
+        .into_any_element()
 }
 
 fn render_message_text(msg: &ChatMessage) -> gpui::AnyElement {

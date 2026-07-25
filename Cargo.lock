@@ -13559,6 +13559,7 @@ dependencies = [
  "gpui_platform",
  "gpui_windows",
  "pulldown-cmark",
+ "serde_json",
  "tokio",
  "zerostack-core",
 ]

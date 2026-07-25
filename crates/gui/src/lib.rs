@@ -4,6 +4,7 @@
 pub mod bridge;
 pub mod markdown;
 pub mod theme;
+pub mod tool_utils;
 pub mod view;
 
 pub use bridge::GuiBridge;
