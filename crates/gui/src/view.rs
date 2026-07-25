@@ -3377,46 +3377,131 @@ fn split_at_char(s: &SharedString, chars_before: usize) -> (SharedString, Shared
     }
 }
 
-/// Render the input line as `prefix` + optional block cursor + `suffix`. When
-/// `is_empty` we additionally draw the placeholder as a muted child; we render the
-/// accent cursor over it as a styled bar. The cursor is omitted when `cursor_visible`
-/// is `false` (during the off half of the blink).
+/// Render the input lines (one row per `\n`-separated segment) with a
+/// block caret on the row containing the cursor. Shift+Enter introduces
+/// newlines so users can compose multi-line prompts; matching the TUI's
+/// bracketed-paste preview. Each row is a single Text element with
+/// `whitespace_normal` set so wrapping behaves predictably when a row
+/// pushes past the box width.
 fn render_input_text(
-    prefix: SharedString,
-    suffix: SharedString,
+    before: SharedString,
+    after: SharedString,
     is_empty: bool,
     cursor_visible: bool,
-) -> gpui::Div {
-    let mut inner = div().flex().items_center().gap_0();
+) -> gpui::AnyElement {
     if is_empty {
-        inner = inner.child(
-            div()
-                .text_color(rgb(dark::TEXT_MUTED))
-                .child(SharedString::new("Ask zerostack…")),
-        );
-    } else {
-        inner = inner.child(
+        return div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_0()
+            .child(
+                div()
+                    .text_color(rgb(dark::TEXT_MUTED))
+                    .child(SharedString::new("Ask zerostack…")),
+            )
+            .into_any_element();
+    }
+
+    let before_str = before.to_string();
+    let after_str = after.to_string();
+    let cursor_block = div()
+        .w(px(2.))
+        .h(px(16.))
+        .my(px(2.))
+        .bg(if cursor_visible {
+            rgb(dark::ACCENT)
+        } else {
+            rgba(0x00000000)
+        })
+        .rounded_sm()
+        .flex_shrink_0();
+
+    // Split on `\n`. The cursor sits between `before` and `after`: the
+    // "cursor line" is the last line of `before_str`, with the cursor block
+    // before `after_str`'s first line.
+    let before_lines: Vec<&str> = before_str.split('\n').collect();
+    let after_lines: Vec<&str> = after_str.split('\n').collect();
+    let before_count = before_lines.len();
+
+    let mut rows: Vec<gpui::AnyElement> = Vec::new();
+
+    // Lines fully above the cursor.
+    for line in before_lines.iter().take(before_count.saturating_sub(1)) {
+        rows.push(
             div()
                 .flex()
+                .flex_row()
                 .items_center()
                 .gap_0()
-                .child(prefix)
                 .child(
                     div()
-                        .w(px(2.))
-                        .h(px(16.))
-                        .my(px(2.))
-                        .bg(if cursor_visible {
-                            rgb(dark::ACCENT)
-                        } else {
-                            rgba(0x00000000)
-                        })
-                        .rounded_sm(),
+                        .w_full()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .text_color(rgb(dark::TEXT))
+                        .text_sm()
+                        .child(line.to_string()),
                 )
-                .child(suffix),
+                .into_any_element(),
         );
     }
-    inner
+
+    // Cursor line.
+    let last_before = before_lines.last().copied().unwrap_or("").to_string();
+    let first_after = after_lines.first().copied().unwrap_or("").to_string();
+    rows.push(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_0()
+            .child(
+                div()
+                    .whitespace_normal()
+                    .text_color(rgb(dark::TEXT))
+                    .text_sm()
+                    .child(last_before),
+            )
+            .child(cursor_block)
+            .child(
+                div()
+                    .whitespace_normal()
+                    .text_color(rgb(dark::TEXT))
+                    .text_sm()
+                    .child(first_after),
+            )
+            .into_any_element(),
+    );
+
+    // Lines fully below the cursor (skip the first since it's been merged
+    // into the cursor row above).
+    for line in after_lines.iter().skip(1) {
+        rows.push(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_0()
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .text_color(rgb(dark::TEXT))
+                        .text_sm()
+                        .child(line.to_string()),
+                )
+                .into_any_element(),
+        );
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_0()
+        .children(rows)
+        .into_any_element()
 }
 
 /// Spawn a 500ms blink timer that toggles [`ShellState::cursor_visible`]. The timer
