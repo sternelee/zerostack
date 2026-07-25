@@ -154,10 +154,14 @@ impl<'a> App<'a> {
         if ui.cfg.resolve_always_show_welcome() || !marker_path.exists() {
             crate::ui::events::show_welcome(&mut renderer)?;
             if !ui.cfg.resolve_always_show_welcome() {
-                if let Some(dir) = marker_path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
+                if let Some(dir) = marker_path.parent()
+                    && let Err(e) = std::fs::create_dir_all(dir)
+                {
+                    tracing::warn!("failed to create data dir for welcome marker: {e}");
                 }
-                let _ = std::fs::write(&marker_path, "");
+                if let Err(e) = std::fs::write(&marker_path, "") {
+                    tracing::warn!("failed to write welcome marker (welcome will show again): {e}");
+                }
             }
         }
         refresh_display(
@@ -196,7 +200,11 @@ impl<'a> App<'a> {
                             .rebuild_agent(&ui.session.model, slash.reasoning_enabled)
                             .await,
                     );
-                    let _ = render_session(&mut renderer, ui.session, ui.cli, ui.cfg, ui.context);
+                    if let Err(e) =
+                        render_session(&mut renderer, ui.session, ui.cli, ui.cfg, ui.context)
+                    {
+                        tracing::warn!("failed to re-render session after worktree switch: {e}");
+                    }
                 }
                 Err(e) => {
                     let _ = renderer.write_line(&format!("worktree failed: {}", e), C_ERROR);
@@ -225,7 +233,11 @@ impl<'a> App<'a> {
                             .rebuild_agent(&ui.session.model, slash.reasoning_enabled)
                             .await,
                     );
-                    let _ = render_session(&mut renderer, ui.session, ui.cli, ui.cfg, ui.context);
+                    if let Err(e) =
+                        render_session(&mut renderer, ui.session, ui.cli, ui.cfg, ui.context)
+                    {
+                        tracing::warn!("failed to re-render session after worktree switch: {e}");
+                    }
                 }
                 Err(e) => {
                     let _ = renderer.write_line(&format!("worktree failed: {}", e), C_ERROR);
@@ -465,7 +477,10 @@ impl<'a> App<'a> {
                     && let Some(idx) = self.renderer.buffer_line_at_row(row)
                 {
                     if let Some(url) = self.renderer.link_url_at(idx, col) {
-                        renderer_mod::open_url(&url);
+                        if let Err(e) = renderer_mod::open_url(&url) {
+                            self.renderer
+                                .write_line(&format!("cannot open link: {}", e), C_ERROR)?;
+                        }
                     } else {
                         self.renderer.selection_active = true;
                         self.renderer.selection_start = Some(idx);
@@ -485,8 +500,11 @@ impl<'a> App<'a> {
                     if let Some(idx) = self.renderer.buffer_line_at_row(row) {
                         self.renderer.selection_end = Some(idx);
                     }
-                    if let Some(text) = self.renderer.selected_text() {
-                        copy_to_clipboard(&text);
+                    if let Some(text) = self.renderer.selected_text()
+                        && let Err(e) = copy_to_clipboard(&text)
+                    {
+                        self.renderer
+                            .write_line(&format!("copy to clipboard failed: {}", e), C_ERROR)?;
                     }
                     self.renderer.clear_selection();
                 }
@@ -537,8 +555,15 @@ impl<'a> App<'a> {
     async fn handle_key_event(&mut self, key: KeyEvent) -> anyhow::Result<()> {
         if self.renderer.selection_active && key.code == KeyCode::Char('y') {
             if let Some(text) = self.renderer.selected_text() {
-                copy_to_clipboard(&text);
-                self.renderer.write_line("copied selection", Color::Green)?;
+                match copy_to_clipboard(&text) {
+                    Ok(()) => {
+                        self.renderer.write_line("copied selection", Color::Green)?;
+                    }
+                    Err(e) => {
+                        self.renderer
+                            .write_line(&format!("copy to clipboard failed: {}", e), C_ERROR)?;
+                    }
+                }
             }
             self.renderer.clear_selection();
             return Ok(());
@@ -600,8 +625,13 @@ impl<'a> App<'a> {
                     if let Some(text) = text {
                         self.input.load_text(&text);
                     }
-                    if !self.ui.cli.no_session {
-                        let _ = crate::session::storage::save_session(self.ui.session);
+                    if !self.ui.cli.no_session
+                        && let Err(e) = crate::session::storage::save_session(self.ui.session)
+                    {
+                        self.renderer.write_line(
+                            &format!("warning: failed to save session: {}", e),
+                            C_ERROR,
+                        )?;
                     }
                     render_session(
                         &mut self.renderer,
@@ -1271,9 +1301,13 @@ impl<'a> App<'a> {
                         match crate::extras::mcp::oauth::begin_login(&server, &url, &settings).await
                         {
                             Ok(login) => {
-                                copy_to_clipboard(&login.auth_url);
+                                let copied = copy_to_clipboard(&login.auth_url).is_ok();
                                 self.renderer.write_line(
-                                    "open this URL to authorize (copied to clipboard):",
+                                    if copied {
+                                        "open this URL to authorize (copied to clipboard):"
+                                    } else {
+                                        "open this URL to authorize (could not copy to clipboard):"
+                                    },
                                     C_AGENT,
                                 )?;
                                 self.renderer.write_line(&login.auth_url, Color::Cyan)?;

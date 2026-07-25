@@ -17,6 +17,25 @@ use crate::session::SessionMessage;
 
 // ── Helper functions ─────────────────────────────────────────────────────
 
+/// Regenerate embedded prompts/themes, printing the actual outcome instead
+/// of claiming success on failure. Returns true when regeneration succeeded.
+fn regen_resource(regen: fn() -> anyhow::Result<()>, what: &str, suffix: &str) -> bool {
+    match regen() {
+        Ok(()) => {
+            eprintln!("{} regenerated{}.", what, suffix);
+            true
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: failed to regenerate {}: {}",
+                what.to_lowercase(),
+                e
+            );
+            false
+        }
+    }
+}
+
 fn resolve_mode(cli: &Cli, cfg: &Config) -> SecurityMode {
     if cli.yolo || cfg.yolo.unwrap_or(false) {
         SecurityMode::Yolo
@@ -500,25 +519,20 @@ impl Startup {
 
             match self.cfg.resolve_auto_update_prompts() {
                 Some(true) => {
-                    let _ = context::prompts::regen();
-                    eprintln!("Prompts regenerated.");
-                    regenerated = true;
+                    regenerated |= regen_resource(context::prompts::regen, "Prompts", "");
                 }
                 Some(false) => { /* skip: user explicitly denied */ }
                 None => {
                     if !prompts_dir.exists() {
-                        let _ = context::prompts::regen();
-                        eprintln!("Prompts regenerated (first launch).");
-                        regenerated = true;
+                        regenerated |=
+                            regen_resource(context::prompts::regen, "Prompts", " (first launch)");
                     } else {
                         let mut input = String::new();
                         eprint!("Regenerate prompts? [y/N] ");
                         let _ = std::io::Write::flush(&mut std::io::stderr());
                         std::io::stdin().read_line(&mut input)?;
                         if matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
-                            let _ = context::prompts::regen();
-                            eprintln!("Prompts regenerated.");
-                            regenerated = true;
+                            regenerated |= regen_resource(context::prompts::regen, "Prompts", "");
                         }
                     }
                 }
@@ -526,25 +540,20 @@ impl Startup {
 
             match self.cfg.resolve_auto_update_themes() {
                 Some(true) => {
-                    let _ = context::themes::regen();
-                    eprintln!("Themes regenerated.");
-                    regenerated = true;
+                    regenerated |= regen_resource(context::themes::regen, "Themes", "");
                 }
                 Some(false) => { /* skip: user explicitly denied */ }
                 None => {
                     if !themes_dir.exists() {
-                        let _ = context::themes::regen();
-                        eprintln!("Themes regenerated (first launch).");
-                        regenerated = true;
+                        regenerated |=
+                            regen_resource(context::themes::regen, "Themes", " (first launch)");
                     } else {
                         let mut input = String::new();
                         eprint!("Regenerate themes? [y/N] ");
                         let _ = std::io::Write::flush(&mut std::io::stderr());
                         std::io::stdin().read_line(&mut input)?;
                         if matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
-                            let _ = context::themes::regen();
-                            eprintln!("Themes regenerated.");
-                            regenerated = true;
+                            regenerated |= regen_resource(context::themes::regen, "Themes", "");
                         }
                     }
                 }
@@ -812,12 +821,14 @@ impl Startup {
                     session.add_message(MessageRole::User, &msg);
                     session.add_message(MessageRole::Assistant, &result);
                     session::storage::save_session(&session)?;
-                    let _ = session::chat_history::append_entry(
+                    if let Err(e) = session::chat_history::append_entry(
                         &session::chat_history::ChatHistoryEntry {
                             content: msg,
                             timestamp: session.updated_at.clone(),
                         },
-                    );
+                    ) {
+                        eprintln!("warning: failed to append chat history entry: {}", e);
+                    }
                 }
             } else {
                 eprintln!("error: empty command after '!'");
@@ -834,7 +845,10 @@ impl Startup {
                 &self.cfg,
                 &self.context,
                 self.permission,
-                self.ask_tx,
+                // Non-interactive dispatch never keeps the ask channel: with
+                // no one draining it, an `Ask` verdict must fail closed as a
+                // denial rather than block forever. See `handle_ask_inner`.
+                None,
                 self.sandbox.clone(),
                 true,
                 temperature,
@@ -856,11 +870,13 @@ impl Startup {
             if let Some(ss) = self.status_signals.as_ref() {
                 ss.send_start();
             }
+            let history = crate::agent::runner::convert_history(&self.session);
             let response_result = agent
                 .run_print(
                     &msg,
                     self.cli.pure_stdout,
                     &self.cfg.retry,
+                    history,
                     #[cfg(feature = "hooks")]
                     None,
                 )
@@ -924,7 +940,9 @@ impl Startup {
             &self.cfg,
             &self.context,
             self.permission,
-            self.ask_tx,
+            // Non-interactive dispatch never keeps the ask channel; see the
+            // matching note in `dispatch_print`.
+            None,
             self.sandbox.clone(),
             true,
             temperature,
