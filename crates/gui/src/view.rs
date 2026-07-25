@@ -262,13 +262,105 @@ const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
     ("/quit", "close the window and shut the engine down", false),
 ];
 
-/// Return the subset of [`SLASH_COMMANDS`] whose name starts with `prefix`.
+/// Return the subset of [`SLASH_COMMANDS`] whose name starts with `prefix`,
+/// or — when `prefix` is the literal command prefix of an arg-requiring
+/// command followed by a single space — the available argument choices for
+/// that command. Returning the docs-only "atomic" flag so the key handler
+/// treats each choice as immediately actionable (Tab inserts the chosen
+/// value into the buffer; Enter inserts + submits), avoiding an extra
+/// keystroke versus the TUI's "type then press enter" flow.
 fn slash_matches(prefix: &str) -> Vec<(&'static str, &'static str, bool)> {
+    // Recognise the boundary where the user just selected an arg-needing
+    // command and typed a space — this is where we switch to a chooser. Each
+    // choice item's name is just the bare value (`anthropic`) and the key
+    // handler rebuilds the full `/provider anthropic` string from the
+    // arg-prefix; the description is shown as the choice label.
+    if let Some(arg_prefix) = strip_command_arg_prefix(prefix) {
+        let choices: &[(&str, &str)] = match arg_prefix {
+            "/provider" => PROVIDER_CHOICES,
+            "/mode" => MODE_CHOICES,
+            _ => &[],
+        };
+        return choices
+            .iter()
+            .map(|(value, desc)| (*value as &'static str, *desc as &'static str, false))
+            .collect();
+    }
     SLASH_COMMANDS
         .iter()
         .copied()
         .filter(|(name, _, _)| name.starts_with(prefix))
         .collect()
+}
+
+/// Return the arg-needing slash command whose name precedes the first space
+/// in `prefix`. The result is `Some("/provider")` for inputs like
+/// "/provider "/provider an"; `None` otherwise. Leading slashes are kept so
+/// the caller can compare against `SLASH_COMMANDS` directly.
+fn strip_command_arg_prefix(input: &str) -> Option<&'static str> {
+    if !input.starts_with('/') {
+        return None;
+    }
+    let head = input.split_whitespace().next().unwrap_or(input);
+    match head {
+        "/provider" => Some("/provider"),
+        "/mode" => Some("/mode"),
+        _ => None,
+    }
+}
+
+/// Provider options offered when `/provider<space>` is typed. Mirrors the
+/// providers routed by `AnyClient::provider_name` in `crates/core/src/provider.rs`.
+const PROVIDER_CHOICES: &[(&str, &str)] = &[
+    ("anthropic", "Anthropic Claude"),
+    ("openai", "OpenAI / compatible"),
+    ("gemini", "Google Gemini"),
+    ("openrouter", "OpenRouter"),
+    ("ollama", "Local Ollama"),
+];
+
+/// Permission-mode options offered when `/mode<space>` is typed. Mirrors the
+/// `SecurityMode` enum in `crates/core/src/permission/mod.rs` (the engine
+/// reports the current mode as one of these strings).
+const MODE_CHOICES: &[(&str, &str)] = &[
+    ("yolo", "auto-run any tool call"),
+    ("standard", "ask outside the cwd"),
+    ("restrictive", "ask every tool call"),
+    ("readonly", "deny writes & commands"),
+    ("guarded", "deny outside a trust list"),
+];
+
+#[cfg(test)]
+mod picker_tests {
+    use super::*;
+
+    #[test]
+    fn commands_picker_filters_by_prefix() {
+        let v = slash_matches("/");
+        assert!(v.iter().any(|(n, _, _)| *n == "/clear"));
+    }
+
+    #[test]
+    fn provider_picker_offers_arg_chooser() {
+        let v = slash_matches("/provider ");
+        assert_eq!(
+            v.iter().map(|(n, _, _)| *n).collect::<Vec<_>>(),
+            vec!["anthropic", "openai", "gemini", "openrouter", "ollama"]
+        );
+    }
+
+    #[test]
+    fn mode_picker_offers_arg_chooser() {
+        let v = slash_matches("/mode ");
+        assert!(v.iter().any(|(n, _, _)| *n == "yolo"));
+        assert_eq!(v.len(), 5);
+    }
+
+    #[test]
+    fn commands_with_picker_for_unrelated_input_returns_empty() {
+        let v = slash_matches("/xyz ");
+        assert!(v.is_empty());
+    }
 }
 
 /// State owned by the root view. Lives inside one main window. The bridge is owned
@@ -511,19 +603,23 @@ impl ShellState {
     /// filter [`SLASH_COMMANDS`] by the typed prefix and clamp the highlight index.
     fn refresh_slash_popup(&mut self) {
         let s = self.input_text.as_str();
-        if let Some(rest) = s.strip_prefix('/') {
-            if rest.contains(char::is_whitespace) {
-                self.slash_popup_visible = false;
-                return;
-            }
-            let matches = slash_matches(s);
-            self.slash_popup_visible = !matches.is_empty();
-            if self.slash_popup_selected >= matches.len() {
-                self.slash_popup_selected = matches.len().saturating_sub(1);
-            }
-        } else {
+        if !s.starts_with('/') {
             self.slash_popup_visible = false;
             self.slash_popup_selected = 0;
+            return;
+        }
+        // Two trigger modes:
+        //   1. pure `/` followed by command characters → commands picker;
+        //   2. `/provider<space>`, `/mode<space>`, ... → argument chooser.
+        // Anything else falls out of the picker entirely.
+        if s.contains(char::is_whitespace) && strip_command_arg_prefix(s).is_none() {
+            self.slash_popup_visible = false;
+            return;
+        }
+        let matches = slash_matches(s);
+        self.slash_popup_visible = !matches.is_empty();
+        if self.slash_popup_selected >= matches.len() {
+            self.slash_popup_selected = matches.len().saturating_sub(1);
         }
     }
 
@@ -1693,30 +1789,53 @@ impl ShellState {
                                     if let Some((name, _, _)) =
                                         matches.get(this.slash_popup_selected)
                                     {
-                                        this.input_text = SharedString::new(*name);
-                                        this.input_cursor = name.chars().count();
-                                        this.slash_popup_visible = false;
+                                        let name_str = *name;
+                                        if let Some(arg_prefix) =
+                                            strip_command_arg_prefix(this.input_text.as_str())
+                                        {
+                                            // We're already inside an arg
+                                            // chooser (e.g. `/provider<space>`).
+                                            // Build the full slash command from
+                                            // the picked value and submit it.
+                                            let full = format!("{arg_prefix} {name_str}");
+                                            this.input_text = SharedString::new(full);
+                                            this.input_cursor = this.input_text.chars().count();
+                                            this.slash_popup_visible = false;
+                                            this.submit_input(cx);
+                                        } else {
+                                            // Step into the chooser for the
+                                            // arg-needing command. The popup
+                                            // will refresh into its argument
+                                            // list on the next call.
+                                            let mut buf = String::from(name_str);
+                                            buf.push(' ');
+                                            this.input_text = SharedString::new(buf);
+                                            this.input_cursor = this.input_text.chars().count();
+                                            this.refresh_slash_popup();
+                                        }
                                     }
                                     cx.stop_propagation();
                                     return;
                                 }
                                 "enter" => {
-                                    if let Some((name, _, needs_arg)) =
+                                    if let Some((name, _, _)) =
                                         matches.get(this.slash_popup_selected)
                                     {
                                         let name_str = *name;
-                                        let wants_arg = *needs_arg;
-                                        this.input_text = SharedString::new(name_str);
-                                        this.input_cursor = name_str.chars().count();
-                                        this.slash_popup_visible = false;
-                                        if !wants_arg {
+                                        if let Some(arg_prefix) =
+                                            strip_command_arg_prefix(this.input_text.as_str())
+                                        {
+                                            let full = format!("{arg_prefix} {name_str}");
+                                            this.input_text = SharedString::new(full);
+                                            this.input_cursor = this.input_text.chars().count();
+                                            this.slash_popup_visible = false;
+                                            this.submit_input(cx);
+                                        } else {
+                                            this.input_text = SharedString::new(name_str);
+                                            this.input_cursor = this.input_text.chars().count();
+                                            this.slash_popup_visible = false;
                                             this.submit_input(cx);
                                         }
-                                        // Either way, we handle Enter: atomic
-                                        // commands submit, argument-taking ones
-                                        // stay in the box. Consume the keystroke
-                                        // so macOS doesn't also fire
-                                        // `[inputContext handleEvent:] -> insertText:"\n"]`.
                                         cx.stop_propagation();
                                     } else {
                                         this.submit_input(cx);
