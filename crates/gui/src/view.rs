@@ -1999,10 +1999,13 @@ fn render_message(msg: &ChatMessage, view_entity: gpui::Entity<ShellState>) -> g
 ///
 /// The TUI's `markdown.rs` turns the source into a styled ANSI stream; here
 /// we tokenize via `crate::markdown` and rebuild each block as a small
-/// `Div` tree. Inline spans within a paragraph live in the same `flex_row`
-/// container so they wrap naturally. Code blocks get a monospace, padded,
-/// bordered panel; inline code gets a chip background; bold / italic /
-/// strikethrough / links use native gpui text primitives.
+/// `Div` tree. Span styling uses native gpui text primitives, but to
+/// guarantee word wrapping we render each paragraph as a single `Div` with
+/// `whitespace_normal`: with one child text node, gpui's text layout
+/// behaves predictably across rows. A paragraph splits back into a
+/// `flex_row` only when it contains inline code / links / explicit
+/// formatting, so chip-like spans (inline code, links) can keep their
+/// background.
 fn render_markdown_body(text: &str) -> gpui::AnyElement {
     let blocks: Vec<MarkdownBlock> = parse_markdown(text);
     div()
@@ -2013,7 +2016,7 @@ fn render_markdown_body(text: &str) -> gpui::AnyElement {
         .min_w_0()
         .text_color(rgb(dark::TEXT))
         .text_sm()
-        .children(blocks.into_iter().map(|block| render_markdown_block(block)))
+        .children(blocks.into_iter().map(render_markdown_block))
         .into_any_element()
 }
 
@@ -2027,28 +2030,41 @@ fn render_markdown_block(block: MarkdownBlock) -> gpui::AnyElement {
                 _ => 15.0,
             };
             let top_pad = if level <= 2 { 6.0 } else { 4.0 };
+            let joined: String = block.spans.iter().map(|s| s.text.as_str()).collect();
             div()
-                .flex()
-                .flex_row()
-                .flex_wrap()
                 .w_full()
                 .min_w_0()
                 .mt(px(top_pad))
                 .text_size(px(size))
                 .font_weight(gpui::FontWeight::BOLD)
                 .text_color(rgb(dark::TEXT))
-                .children(block.spans.into_iter().map(render_markdown_span))
+                .whitespace_normal()
+                .child(joined)
                 .into_any_element()
         }
-        BlockKind::Paragraph => div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .w_full()
-            .min_w_0()
-            .text_color(rgb(dark::TEXT))
-            .children(block.spans.into_iter().map(render_markdown_span))
-            .into_any_element(),
+        BlockKind::Paragraph => {
+            let has_styled = block
+                .spans
+                .iter()
+                .any(|s| s.bold || s.italic || s.strikethrough || s.code || s.link.is_some());
+            if !has_styled {
+                // Plain paragraph: a single text node gives reliable wrapping.
+                let joined: String = block.spans.iter().map(|s| s.text.as_str()).collect();
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(dark::TEXT))
+                    .whitespace_normal()
+                    .child(joined)
+                    .into_any_element()
+            } else {
+                // Mixed-style paragraph: split into runs of consecutive spans
+                // sharing the same flags. Each run becomes a single flex item
+                // inside the wrapping row so a long plain run can wrap while
+                // bold / italic / code / link chips stay atomic.
+                render_styled_paragraph(block.spans)
+            }
+        }
         BlockKind::CodeBlock(lang) => {
             let joined: String = block
                 .spans
@@ -2096,6 +2112,22 @@ fn render_markdown_block(block: MarkdownBlock) -> gpui::AnyElement {
                 Some(n) => format!("{n}. "),
                 None => "\u{2022} ".to_string(),
             };
+            let has_styled = block
+                .spans
+                .iter()
+                .any(|s| s.bold || s.italic || s.strikethrough || s.code || s.link.is_some());
+            let body: gpui::AnyElement = if has_styled {
+                render_styled_paragraph(block.spans)
+            } else {
+                let joined: String = block.spans.iter().map(|s| s.text.as_str()).collect();
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_color(rgb(dark::TEXT))
+                    .whitespace_normal()
+                    .child(joined)
+                    .into_any_element()
+            };
             div()
                 .flex()
                 .flex_row()
@@ -2106,40 +2138,42 @@ fn render_markdown_block(block: MarkdownBlock) -> gpui::AnyElement {
                     div()
                         .text_color(rgb(dark::TEXT_MUTED))
                         .min_w(px(28.0))
+                        .flex_shrink_0()
                         .child(prefix),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .text_color(rgb(dark::TEXT))
-                        .flex_1()
-                        .min_w_0()
-                        .children(block.spans.into_iter().map(render_markdown_span)),
-                )
+                .child(body)
                 .into_any_element()
         }
-        BlockKind::BlockQuote => div()
-            .flex()
-            .flex_row()
-            .gap_2()
-            .w_full()
-            .min_w_0()
-            .pl_3()
-            .border_l_2()
-            .border_color(rgb(dark::ACCENT))
-            .text_color(rgb(dark::TEXT_SECONDARY))
-            .child(
+        BlockKind::BlockQuote => {
+            let has_styled = block
+                .spans
+                .iter()
+                .any(|s| s.bold || s.italic || s.strikethrough || s.code || s.link.is_some());
+            let body: gpui::AnyElement = if has_styled {
+                render_styled_paragraph(block.spans)
+            } else {
+                let joined: String = block.spans.iter().map(|s| s.text.as_str()).collect();
                 div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
                     .flex_1()
                     .min_w_0()
-                    .children(block.spans.into_iter().map(render_markdown_span)),
-            )
-            .into_any_element(),
+                    .text_color(rgb(dark::TEXT_SECONDARY))
+                    .whitespace_normal()
+                    .child(joined)
+                    .into_any_element()
+            };
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .w_full()
+                .min_w_0()
+                .pl_3()
+                .border_l_2()
+                .border_color(rgb(dark::ACCENT))
+                .text_color(rgb(dark::TEXT_SECONDARY))
+                .child(body)
+                .into_any_element()
+        }
         BlockKind::Hr => div()
             .h(px(1.0))
             .w_full()
@@ -2148,18 +2182,84 @@ fn render_markdown_block(block: MarkdownBlock) -> gpui::AnyElement {
     }
 }
 
-fn render_markdown_span(span: MarkdownSpan) -> gpui::AnyElement {
-    let mut d = div().text_color(rgb(dark::TEXT)).text_sm();
-    if span.bold {
+/// Render an inline-styled paragraph by collapsing consecutive spans that
+/// share the same flag bits into a single run. Plain runs become a single
+/// `Div` with whitespace_normal so wrapping works; styled runs become a chip
+/// using [`render_styled_span_run`] so bold / italic / code / link chips stay
+/// atomic and never split a word in two.
+fn render_styled_paragraph(spans: Vec<MarkdownSpan>) -> gpui::AnyElement {
+    // Group consecutive spans that match in the "styling fingerprint" so
+    // that bold+italic_*_code runs are merged into one chip. This avoids
+    // the "five divs for a single bold sentence" fragmentation that keeps
+    // individual flex items from shrinking nicely.
+    let grouped = group_runs(spans);
+    let children: Vec<gpui::AnyElement> = grouped
+        .into_iter()
+        .map(|(styled, text)| render_styled_span_run(styled, text))
+        .collect();
+    div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .w_full()
+        .min_w_0()
+        .text_color(rgb(dark::TEXT))
+        .children(children)
+        .into_any_element()
+}
+
+/// Coalesce consecutive spans whose (bold, italic, strike, code, link_url)
+/// fingerprint matches into a single (flags, joined_text) pair.
+fn group_runs(spans: Vec<MarkdownSpan>) -> Vec<(MarkdownFlags, String)> {
+    let mut out: Vec<(MarkdownFlags, String)> = Vec::new();
+    for span in spans {
+        let flags = MarkdownFlags {
+            bold: span.bold,
+            italic: span.italic,
+            strikethrough: span.strikethrough,
+            code: span.code,
+            link: span.link.clone(),
+        };
+        if let Some((existing_flags, text)) = out.last_mut() {
+            if existing_flags == &flags {
+                text.push_str(span.text.as_str());
+                continue;
+            }
+        }
+        out.push((flags, span.text.to_string()));
+    }
+    out
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct MarkdownFlags {
+    bold: bool,
+    italic: bool,
+    strikethrough: bool,
+    code: bool,
+    link: Option<CompactString>,
+}
+
+fn render_styled_span_run(flags: MarkdownFlags, text: String) -> gpui::AnyElement {
+    // min_w_0 + flex_shrink lets a long, unbreakable run still shrink and
+    // wrap inside the parent flex_row. Without these, the run's content
+    // width imposes a floor that pushes the whole line past the bubble.
+    let mut d = div()
+        .text_color(rgb(dark::TEXT))
+        .text_sm()
+        .min_w_0()
+        .flex_shrink()
+        .whitespace_normal();
+    if flags.bold {
         d = d.font_weight(gpui::FontWeight::BOLD);
     }
-    if span.italic {
+    if flags.italic {
         d = d.italic();
     }
-    if span.strikethrough {
+    if flags.strikethrough {
         d = d.line_through();
     }
-    if span.code {
+    if flags.code {
         d = d
             .font_family("ui-monospace")
             .text_xs()
@@ -2167,10 +2267,10 @@ fn render_markdown_span(span: MarkdownSpan) -> gpui::AnyElement {
             .rounded_sm()
             .bg(rgb(dark::BUTTON_BG));
     }
-    if span.link.is_some() {
+    if flags.link.is_some() {
         d = d.text_color(rgb(dark::ACCENT)).underline();
     }
-    d.child(span.text.to_string()).into_any_element()
+    d.child(text).into_any_element()
 }
 
 fn render_message_text(msg: &ChatMessage) -> gpui::AnyElement {
@@ -2957,11 +3057,13 @@ impl Render for ShellState {
             .size_full()
             .bg(rgb(dark::APP_BG))
             .text_color(rgb(dark::TEXT))
+            .overflow_x_hidden()
             .child(self.render_sidebar(cx))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
+                    .overflow_x_hidden()
                     .flex()
                     .flex_col()
                     .child(self.render_chat(cx))
