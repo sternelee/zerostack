@@ -2475,7 +2475,6 @@ fn render_session_row(
 ) -> gpui::AnyElement {
     let view_entity = view_entity.clone();
     let id_owned = session.id.clone();
-    let working_dir = session.working_dir.to_string();
 
     let name: SharedString = if session.name.is_empty() {
         SharedString::new("(untitled)")
@@ -2483,28 +2482,22 @@ fn render_session_row(
         SharedString::new(session.name.as_str())
     };
 
-    // Meta line composition: model · N msg(s) · <relative time>. We drop
-    // any empty provider / model fragments so a session that predates the
-    // model field doesn't display trailing "·". The relative timestamp
-    // shows recency at a glance ("just now", "5m ago", "yesterday",
-    // "Mar 12"); if the timestamp can't be parsed we silently fall back
-    // to the raw string so we never surface a confusing "unknown".
-    let mut meta_parts: Vec<String> = Vec::new();
-    if !session.model.is_empty() {
-        meta_parts.push(session.model.to_string());
-    } else if !session.provider.is_empty() {
-        meta_parts.push(session.provider.to_string());
-    }
-    meta_parts.push(format!("{} msg(s)", session.message_count));
-    if !session.created_at.is_empty() {
-        meta_parts.push(format_relative_time(&session.created_at));
-    }
-    let meta: SharedString = SharedString::new(meta_parts.join(" · "));
+    let last_message: SharedString = if session.last_message.is_empty() {
+        SharedString::new("no messages yet")
+    } else {
+        SharedString::new(session.last_message.as_str())
+    };
 
     let primary_color = if is_active {
         rgb(dark::TEXT)
     } else {
         rgb(dark::TEXT_SECONDARY)
+    };
+
+    let secondary_color = if is_active {
+        rgb(dark::TEXT_SECONDARY)
+    } else {
+        rgb(dark::TEXT_MUTED)
     };
 
     div()
@@ -2570,20 +2563,10 @@ fn render_session_row(
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(dark::TEXT_MUTED))
+                .text_color(secondary_color)
                 .truncate()
-                .child(meta.clone()),
+                .child(last_message.clone()),
         )
-        .when(!working_dir.is_empty(), |d| {
-            d.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(dark::TEXT_MUTED))
-                    .truncate()
-                    .italic()
-                    .child(SharedString::new(truncate_middle(&working_dir, 48))),
-            )
-        })
         .on_click(move |_ev, _window, cx| {
             view_entity.update(cx, |state, _cx| {
                 let _ = state.bridge.send(UserAction::SwitchSession {
@@ -2643,141 +2626,6 @@ fn utf16_range_to_char_indices(
     (s_clip.min(e_clip), s_clip.max(e_clip))
 }
 
-/// Best-effort human-friendly relative-time rendering for sidebar session
-/// rows. Accepts ISO-8601 / RFC 3339 strings (the format the engine writes
-/// into `created_at`) and returns a coarse bucketed phrase. Falls back to
-/// the raw input verbatim on parse failure so a malformed timestamp never
-/// produces a phantom "unknown" string.
-fn format_relative_time(ts: &str) -> String {
-    // Reject anything that doesn't plain look like a year prefix so we
-    // don't try to parse "—" / "unknown" / etc. and panic.
-    if ts.len() < 4 || !ts.chars().take(4).all(|c| c.is_ascii_digit()) {
-        return ts.to_string();
-    }
-    let Ok(parsed) = chrono_like_parse(ts) else {
-        return ts.to_string();
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let delta = now - parsed;
-    if delta < 0 {
-        return ts.to_string();
-    }
-    if delta < 60 {
-        return "just now".to_string();
-    }
-    if delta < 3600 {
-        let mins = delta / 60;
-        return format!("{mins}m ago");
-    }
-    if delta < 86_400 {
-        let hours = delta / 3600;
-        return format!("{hours}h ago");
-    }
-    if delta < 7 * 86_400 {
-        return "yesterday".to_string();
-    }
-    // Beyond a week, drop the bucket to a short date — we don't try to be
-    // perfect across timezones / DST. Day-of-year is good enough to tell
-    // "March 12" from "April 3".
-    let secs_in_day = 86_400i64;
-    let days = delta / secs_in_day;
-    if days < 365 {
-        // Calendar reconstruction is overkill — feed the seconds into a tiny
-        // formatter that prints "MMM DD" without dragging in chrono.
-        return format_short_month_day(parsed);
-    }
-    format!("{}y ago", days / 365)
-}
-
-/// Minimal RFC-3339-ish parser: `YYYY-MM-DDTHH:MM:SS[.ffffff][Z|+HH:MM]`.
-/// We only need the seconds field, so we stop the moment a non-numeric
-/// character shows up after the year.
-fn chrono_like_parse(ts: &str) -> Result<i64, ()> {
-    // Year
-    let year: i64 = ts.get(0..4).and_then(|s| s.parse().ok()).ok_or(())?;
-    if ts.as_bytes().get(4) != Some(&b'-') {
-        return Err(());
-    }
-    let mut idx = 5usize;
-    let month_first = ts.as_bytes().get(idx).copied().ok_or(())?;
-    if !month_first.is_ascii_digit() {
-        return Err(());
-    }
-    let mut month_acc: i64 = (month_first - b'0') as i64;
-    idx += 1;
-    if let Some(c) = ts.as_bytes().get(idx).copied() {
-        if c.is_ascii_digit() {
-            month_acc = month_acc * 10 + (c - b'0') as i64;
-            idx += 1;
-        }
-    }
-    if ts.as_bytes().get(idx) != Some(&b'-') {
-        return Err(());
-    }
-    idx += 1;
-    let day_first = ts.as_bytes().get(idx).copied().ok_or(())?;
-    if !day_first.is_ascii_digit() {
-        return Err(());
-    }
-    let mut day_acc: i64 = (day_first - b'0') as i64;
-    idx += 1;
-    if let Some(c) = ts.as_bytes().get(idx).copied() {
-        if c.is_ascii_digit() {
-            day_acc = day_acc * 10 + (c - b'0') as i64;
-            idx += 1;
-        }
-    }
-    // We don't care about HH:MM:SS — .len() will be enough to keep
-    // microsecond offsets stable for the relative bucketing above.
-    let _ = idx;
-    // Approximate the date as days-since-epoch via a straightforward
-    // proleptic Gregorian conversion. This is coarse but sufficient for
-    // relative time bucketing across the calendar.
-    let days = days_from_civil(year, month_acc as u32, day_acc as u32);
-    Ok(days * 86_400)
-}
-
-/// Howard Hinnant's `days_from_civil` algorithm (no time zone), adapted from
-/// <https://howardhinnant.github.io/date_algorithms.html>. Returns the count
-/// of days since 1970-01-01 (Unix epoch).
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as u64; // [0, 399]
-    let m = m as u64;
-    let d = d as u64;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
-    era as i64 * 146097 + doe as i64 - 719468
-}
-
-/// Render an epoch-seconds value as "MMM DD" using the same proleptic
-/// Gregorian table as [`days_from_civil`]. We avoid bringing in chrono
-/// because the only consumer is the sidebar meta line and the cost is a
-/// few extra lines of code.
-fn format_short_month_day(epoch_secs: i64) -> String {
-    let days = epoch_secs.div_euclid(86_400);
-    // Invert the proleptic Gregorian table.
-    let z = days + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z - era * 146097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let y = if m <= 2 { y + 1 } else { y };
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let m_idx = (m as usize).saturating_sub(1).min(11);
-    format!("{} {}", MONTHS[m_idx], d)
-}
-
 /// Map a character (codepoint) index into `s` to the byte offset where the
 /// character begins. Out-of-range indices clamp to `s.len()`.
 fn byte_index_for_char(s: &str, char_idx: usize) -> usize {
@@ -2785,28 +2633,6 @@ fn byte_index_for_char(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(b, _)| b)
         .unwrap_or(s.len())
-}
-
-/// Truncate a long path for the sidebar's working-dir subline: keep the
-/// trailing components (where the action usually happens) and prefix with
-/// `…/` if anything was elided. We work in chars rather than bytes so a
-/// multi-byte UTF-8 path doesn't get cut mid-codepoint and produce mojibake.
-fn truncate_middle(s: &str, max_chars: usize) -> String {
-    let total = s.chars().count();
-    if total <= max_chars {
-        return s.to_string();
-    }
-    let keep = max_chars.saturating_sub(2).max(4);
-    let head: String = s.chars().take(keep / 2).collect();
-    let tail: String = s
-        .chars()
-        .rev()
-        .take(keep - keep / 2)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("{head}…{tail}")
 }
 
 /// Count UTF-16 units in `s` strictly before byte offset `byte_end`. Useful

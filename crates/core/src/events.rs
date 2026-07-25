@@ -178,6 +178,11 @@ pub struct SessionInfo {
     /// process with no current working directory).
     #[serde(default)]
     pub working_dir: CompactString,
+    /// Preview of the last message in the session, shown as a subtitle under
+    /// the session name in the GUI sidebar. Truncated by the frontend if it
+    /// exceeds the available width.
+    #[serde(default)]
+    pub last_message: CompactString,
 }
 
 /// Token usage summary.

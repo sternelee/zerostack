@@ -176,6 +176,11 @@ impl CoreEngine {
                 message_count: s.messages.len(),
                 created_at: s.created_at.clone(),
                 working_dir: s.working_dir.clone(),
+                last_message: s
+                    .messages
+                    .last()
+                    .map(|m| preview_text(&m.content))
+                    .unwrap_or_default(),
             })
             .collect();
 
@@ -926,6 +931,11 @@ impl CoreEngine {
                 message_count: s.messages.len(),
                 created_at: s.created_at.clone(),
                 working_dir: s.working_dir.clone(),
+                last_message: s
+                    .messages
+                    .last()
+                    .map(|m| preview_text(&m.content))
+                    .unwrap_or_default(),
             })
             .collect();
         vec![CoreEvent::SessionListUpdated { sessions }]
@@ -1036,4 +1046,17 @@ fn undo_last_exchange(session: &mut Session) -> usize {
         }
     }
     removed
+}
+
+/// Truncate a long message content down to a short preview suitable for the
+/// sidebar. Keeps the start of the text and adds a trailing ellipsis so the
+/// frontend doesn't have to measure huge strings.
+pub fn preview_text(s: &CompactString) -> CompactString {
+    const PREVIEW_LEN: usize = 200;
+    let count = s.chars().count();
+    if count <= PREVIEW_LEN {
+        s.clone()
+    } else {
+        CompactString::new(s.chars().take(PREVIEW_LEN - 1).collect::<String>() + "…")
+    }
 }

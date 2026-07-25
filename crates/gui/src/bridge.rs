@@ -137,6 +137,11 @@ fn run_event_loop(
                     message_count: s.messages.len(),
                     created_at: s.created_at,
                     working_dir: s.working_dir,
+                    last_message: s
+                        .messages
+                        .last()
+                        .map(|m| zerostack_core::engine::preview_text(&m.content))
+                        .unwrap_or_default(),
                 });
             }
         }
@@ -192,6 +197,11 @@ fn run_event_loop(
                         message_count: s.messages.len(),
                         created_at: s.created_at,
                         working_dir: s.working_dir,
+                        last_message: s
+                            .messages
+                            .last()
+                            .map(|m| m.content.clone())
+                            .unwrap_or_default(),
                     })
                     .collect();
                 let _ = poll_tx.send(CoreEvent::SessionListUpdated { sessions });
