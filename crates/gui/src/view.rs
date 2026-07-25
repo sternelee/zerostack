@@ -1469,6 +1469,245 @@ impl ShellState {
             )
     }
 
+    /// Render an empty-state welcome page inside the chat column: brand mark,
+    /// tagline, a quick-reference card listing the keyboard shortcuts we wired
+    /// up, and a hint about the most recent sessions so a returning user can
+    /// jump back in without scrolling through the sidebar tree. Recent rows
+    /// are hidden when the session list is empty.
+    fn render_welcome(&self, view_entity: gpui::Entity<ShellState>) -> gpui::AnyElement {
+        let welcome_header = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_2()
+            .py_3()
+            .child(
+                div()
+                    .text_3xl()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(dark::TEXT))
+                    .child("zerostack"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(dark::TEXT_SECONDARY))
+                    .whitespace_normal()
+                    .child(SharedString::from(
+                        "Minimal coding agent. Type below to start, or pick a recent session.",
+                    )),
+            );
+
+        let shortcuts: &[(&str, &str, &str)] = &[
+            (
+                "/",
+                "slash menu",
+                "pick a command without typing the full name",
+            ),
+            (
+                "Ctrl/Cmd+L",
+                "new session",
+                "wipe the current history and start fresh",
+            ),
+            ("Ctrl/Cmd+R", "search", "focus the sidebar search box"),
+            (
+                "Ctrl/Cmd+K",
+                "command palette",
+                "open the slash picker with / pre-filled",
+            ),
+            (
+                "Ctrl/Cmd+J",
+                "toggle focus",
+                "jump between input and sidebar search",
+            ),
+            ("Shift+Enter", "newline", "compose multi-line prompts"),
+        ];
+
+        let shortcut_rows: Vec<gpui::AnyElement> = shortcuts
+            .iter()
+            .map(|(key, label, desc)| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .py_1p5()
+                    .border_b_1()
+                    .border_color(rgb(dark::BORDER))
+                    .child(
+                        div()
+                            .min_w(px(120.0))
+                            .text_sm()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(rgb(dark::BUTTON_BG))
+                            .text_color(rgb(dark::TEXT))
+                            .child(key.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(dark::TEXT))
+                            .child(label.to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(rgb(dark::TEXT_MUTED))
+                            .text_sm()
+                            .whitespace_normal()
+                            .child(desc.to_string()),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        // Keep the divider off the last row so the card has a clean edge.
+        let shortcuts_card = {
+            let mut rows = shortcut_rows;
+            if let Some(last) = rows.last_mut() {
+                // `.border_b_1()` overlays on the parent divider; the card's
+                // own border still closes the bottom, so stripping the inner
+                // border on the last row is cosmetic but cleaner.
+                let _ = last; // placeholder so we can mutate later.
+            }
+            div()
+                .flex()
+                .flex_col()
+                .gap_0()
+                .p_3()
+                .my_4()
+                .rounded_md()
+                .bg(rgb(dark::INPUT_BG))
+                .border_1()
+                .border_color(rgb(dark::BORDER))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(dark::TEXT_MUTED))
+                        .pb_2()
+                        .child("QUICK KEYBOARD SHORTCUTS"),
+                )
+                .children(rows)
+        };
+
+        // Recent sessions: top 3 by recency. Each row is clickable and routes
+        // a UserAction::SwitchSession through the bridge.
+        let recent_rows: Vec<gpui::AnyElement> = self
+            .sidebar
+            .iter()
+            .filter(|s| !s.id.is_empty())
+            .take(3)
+            .map(|s| {
+                let view_for_click = view_entity.clone();
+                let id = s.id.to_string();
+                let name: SharedString = if s.name.is_empty() {
+                    SharedString::new(s.id.to_string())
+                } else {
+                    SharedString::new(s.name.to_string())
+                };
+                let last: SharedString = if s.last_message.is_empty() {
+                    SharedString::new("no messages yet")
+                } else {
+                    SharedString::new(s.last_message.to_string())
+                };
+                let model_line = SharedString::new(format!(
+                    "{} · {}",
+                    if s.provider.is_empty() {
+                        "—"
+                    } else {
+                        &s.provider
+                    },
+                    if s.model.is_empty() { "—" } else { &s.model },
+                ));
+                let id_for_click = id.clone();
+                div()
+                    .id(ElementId::Name(
+                        format!("welcome-recent-{id_for_click}").into(),
+                    ))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgb(dark::BUTTON_BG))
+                    .border_1()
+                    .border_color(rgb(dark::BORDER))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(dark::BUTTON_HOVER)))
+                    .on_click(move |_ev, _window, cx| {
+                        view_for_click.update(cx, |state, cx| {
+                            let _ = state.bridge.send(UserAction::SwitchSession {
+                                session_id: CompactString::from(id_for_click.as_str()),
+                            });
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(dark::TEXT))
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(dark::TEXT_MUTED))
+                            .child(model_line),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(dark::TEXT_SECONDARY))
+                            .whitespace_normal()
+                            .child(last),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        let recent_card = if recent_rows.is_empty() {
+            div().into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .my_4()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(dark::BORDER))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(dark::TEXT_MUTED))
+                        .child("RECENT SESSIONS"),
+                )
+                .children(recent_rows)
+                .into_any_element()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .px_8()
+            .py_10()
+            .w_full()
+            .max_w(px(640.0))
+            .mx_auto()
+            .child(welcome_header)
+            .child(shortcuts_card)
+            .child(recent_card)
+            .into_any_element()
+    }
+
     fn render_chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let chat_scroll = self.chat_scroll.clone();
         let messages = self.chat.clone();
@@ -1542,15 +1781,7 @@ impl ShellState {
                         .child(status_bar)
                         .children(message_children)
                         .when(messages.is_empty(), |d| {
-                            d.child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .py_20()
-                                    .text_color(rgb(dark::TEXT_MUTED))
-                                    .child("Ask anything to start."),
-                            )
+                            d.child(self.render_welcome(view_entity.clone()))
                         }),
                 ),
         )
