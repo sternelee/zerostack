@@ -1164,6 +1164,7 @@ impl ShellState {
             .flex()
             .flex_col()
             .w(px(320.0))
+            .flex_shrink_0()
             .h_full()
             .bg(rgb(dark::SIDEBAR_BG))
             .border_r_1()
@@ -2777,6 +2778,7 @@ impl Render for ShellState {
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .child(self.render_chat(cx))
