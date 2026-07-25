@@ -25,6 +25,7 @@ use zerostack_core::events::SessionInfo;
 use zerostack_core::events::UserAction;
 
 use crate::GuiBridge;
+use crate::markdown::{BlockKind, MarkdownBlock, MarkdownSpan, parse_markdown};
 use crate::theme::dark;
 
 /// The high-level shape of a row in the chat column. We collapse the engine's
@@ -1992,12 +1993,175 @@ fn render_message(msg: &ChatMessage, view_entity: gpui::Entity<ShellState>) -> g
     }
 }
 
+/// Render assistant / tool / system text as markdown.
+///
+/// The TUI's `markdown.rs` turns the source into a styled ANSI stream; here
+/// we tokenize via `crate::markdown` and rebuild each block as a small
+/// `Div` tree. Inline spans within a paragraph live in the same `flex_row`
+/// container so they wrap naturally. Code blocks get a monospace, padded,
+/// bordered panel; inline code gets a chip background; bold / italic /
+/// strikethrough / links use native gpui text primitives.
+fn render_markdown_body(text: &str) -> gpui::AnyElement {
+    let blocks: Vec<MarkdownBlock> = parse_markdown(text);
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .text_color(rgb(dark::TEXT))
+        .text_sm()
+        .children(blocks.into_iter().map(|block| render_markdown_block(block)))
+        .into_any_element()
+}
+
+fn render_markdown_block(block: MarkdownBlock) -> gpui::AnyElement {
+    match block.kind {
+        BlockKind::Heading(level) => {
+            let size = match level {
+                1 => 22.0,
+                2 => 19.0,
+                3 => 17.0,
+                _ => 15.0,
+            };
+            let top_pad = if level <= 2 { 6.0 } else { 4.0 };
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .mt(px(top_pad))
+                .text_size(px(size))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(rgb(dark::TEXT))
+                .children(block.spans.into_iter().map(render_markdown_span))
+                .into_any_element()
+        }
+        BlockKind::Paragraph => div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .text_color(rgb(dark::TEXT))
+            .children(block.spans.into_iter().map(render_markdown_span))
+            .into_any_element(),
+        BlockKind::CodeBlock(lang) => {
+            let joined: String = block
+                .spans
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>()
+                .trim_end_matches('\n')
+                .to_string();
+            let lang_label = lang.clone();
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .my_1()
+                .p_3()
+                .rounded_md()
+                .bg(rgb(dark::TOOL_BUBBLE_BG))
+                .border_1()
+                .border_color(rgb(dark::BORDER))
+                .when(lang_label.is_some(), |d| {
+                    let l = lang_label.unwrap();
+                    d.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(dark::TEXT_MUTED))
+                            .child(l.to_string()),
+                    )
+                })
+                .child(
+                    div()
+                        .font_family("ui-monospace")
+                        .text_xs()
+                        .text_color(rgb(dark::TEXT))
+                        .whitespace_normal()
+                        .child(joined),
+                )
+                .into_any_element()
+        }
+        BlockKind::ListItem(marker) => {
+            let prefix = match marker {
+                Some(n) => format!("{n}. "),
+                None => "\u{2022} ".to_string(),
+            };
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .child(
+                    div()
+                        .text_color(rgb(dark::TEXT_MUTED))
+                        .min_w(px(28.0))
+                        .child(prefix),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .text_color(rgb(dark::TEXT))
+                        .flex_1()
+                        .min_w_0()
+                        .children(block.spans.into_iter().map(render_markdown_span)),
+                )
+                .into_any_element()
+        }
+        BlockKind::BlockQuote => div()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .pl_3()
+            .border_l_2()
+            .border_color(rgb(dark::ACCENT))
+            .text_color(rgb(dark::TEXT_SECONDARY))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .flex_1()
+                    .children(block.spans.into_iter().map(render_markdown_span)),
+            )
+            .into_any_element(),
+        BlockKind::Hr => div()
+            .h(px(1.0))
+            .w_full()
+            .bg(rgb(dark::BORDER))
+            .into_any_element(),
+    }
+}
+
+fn render_markdown_span(span: MarkdownSpan) -> gpui::AnyElement {
+    let mut d = div().text_color(rgb(dark::TEXT)).text_sm();
+    if span.bold {
+        d = d.font_weight(gpui::FontWeight::BOLD);
+    }
+    if span.italic {
+        d = d.italic();
+    }
+    if span.strikethrough {
+        d = d.line_through();
+    }
+    if span.code {
+        d = d
+            .font_family("ui-monospace")
+            .text_xs()
+            .px_1()
+            .rounded_sm()
+            .bg(rgb(dark::BUTTON_BG));
+    }
+    if span.link.is_some() {
+        d = d.text_color(rgb(dark::ACCENT)).underline();
+    }
+    d.child(span.text.to_string()).into_any_element()
+}
+
 fn render_message_text(msg: &ChatMessage) -> gpui::AnyElement {
-    let (bg, fg, label) = match msg.role {
-        Role::User => (rgb(dark::USER_BUBBLE_BG), rgb(dark::TEXT), "you"),
-        Role::Assistant => (rgb(dark::ASST_BUBBLE_BG), rgb(dark::TEXT), "zerostack"),
-        Role::Tool => (rgb(dark::TOOL_BUBBLE_BG), rgb(dark::TEXT_SECONDARY), "tool"),
-        Role::System => (rgba(0x00000000), rgb(dark::TEXT_MUTED), "system"),
+    let (bg, label) = match msg.role {
+        Role::User => (rgb(dark::USER_BUBBLE_BG), "you"),
+        Role::Assistant => (rgb(dark::ASST_BUBBLE_BG), "zerostack"),
+        Role::Tool => (rgb(dark::TOOL_BUBBLE_BG), "tool"),
+        Role::System => (rgba(0x00000000), "system"),
         _ => unreachable!("render_message_text handles non-special roles"),
     };
 
@@ -2017,7 +2181,7 @@ fn render_message_text(msg: &ChatMessage) -> gpui::AnyElement {
                 .text_color(rgb(dark::TEXT_MUTED))
                 .child(label),
         )
-        .child(div().text_color(fg).text_sm().child(msg.content.clone()))
+        .child(render_markdown_body(msg.content.as_str()))
         .into_any_element()
 }
 

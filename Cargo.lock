@@ -13558,6 +13558,7 @@ dependencies = [
  "gpui_macros",
  "gpui_platform",
  "gpui_windows",
+ "pulldown-cmark",
  "tokio",
  "zerostack-core",
 ]

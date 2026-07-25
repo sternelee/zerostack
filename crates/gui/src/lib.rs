@@ -2,6 +2,7 @@
 #![allow(clippy::type_complexity)]
 
 pub mod bridge;
+pub mod markdown;
 pub mod theme;
 pub mod view;
 

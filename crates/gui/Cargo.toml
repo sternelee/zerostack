@@ -22,6 +22,7 @@ gpui_platform = { path = "../../../../../Downloads/zed-main/crates/gpui_platform
 gpui_macros = { path = "../../../../../Downloads/zed-main/crates/gpui_macros" }
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
 compact_str = { version = "0.9", features = ["serde"] }
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_macos = { path = "../../../../../Downloads/zed-main/crates/gpui_macos", features = ["font-kit"] }
