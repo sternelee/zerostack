@@ -2367,6 +2367,7 @@ fn render_project_row(
         .id(project_id)
         .flex()
         .items_center()
+        .w_full()
         .gap_2()
         .px_3()
         .py_2()
@@ -2414,13 +2415,12 @@ fn render_project_row(
                 .flex_1()
                 .min_w_0()
                 .gap_0()
-                .overflow_x_hidden()
                 .child(
                     div()
                         .text_sm()
                         .text_color(rgb(dark::TEXT))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .overflow_x_hidden()
+                        .truncate()
                         .child(SharedString::new(group.label.clone())),
                 )
                 .when(!group.hint.is_empty() && group.hint != group.label, |d| {
@@ -2428,7 +2428,7 @@ fn render_project_row(
                         div()
                             .text_xs()
                             .text_color(rgb(dark::TEXT_MUTED))
-                            .overflow_x_hidden()
+                            .truncate()
                             .child(SharedString::new(group.hint.clone())),
                     )
                 }),
@@ -2513,6 +2513,7 @@ fn render_session_row(
         ))
         .flex()
         .flex_col()
+        .w_full()
         .gap_0()
         .px_3()
         .pl_5()
@@ -2536,6 +2537,7 @@ fn render_session_row(
             div()
                 .flex()
                 .flex_row()
+                .w_full()
                 .items_center()
                 .gap_2()
                 .overflow_x_hidden()
@@ -2544,7 +2546,7 @@ fn render_session_row(
                         .flex_1()
                         .min_w_0()
                         .text_sm()
-                        .overflow_x_hidden()
+                        .truncate()
                         .text_color(primary_color)
                         .child(name.clone()),
                 )
@@ -2569,7 +2571,7 @@ fn render_session_row(
             div()
                 .text_xs()
                 .text_color(rgb(dark::TEXT_MUTED))
-                .overflow_x_hidden()
+                .truncate()
                 .child(meta.clone()),
         )
         .when(!working_dir.is_empty(), |d| {
@@ -2577,7 +2579,7 @@ fn render_session_row(
                 div()
                     .text_xs()
                     .text_color(rgb(dark::TEXT_MUTED))
-                    .overflow_x_hidden()
+                    .truncate()
                     .italic()
                     .child(SharedString::new(truncate_middle(&working_dir, 48))),
             )
