@@ -1828,7 +1828,13 @@ impl ShellState {
             .map(|msg| render_message(msg, view_entity.clone()))
             .collect();
 
-        div().flex_1().min_h_0().bg(rgb(dark::CHAT_BG)).child(
+        // The outer wrapper here is a flex *column* so the inner
+        // `chat-scroll-area` div can use `flex_1()` to claim the wrapper's
+        // remaining height. Without `flex` on this wrapper, the inner div falls
+        // back to content-fit height and `overflow_y_scroll` has nothing to
+        // clip — so wheel events and PageUp/Down would hit a zero-budget
+        // scroll region. This was the silent regression that broke scrolling.
+        div().flex_1().min_h_0().bg(rgb(dark::CHAT_BG)).flex().flex_col().child(
             div()
                 .id("chat-scroll-area")
                 .flex_1()
