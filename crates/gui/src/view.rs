@@ -15,9 +15,10 @@ use std::time::Duration;
 use compact_str::CompactString;
 use gpui::{
     App, Bounds, Context, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    GlobalElementId, KeyDownEvent, LayoutId, Pixels, Render, ScrollHandle, ScrollStrategy,
-    SharedString, Style, TitlebarOptions, UTF16Selection, UniformListScrollHandle, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, relative, rgb, rgba, size, uniform_list,
+    GlobalElementId, KeyDownEvent, LayoutId, Pixels, Point, Render, ScrollDelta, ScrollHandle,
+    ScrollStrategy, SharedString, Style, TitlebarOptions, UTF16Selection, UniformListScrollHandle,
+    Window, WindowBounds, WindowOptions, div, prelude::*, px, relative, rgb, rgba, size,
+    uniform_list,
 };
 use gpui_platform::application;
 use zerostack_core::events::CoreEvent;
@@ -422,6 +423,13 @@ pub struct ShellState {
     /// Scroll handle for the chat message list. Long chats stay inside the column
     /// instead of pushing the input box off-screen.
     chat_scroll: ScrollHandle,
+    /// Whether new content should auto-scroll the chat to the bottom. Defaults
+    /// `true` (follow-tail on first session), flips to `false` whenever the user
+    /// actively scrolls away — either via the mouse wheel, PageUp/Shift+Up, or
+    /// Cmd/Ctrl+Home to jump to the top. Re-engages when the user scrolls back
+    /// down to the bottom (wheel down, PageDown, Cmd/Ctrl+End) so an incoming
+    /// agent reply doesn't strand them mid-history.
+    chat_follow_tail: bool,
 
     /// Last `current_session_id` we already scrolled the sidebar to. We
     /// compare against it on every paint to decide whether a fresh scroll
@@ -521,6 +529,7 @@ impl ShellState {
             sidebar_scroll: UniformListScrollHandle::new(),
             slash_popup_scroll: UniformListScrollHandle::new(),
             chat_scroll: ScrollHandle::new(),
+            chat_follow_tail: true,
             last_scrolled_session_id: SharedString::new(""),
             cursor_visible: true,
             slash_popup_visible: false,
@@ -809,13 +818,55 @@ impl ShellState {
                 self.is_thinking = false;
             }
         }
-        // Follow-tail: when new chat content arrives, jump to the last message so
-        // the user sees the new message. The scrollable chat container now has the
-        // status bar as child 0 and the messages as children 1..=N, so the last
-        // message index is `self.chat.len()`.
+        // Follow-tail: jump to the bottom only if the user has stayed scrolled
+        // to the bottom. If they walked up to read history, leave their scroll
+        // position alone — a streaming reply should not drag them away.
         if self.chat.len() > prev_len {
-            self.chat_scroll.scroll_to_item(self.chat.len());
+            self.maybe_follow_tail();
         }
+    }
+
+    /// Snap the chat viewport to the bottom and re-arm follow-tail, but only if
+    /// we've been holding the tail the whole time. Called from every code path
+    /// that appends new chat content (new message, streaming delta, tool/perm
+    /// card) so a reply in progress keeps the new text in view.
+    fn maybe_follow_tail(&mut self) {
+        if self.chat_follow_tail {
+            self.chat_scroll.scroll_to_bottom();
+            self.chat_follow_tail = true;
+        }
+    }
+
+    /// True if the chat viewport is currently parked at the bottom (within a
+    /// 1px tolerance so streaming deltas don't yank us off just because of a
+    /// sub-pixel fractional offset).
+    fn is_chat_at_bottom(&self) -> bool {
+        let offset = self.chat_scroll.offset();
+        let max = self.chat_scroll.max_offset();
+        offset.y + px(1.0) >= max.height
+    }
+
+    /// Adjust the chat scroll offset by a pixel delta and re-derive follow-tail
+    /// from the new position. Positive `dy` scrolls the viewport down (newer
+    /// messages come into view); negative goes back up into history.
+    fn scroll_chat_by(&mut self, dy: f32) {
+        let offset = self.chat_scroll.offset();
+        let max = self.chat_scroll.max_offset();
+        let viewport_h = self.chat_scroll.bounds().size.height.as_f32().max(1.0);
+        let current_y = offset.y.as_f32();
+        let max_y = max.height.as_f32();
+        let new_y = if max_y <= viewport_h {
+            // The chat content already fits; ignore the delta so an unused
+            // scroll gesture doesn't blank the view.
+            0.0
+        } else {
+            (current_y + dy).clamp(0.0, max_y)
+        };
+        self.chat_scroll.set_offset(Point {
+            x: offset.x,
+            y: px(new_y),
+        });
+        self.chat_follow_tail = self.is_chat_at_bottom();
     }
 
     fn append_to_streaming(&mut self, text: CompactString) {
@@ -835,6 +886,10 @@ impl ShellState {
                 *current = SharedString::new(combined);
             }
         }
+        // Token-level follow-tail: a reply unfolding in chunks needs to reveal
+        // each new token if (and only if) the user was already parked at the
+        // bottom. Without this, watch the bottom-edge tick while streaming.
+        self.maybe_follow_tail();
     }
 
     fn submit_input(&mut self, cx: &mut Context<Self>) {
@@ -1708,10 +1763,20 @@ impl ShellState {
             .into_any_element()
     }
 
-    fn render_chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_chat(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let chat_scroll = self.chat_scroll.clone();
         let messages = self.chat.clone();
         let view_entity = cx.entity().clone();
+
+        // Re-derive follow-tail from the current scroll position before painting.
+        // This catches both cases without a gesture (e.g. a session switch that
+        // resized the chat to be shorter than the viewport — `is_chat_at_bottom`
+        // would always read true there, so re-engaging is harmless) and the
+        // case where the user wheels back down to the bottom of the conversation
+        // without committing a follow-tail-affecting event. Polling here makes
+        // the state a function of where the viewport currently sits, which is
+        // the property `maybe_follow_tail` keys off when new content arrives.
+        self.chat_follow_tail = self.is_chat_at_bottom();
 
         // Lightweight status row inside the chat scrollable area: provider /
         // model · mode · token total · live "thinking" / "idle" pill on the
@@ -1769,6 +1834,74 @@ impl ShellState {
                 .flex_1()
                 .overflow_y_scroll()
                 .track_scroll(&chat_scroll)
+                .on_scroll_wheel(
+                    cx.listener(|this, ev: &gpui::ScrollWheelEvent, _window, cx| {
+                        // Wheel up means the user dragged the viewport upward into
+                        // history. Disable follow-tail so the streaming reply we are
+                        // about to receive does not snap them back down mid-line.
+                        // Wheel-down gestures don't touch the flag — the next
+                        // render of `render_chat` polls `is_chat_at_bottom` and
+                        // re-engages the tail when the user reaches the bottom.
+                        let dy = match ev.delta {
+                            ScrollDelta::Pixels(p) => p.y.as_f32(),
+                            ScrollDelta::Lines(p) => p.y * 24.0,
+                        };
+                        if dy < 0.0 {
+                            this.chat_follow_tail = false;
+                        }
+                        cx.notify();
+                    }),
+                )
+                .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+                    // Map the page/arrow nav keys to scroll deltas. Cmd/Ctrl
+                    // modifier jumps to the top or bottom and re-engages /
+                    // releases follow-tail accordingly. Shift+Up/Down is a
+                    // finer-grained line-by-line walk that doesn't fight with
+                    // the input listener (which owns the plain Up/Down keys
+                    // for prompt-history recall).
+                    let key = ev.keystroke.key.as_str();
+                    let mods = &ev.keystroke.modifiers;
+                    let viewport_h = this.chat_scroll.bounds().size.height.as_f32().max(1.0);
+                    let bump = viewport_h * 0.9;
+                    let page_h = viewport_h - 32.0;
+                    let handled = match key {
+                        "pageup" => {
+                            this.scroll_chat_by(-page_h);
+                            true
+                        }
+                        "pagedown" => {
+                            this.scroll_chat_by(page_h);
+                            true
+                        }
+                        "up" if mods.shift => {
+                            this.scroll_chat_by(-bump);
+                            true
+                        }
+                        "down" if mods.shift => {
+                            this.scroll_chat_by(bump);
+                            true
+                        }
+                        "home" if mods.platform || mods.control => {
+                            let offset = this.chat_scroll.offset();
+                            this.chat_scroll.set_offset(Point {
+                                x: offset.x,
+                                y: px(0.0),
+                            });
+                            this.chat_follow_tail = false;
+                            true
+                        }
+                        "end" if mods.platform || mods.control => {
+                            this.chat_scroll.scroll_to_bottom();
+                            this.chat_follow_tail = true;
+                            true
+                        }
+                        _ => false,
+                    };
+                    if handled {
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }))
                 .child(
                     div()
                         .flex()

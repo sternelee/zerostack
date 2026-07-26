@@ -13503,7 +13503,7 @@ dependencies = [
 
 [[package]]
 name = "zerostack-core"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -13549,7 +13549,7 @@ dependencies = [
 
 [[package]]
 name = "zerostack-gui"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "compact_str 0.9.1",
  "gpui",
