@@ -1852,56 +1852,6 @@ impl ShellState {
                         cx.notify();
                     }),
                 )
-                .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
-                    // Map the page/arrow nav keys to scroll deltas. Cmd/Ctrl
-                    // modifier jumps to the top or bottom and re-engages /
-                    // releases follow-tail accordingly. Shift+Up/Down is a
-                    // finer-grained line-by-line walk that doesn't fight with
-                    // the input listener (which owns the plain Up/Down keys
-                    // for prompt-history recall).
-                    let key = ev.keystroke.key.as_str();
-                    let mods = &ev.keystroke.modifiers;
-                    let viewport_h = this.chat_scroll.bounds().size.height.as_f32().max(1.0);
-                    let bump = viewport_h * 0.9;
-                    let page_h = viewport_h - 32.0;
-                    let handled = match key {
-                        "pageup" => {
-                            this.scroll_chat_by(-page_h);
-                            true
-                        }
-                        "pagedown" => {
-                            this.scroll_chat_by(page_h);
-                            true
-                        }
-                        "up" if mods.shift => {
-                            this.scroll_chat_by(-bump);
-                            true
-                        }
-                        "down" if mods.shift => {
-                            this.scroll_chat_by(bump);
-                            true
-                        }
-                        "home" if mods.platform || mods.control => {
-                            let offset = this.chat_scroll.offset();
-                            this.chat_scroll.set_offset(Point {
-                                x: offset.x,
-                                y: px(0.0),
-                            });
-                            this.chat_follow_tail = false;
-                            true
-                        }
-                        "end" if mods.platform || mods.control => {
-                            this.chat_scroll.scroll_to_bottom();
-                            this.chat_follow_tail = true;
-                            true
-                        }
-                        _ => false,
-                    };
-                    if handled {
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }))
                 .child(
                     div()
                         .flex()
@@ -3940,6 +3890,61 @@ impl Render for ShellState {
                     .overflow_x_hidden()
                     .flex()
                     .flex_col()
+                    .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+                        // The chat column wrapper is the common parent of both
+                        // the chat scroll area and the input box, so events
+                        // bubbling from either child reach this listener. The
+                        // input's own listener handles most printable keys and
+                        // calls `stop_propagation` only for keys it owns; the
+                        // few that fall through (PageUp/Down, Shift+Up/Down,
+                        // Cmd/Ctrl+Home/End) are exactly the scroll-navigation
+                        // gestures we want to wire up here. Putting the handler
+                        // here also avoids fighting with the sidebar's own
+                        // listener — sidebar focus doesn't bubble into this
+                        // column, which is the behavior we want.
+                        let key = ev.keystroke.key.as_str();
+                        let mods = &ev.keystroke.modifiers;
+                        let viewport_h = this.chat_scroll.bounds().size.height.as_f32().max(1.0);
+                        let bump = viewport_h * 0.9;
+                        let page_h = viewport_h - 32.0;
+                        let handled = match key {
+                            "pageup" => {
+                                this.scroll_chat_by(-page_h);
+                                true
+                            }
+                            "pagedown" => {
+                                this.scroll_chat_by(page_h);
+                                true
+                            }
+                            "up" if mods.shift => {
+                                this.scroll_chat_by(-bump);
+                                true
+                            }
+                            "down" if mods.shift => {
+                                this.scroll_chat_by(bump);
+                                true
+                            }
+                            "home" if mods.platform || mods.control => {
+                                let offset = this.chat_scroll.offset();
+                                this.chat_scroll.set_offset(Point {
+                                    x: offset.x,
+                                    y: px(0.0),
+                                });
+                                this.chat_follow_tail = false;
+                                true
+                            }
+                            "end" if mods.platform || mods.control => {
+                                this.chat_scroll.scroll_to_bottom();
+                                this.chat_follow_tail = true;
+                                true
+                            }
+                            _ => false,
+                        };
+                        if handled {
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    }))
                     .child(self.render_chat(cx))
                     .child(self.render_input(cx)),
             )
