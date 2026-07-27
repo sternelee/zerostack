@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wasmtime::component::Linker;
@@ -33,6 +34,13 @@ const NAMESPACE_SEPARATOR: &str = "__";
 pub struct ExtensionHost {
     engine: Engine,
     instances: HashMap<ExtensionId, LoadedExtension>,
+    /// Shared session state: (session_name, terminal_title). Cloned into each
+    /// guest store so the host and the extension agree on the same backing
+    /// store, letting the engine observe writes from extensions and vice-
+    /// versa. This matches the same shape used in `src/extension/host.rs`
+    /// for the CLI / TUI; only it lives in core here so the GUI ends up
+    /// linked against it too.
+    session_state: Arc<Mutex<(String, String)>>,
 }
 
 struct LoadedExtension {
@@ -51,12 +59,19 @@ pub struct ExtGuestState {
     pub host_context: ExtensionInfo,
     /// Queued prompts from trigger-prompt calls (drained after command dispatch).
     pub queued_prompts: Vec<String>,
+    /// External directories this extension added via the `external-dirs`
+    /// host import. Canonical absolute paths in insertion order.
+    pub external_dirs: Vec<String>,
+    /// Shared session state: (session_name, terminal_title). Cloned from
+    /// the parent `ExtensionHost` so read/writes hit the same backing
+    /// mutex across host and guests.
+    pub session_state: Arc<Mutex<(String, String)>>,
     wasi_ctx: wasmtime_wasi::WasiCtx,
     wasi_table: wasmtime_wasi::ResourceTable,
 }
 
 impl ExtGuestState {
-    fn new(extension_id: &str) -> Self {
+    fn new(extension_id: &str, session_state: Arc<Mutex<(String, String)>>) -> Self {
         let wasi_ctx = wasmtime_wasi::WasiCtxBuilder::new()
             .inherit_stdout()
             .inherit_stderr()
@@ -73,6 +88,8 @@ impl ExtGuestState {
                 project_trusted: false,
             },
             queued_prompts: Vec::new(),
+            external_dirs: Vec::new(),
+            session_state,
             wasi_ctx,
             wasi_table: wasmtime_wasi::ResourceTable::new(),
         }
@@ -184,6 +201,153 @@ impl self::zerostack::extension::trigger_prompt::Host for ExtGuestState {
 
 impl self::zerostack::extension::types::Host for ExtGuestState {}
 
+// ── Host impl: session_control ────────────────────────────────
+
+impl self::zerostack::extension::session_control::Host for ExtGuestState {
+    fn get_session_name(&mut self) -> wasmtime::component::__internal::String {
+        self.session_state
+            .lock()
+            .map(|s| s.0.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_session_name(
+        &mut self,
+        name: wasmtime::component::__internal::String,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        let name: String = name;
+        if let Ok(mut s) = self.session_state.lock() {
+            s.0 = name;
+        }
+        Ok(())
+    }
+
+    fn set_terminal_title(&mut self, title: wasmtime::component::__internal::String) {
+        let title: String = title;
+        // Save the title so the host (e.g. the GUI shell layer) can restore
+        // it later; in the GUI context this just lands in a slot the host
+        // ignores, mirroring the CLI's behaviour.
+        if let Ok(mut s) = self.session_state.lock() {
+            s.1 = title.clone();
+        }
+    }
+}
+
+// ── Host impl: external_dirs ─────────────────────────────────
+
+impl self::zerostack::extension::external_dirs::Host for ExtGuestState {
+    fn add_dir(
+        &mut self,
+        path: wasmtime::component::__internal::String,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        let resolved = resolve_external_dir(&self.host_context.cwd, &path)
+            .map_err(|e| format!("cannot add external dir: {e}"))?;
+        if self.external_dirs.iter().any(|d| d == &resolved) {
+            return Ok(()); // already added — idempotent
+        }
+        self.external_dirs.push(resolved);
+        Ok(())
+    }
+
+    fn remove_dir(
+        &mut self,
+        path: wasmtime::component::__internal::String,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        let resolved = resolve_external_dir(&self.host_context.cwd, &path)
+            .map_err(|e| format!("cannot resolve external dir: {e}"))?;
+        let before = self.external_dirs.len();
+        self.external_dirs.retain(|d| d != &resolved);
+        if self.external_dirs.len() == before {
+            return Err(format!("directory not in session: {resolved}"));
+        }
+        Ok(())
+    }
+
+    fn list_dirs(&mut self) -> Vec<wasmtime::component::__internal::String> {
+        self.external_dirs.clone()
+    }
+
+    fn has_dir(&mut self, path: wasmtime::component::__internal::String) -> bool {
+        match resolve_external_dir(&self.host_context.cwd, &path) {
+            Ok(resolved) => self.external_dirs.iter().any(|d| d == &resolved),
+            Err(_) => false,
+        }
+    }
+}
+
+/// Resolve and canonicalise an external-dir path. Relative paths are resolved
+/// against `cwd`. The result is an absolute, canonicalised path with all
+/// symlinks followed; non-existent paths and non-directories return Err.
+fn resolve_external_dir(cwd: &str, path: &str) -> Result<String, String> {
+    let p = Path::new(path);
+    let candidate = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        Path::new(cwd).join(p)
+    };
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", candidate.display()))?;
+    if !canonical.is_dir() {
+        return Err(format!("not a directory: {}", canonical.display()));
+    }
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
+// ── Host impl: host_calls ────────────────────────────────────
+
+impl self::zerostack::extension::host_calls::Host for ExtGuestState {
+    fn exec(
+        &mut self,
+        cmd: wasmtime::component::__internal::String,
+        args: wasmtime::component::__internal::Vec<wasmtime::component::__internal::String>,
+    ) -> Result<
+        self::zerostack::extension::host_calls::ExecOutput,
+        wasmtime::component::__internal::String,
+    > {
+        let cmd: String = cmd;
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+        // Run from the extension's cwd so commands like `git diff` resolve
+        // the user's project, not the host's working directory.
+        let cwd = if self.host_context.cwd.is_empty() {
+            std::env::current_dir().ok()
+        } else {
+            Some(std::path::PathBuf::from(&self.host_context.cwd))
+        };
+        let cwd_for_msg: String = cwd
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let mut command = std::process::Command::new(&cmd);
+        command.args(&arg_refs);
+        if let Some(dir) = cwd {
+            command.current_dir(dir);
+        }
+        match command.output() {
+            Ok(out) => Ok(self::zerostack::extension::host_calls::ExecOutput {
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                exit_code: out.status.code().unwrap_or(-1) as i32,
+            }),
+            Err(e) => {
+                tracing::error!(
+                    cmd = %cmd,
+                    args = ?arg_refs,
+                    cwd = %cwd_for_msg,
+                    error = %e,
+                    "host_calls::exec spawn failed"
+                );
+                Err(format!(
+                    "failed to run `{}` in `{}`: {}",
+                    cmd, cwd_for_msg, e
+                ))
+            }
+        }
+    }
+}
+
 // ── ExtensionHost ──────────────────────────────────────────────
 
 impl ExtensionHost {
@@ -196,6 +360,7 @@ impl ExtensionHost {
         Ok(Self {
             engine,
             instances: HashMap::new(),
+            session_state: Arc::new(Mutex::new((String::new(), String::new()))),
         })
     }
 
@@ -230,7 +395,10 @@ impl ExtensionHost {
         >(&mut linker, |state: &mut ExtGuestState| state)
         .map_err(|e| format!("failed to add extension imports to linker: {e}"))?;
 
-        let mut store = Store::new(&self.engine, ExtGuestState::new(extension_id));
+        let mut store = Store::new(
+            &self.engine,
+            ExtGuestState::new(extension_id, self.session_state.clone()),
+        );
         store.set_fuel(GUEST_FUEL).map_err(|e| e.to_string())?;
         store.limiter(|state| state as &mut dyn wasmtime::ResourceLimiter);
 

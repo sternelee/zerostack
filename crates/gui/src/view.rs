@@ -227,11 +227,13 @@ enum SidebarRow {
 /// then type the argument before submitting, mirroring the TUI behavior.
 /// Atomic commands (false) are submitted on Enter directly.
 ///
-/// Only commands the engine itself handles are listed here. The TUI has the
-/// broader picker in `src/ui/pickers/list.rs` (which itself only reflects the
-/// commands available in `BASE_COMMANDS` plus feature flags); the GUI is a
-/// thinner client. Anything missing here that the engine treats as
-/// `unknown command` gets a friendly error from the engine.
+/// The static `SLASH_COMMANDS` table only mirrors what the engine itself
+/// handles; commands registered by Wasm extensions end up in the picker
+/// alongside these (appended by [`slash_matches`]). The TUI does the much
+/// more dramatic split in `src/ui/pickers/list.rs` (BASE_COMMANDS plus a
+/// long `available_commands()` ladder per feature flag) — here we keep the
+/// engine-handled commands static because the GUI doesn't rerun the engine
+/// on each keystroke and the engine still owns the dispatch.
 const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
     ("/clear", "wipe current session history", false),
     ("/new", "alias for /clear", false),
@@ -263,14 +265,61 @@ const SLASH_COMMANDS: &[(&str, &str, bool)] = &[
     ("/quit", "close the window and shut the engine down", false),
 ];
 
-/// Return the subset of [`SLASH_COMMANDS`] whose name starts with `prefix`,
-/// or — when `prefix` is the literal command prefix of an arg-requiring
-/// command followed by a single space — the available argument choices for
-/// that command. Returning the docs-only "atomic" flag so the key handler
-/// treats each choice as immediately actionable (Tab inserts the chosen
-/// value into the buffer; Enter inserts + submits), avoiding an extra
-/// keystroke versus the TUI's "type then press enter" flow.
-fn slash_matches(prefix: &str) -> Vec<(&'static str, &'static str, bool)> {
+/// Read the slash commands currently registered by Wasm extensions.
+///
+/// Mirrors `crate::extension::registry::extension_command_names` from
+/// `src/ui/pickers/list.rs` and `crates/core/src/extension/registry.rs`,
+/// which the TUI also calls. The GUI uses its own copy because it lives
+/// in a different binary (`zerostack-gui`) that doesn't link against the
+/// CLI crate, and the registry is a `OnceLock<Arc<Mutex<…>>>` — we just
+/// need to forward the names that other code paths also see.
+///
+/// Returns an empty `Vec` when the engine feature for extensions is off
+/// (the GUI binary ships with `extensions` enabled by default but a
+/// `--no-default-features` build or a re-export without it shouldn't
+/// break the picker).
+fn extension_slash_entries() -> Vec<(String, String, bool)> {
+    #[cfg(feature = "extensions")]
+    {
+        zerostack_core::extension::registry::extension_command_names()
+            .into_iter()
+            .map(|name| {
+                (
+                    name.clone(),
+                    "extension command".to_string(),
+                    // Treat extension commands as atomic from the GUI's
+                    // perspective: the user types the arg directly into the
+                    // input box (matching how `/model foo` already works
+                    // for engine-handled commands). Some extensions install
+                    // arg-less commands and some install commands that
+                    // *need* body text; we don't introspect either, so
+                    // both behaviours round-trip through the same
+                    // `submit_input` fall-through.
+                    false,
+                )
+            })
+            .collect()
+    }
+    #[cfg(not(feature = "extensions"))]
+    {
+        Vec::new()
+    }
+}
+
+/// Return the subset of `[SLASH_COMMANDS] + extension commands` whose name
+/// starts with `prefix`, or — when `prefix` is the literal command prefix of
+/// an arg-requiring command followed by a single space — the available
+/// argument choices for that command. Returning the docs-only "atomic" flag
+/// so the key handler treats each choice as immediately actionable (Tab
+/// inserts the chosen value into the buffer; Enter inserts + submits),
+/// avoiding an extra keystroke versus the TUI's "type then press enter"
+/// flow.
+///
+/// Returns `Vec<(String, String, bool)>` instead of static refs so we can
+/// heap-allocate the extension names alongside the static engine-handled
+/// ones — the popup renderer doesn't care and `SharedString::new(name)`
+/// clones cheaply.
+fn slash_matches(prefix: &str) -> Vec<(String, String, bool)> {
     // Recognise the boundary where the user just selected an arg-needing
     // command and typed a space — this is where we switch to a chooser. Each
     // choice item's name is just the bare value (`anthropic`) and the key
@@ -284,14 +333,21 @@ fn slash_matches(prefix: &str) -> Vec<(&'static str, &'static str, bool)> {
         };
         return choices
             .iter()
-            .map(|(value, desc)| (*value as &'static str, *desc as &'static str, false))
+            .map(|(value, desc)| (value.to_string(), desc.to_string(), false))
             .collect();
     }
-    SLASH_COMMANDS
+    let mut out: Vec<(String, String, bool)> = SLASH_COMMANDS
         .iter()
-        .copied()
+        .map(|(name, desc, needs_arg)| (name.to_string(), desc.to_string(), *needs_arg))
         .filter(|(name, _, _)| name.starts_with(prefix))
-        .collect()
+        .collect();
+    for (name, desc, atomic) in extension_slash_entries() {
+        if name.starts_with(prefix) && !out.iter().any(|(existing, _, _)| existing == &name) {
+            out.push((name, desc, atomic));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 /// Return the arg-needing slash command whose name precedes the first space
@@ -338,22 +394,29 @@ mod picker_tests {
     #[test]
     fn commands_picker_filters_by_prefix() {
         let v = slash_matches("/");
-        assert!(v.iter().any(|(n, _, _)| *n == "/clear"));
+        assert!(v.iter().any(|(n, _, _)| n == "/clear"));
     }
 
     #[test]
     fn provider_picker_offers_arg_chooser() {
         let v = slash_matches("/provider ");
+        let collected: Vec<String> = v.iter().map(|(n, _, _)| n.clone()).collect();
         assert_eq!(
-            v.iter().map(|(n, _, _)| *n).collect::<Vec<_>>(),
-            vec!["anthropic", "openai", "gemini", "openrouter", "ollama"]
+            collected,
+            vec![
+                "anthropic".to_string(),
+                "openai".to_string(),
+                "gemini".to_string(),
+                "openrouter".to_string(),
+                "ollama".to_string(),
+            ]
         );
     }
 
     #[test]
     fn mode_picker_offers_arg_chooser() {
         let v = slash_matches("/mode ");
-        assert!(v.iter().any(|(n, _, _)| *n == "yolo"));
+        assert!(v.iter().any(|(n, _, _)| n == "yolo"));
         assert_eq!(v.len(), 5);
     }
 
@@ -1133,6 +1196,72 @@ impl ShellState {
             return;
         }
 
+        // Echo the user's input into chat *before* dispatching extensions,
+        // matching the TUI's behavior (it writes the user's command into the
+        // context before dispatch — extension commands don't go through the
+        // engine via `bridge.send`, so the user echo has to land in chat
+        // here to keep the transcript readable. Engine-handled commands
+        // emit their own echo via `SessionListUpdated` / event re-render
+        // and skip the inline path.
+
+        // Wasm extensions register their own slash commands through
+        // `extension::registry`. The engine itself doesn't dispatch those —
+        // `handle_slash_command` only knows its hard-coded list and returns
+        // "unknown command" otherwise — so we mirror what the TUI does in
+        // `src/ui/slash/mod.rs::_ => { extension catch-all }`: when the
+        // command is one of our extension names, run it locally, push any
+        // output into the chat as a system message, and forward any
+        // extension-queued follow-up prompts to the engine as regular
+        // `SendMessage`'s. Engine-handled commands still go down the
+        // `RunSlashCommand` path below.
+        #[cfg(feature = "extensions")]
+        if trimmed.starts_with('/') {
+            // `parts[0]` is the bare command (with the leading slash); we
+            // match against the names the registry exposes, then strip the
+            // slash before dispatching because the Wasm bindings expect
+            // bare names.
+            let head = trimmed.split_whitespace().next().unwrap_or(trimmed);
+            let known: Vec<String> = zerostack_core::extension::registry::extension_command_names();
+            if known.iter().any(|n| n == head) {
+                let cmd_name = head.strip_prefix('/').unwrap_or(head);
+                let full_args = if trimmed.len() > head.len() {
+                    trimmed[head.len()..].trim().to_string()
+                } else {
+                    String::new()
+                };
+                self.push_chat_message_user(trimmed.to_string());
+                self.record_prompt_history(trimmed);
+                self.reset_input_after_submit();
+                // Run the Wasm extension command synchronously. Output is
+                // Optional text; queued prompts is what we need to push
+                // back into the agent loop. The TUI uses `ctx.pending_inputs`
+                // for the same purpose; here we wrap into `SendMessage`.
+                let (output, queued) = zerostack_core::extension::registry::dispatch_with_prompts(
+                    cmd_name, &full_args,
+                );
+                if let Some(text) = output {
+                    let trimmed_text = text.trim();
+                    if !trimmed_text.is_empty() {
+                        self.chat
+                            .push(ChatMessage::assistant(trimmed_text.to_string()));
+                    }
+                }
+                for prompt in queued {
+                    if prompt.trim().is_empty() {
+                        continue;
+                    }
+                    let _ = self.bridge.send(UserAction::SendMessage {
+                        text: CompactString::new(prompt),
+                    });
+                }
+                // Keep `last_error` in sync — extensions shouldn't set it,
+                // but if the engine is offline and the user hits Enter the
+                // dispatcher still needs to reflect that.
+                cx.notify();
+                return;
+            }
+        }
+
         // Slash commands don't go through the agent; they live as their own engine
         // action. Plain text is wrapped in `UserAction::SendMessage`.
         let action = if trimmed.starts_with('/') {
@@ -1150,11 +1279,17 @@ impl ShellState {
             return;
         }
 
-        // Remember this prompt so Up arrow can replay it on demand. We cap at
-        // 64 entries to keep the cap on memory; older entries fall off the
-        // bottom of the deque. Consecutive duplicates collapse into one slot
-        // so the user doesn't have to fish through `/clear`-spam when
-        // recalling.
+        self.record_prompt_history(trimmed);
+        self.push_chat_message_user(trimmed.to_string());
+        self.reset_input_after_submit();
+        cx.notify();
+    }
+
+    /// Side-effect helper inside [`ShellState::submit_input`]: stash the
+    /// echoed prompt in the up-arrow recall history, capped so the deque
+    /// doesn't grow forever. Pulled out as a free helper because both the
+    /// extension branch and the engine branch need to do it.
+    fn record_prompt_history(&mut self, trimmed: &str) {
         if self.prompt_history.last().map(String::as_str) != Some(trimmed) {
             self.prompt_history.push(trimmed.to_string());
             if self.prompt_history.len() > 64 {
@@ -1162,13 +1297,25 @@ impl ShellState {
             }
         }
         self.prompt_history_cursor = None;
+    }
 
-        self.chat.push(ChatMessage::user(trimmed.to_string()));
+    /// Side-effect helper in submit_input: append the user's message to
+    /// chat history so the transcript keeps a clean echo. The TUI writes
+    /// this in `Renderer::write`; we reuse the same plumbing the bridge
+    /// emits after a successful round-trip, except extensions don't drive
+    /// the bridge, so we draw it ourselves.
+    fn push_chat_message_user(&mut self, body: String) {
+        self.chat.push(ChatMessage::user(body));
+    }
+
+    /// Side-effect helper in submit_input: clear the input buffer, reset
+    /// the slash popup, and bring the cursor home. Used by both branches
+    /// of submit_input; nothing here is bridge-specific.
+    fn reset_input_after_submit(&mut self) {
         self.input_text = SharedString::new("");
         self.input_cursor = 0;
         self.slash_popup_visible = false;
         self.slash_popup_selected = 0;
-        cx.notify();
     }
 
     /// Walk backward through the user's prompt history. Called when the user
@@ -2338,7 +2485,7 @@ impl ShellState {
                                     if let Some((name, _, _)) =
                                         matches.get(this.slash_popup_selected)
                                     {
-                                        let name_str = *name;
+                                        let name_str = name.clone();
                                         if let Some(arg_prefix) =
                                             strip_command_arg_prefix(this.input_text.as_str())
                                         {
@@ -2370,7 +2517,7 @@ impl ShellState {
                                     if let Some((name, _, _)) =
                                         matches.get(this.slash_popup_selected)
                                     {
-                                        let name_str = *name;
+                                        let name_str = name.clone();
                                         if let Some(arg_prefix) =
                                             strip_command_arg_prefix(this.input_text.as_str())
                                         {
@@ -2532,8 +2679,22 @@ impl ShellState {
                         cx.processor(move |_this, range: std::ops::Range<usize>, _window, _cx| {
                             range
                                 .map(|idx| {
-                                    let (name, desc, _needs_arg) = matches[idx];
+                                    // `matches[idx]` would try to move the
+                                    // String pair out of the captured Vec,
+                                    // which has no mutable handle inside
+                                    // this `Fn`/`FnMut` processor closure.
+                                    // Clone the tuple so each row holds its
+                                    // own owned strings, and the popup
+                                    // closure can use them freely below.
+                                    let (name, desc, _needs_arg) = matches[idx].clone();
                                     let view_for_click = view_entity.clone();
+                                    // Two more copies for the click callback
+                                    // closure: that closure outlives this
+                                    // `map` step so we can't borrow `name`
+                                    // across the iteration boundary, and
+                                    // `.child(name)` on the row consumes
+                                    // its argument below.
+                                    let name_for_click = name.clone();
                                     div()
                                         .id(("slash-cmd", idx))
                                         .flex()
@@ -2570,8 +2731,8 @@ impl ShellState {
                                         .on_click(move |_ev, _window, cx| {
                                             view_for_click.update(cx, |state, cx| {
                                                 state.input_text =
-                                                    SharedString::new(name.to_string());
-                                                state.input_cursor = name.chars().count();
+                                                    SharedString::new(name_for_click.to_string());
+                                                state.input_cursor = name_for_click.chars().count();
                                                 state.slash_popup_visible = false;
                                                 cx.notify();
                                             });
@@ -4203,6 +4364,39 @@ pub fn run() {
         &provider,
         zerostack_core::permission::SecurityMode::Yolo,
     );
+
+    // Initialise the Wasm extension registry before any UI state is built.
+    // We pass an empty path list so the manager only picks up auto-discovered
+    // extensions from the standard search directories — `~/.config/zerostack/extensions`
+    // on Linux/Windows and `~/Library/Application Support/zerostack/extensions`
+    // on macOS, plus the in-tree `tests/extensions/` artifacts when the
+    // binary is run from the workspace root. We don't expose `--extension`
+    // CLI flags for the GUI yet; mirroring the TUI would require adding a
+    // clap layer in `crates/gui/src/main.rs`, which is more surface than
+    // this slim mapper warrants. The TUI's matching call site lives in
+    // `src/startup.rs::initialise_extensions`.
+    //
+    // Errors are logged but not fatal: a broken extension in the user's
+    // home dir shouldn't keep the GUI from booting. The Wasm host's own
+    // `load_all()` path already collects per-path problems into
+    // `manager.errors()` and emits a `tracing::warn!` per entry, so by the
+    // time we get here the manager either succeeded or has a coherent
+    // what-loaded-and-what-didn't state.
+    #[cfg(feature = "extensions")]
+    if let Err(e) =
+        zerostack_core::extension::registry::init_from_paths(&[] as &[std::path::PathBuf])
+    {
+        tracing::warn!(error = %e, "extension registry init failed; picker will still show engine commands");
+    } else {
+        let names = zerostack_core::extension::registry::extension_command_names();
+        if !names.is_empty() {
+            tracing::info!(
+                count = names.len(),
+                ?names,
+                "extensions loaded into GUI slash picker"
+            );
+        }
+    };
 
     application().run(move |cx: &mut App| {
         let bridge_for_state = bridge;

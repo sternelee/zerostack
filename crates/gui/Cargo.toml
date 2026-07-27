@@ -16,7 +16,7 @@ name = "zerostack-gui"
 path = "src/main.rs"
 
 [dependencies]
-zerostack-core = { path = "../core", default-features = false }
+zerostack-core = { path = "../core", default-features = false, features = ["extensions"] }
 gpui = { path = "../../../../../Downloads/zed-main/crates/gpui" }
 gpui_platform = { path = "../../../../../Downloads/zed-main/crates/gpui_platform" }
 gpui_macros = { path = "../../../../../Downloads/zed-main/crates/gpui_macros" }
