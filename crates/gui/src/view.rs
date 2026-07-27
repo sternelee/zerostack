@@ -364,6 +364,17 @@ mod picker_tests {
     }
 }
 
+// Close-confirm tests live behind a manual run — the modal flow needs a
+// real GPUI window and a real platform close event to exercise
+// end-to-end (latch flips, modal opens on `on_window_should_close`,
+// Esc cancels, Quit arms the latch, second close exits). Covering it
+// here would require pulling in gpui::TestAppContext plus a real
+// AnyWindowHandle to feed `Window::on_window_should_close`, which
+// crosses into "running a process" territory rather than a unit test.
+// The `[rollback]` checks below live in the manual QA path: install
+// with `cargo install --path . --debug`, run, click the red dot, hit
+// Esc inside the modal, hit Quit, repeat.
+
 /// State owned by the root view. Lives inside one main window. The bridge is owned
 /// directly by the state; the polling tick operates on the same Entity without needing
 /// to share the bridge.
@@ -492,6 +503,23 @@ pub struct ShellState {
     /// history walk should start from the *oldest* entry on Up, and end on the
     /// *pending draft* on Down.
     prompt_history_cursor: Option<usize>,
+
+    /// True while the close-confirmation modal is on screen. The platform
+    /// window-close callback flips this on (and returns `false` from
+    /// `Window::on_window_should_close` so the window stays open until the
+    /// user resolves the dialog). `/quit` and `/exit` slash commands bypass
+    /// the modal by design — those are deliberate actions, not an
+    /// accidental close-button tap.
+    close_confirm_visible: bool,
+    /// Latched once the user has clicked "Quit" in the confirm modal. The
+    /// window-close callback checks this on the next platform close event
+    /// and returns `true` so the close goes through. Without this latch, the
+    /// modal would re-open indefinitely on each cx.quit() round.
+    close_confirm_armed: bool,
+    /// Focus target for the confirm modal. Distinct from the input and
+    /// sidebar handles so we can hand focus to it on open and recover it on
+    /// dismiss without confusing the existing focus paths.
+    close_confirm_focus: FocusHandle,
 }
 
 /// One permission prompt the engine has handed us but not yet resolved. We
@@ -542,7 +570,202 @@ impl ShellState {
             pending_permissions: std::collections::HashMap::new(),
             prompt_history: Vec::new(),
             prompt_history_cursor: None,
+            close_confirm_visible: false,
+            close_confirm_armed: false,
+            close_confirm_focus: cx.focus_handle(),
         }
+    }
+
+    /// Build the modal that blocks accidental window-close. Used from
+    /// [`Render::render`] when [`ShellState::close_confirm_visible`] is set.
+    /// The overlay occludes the rest of the UI (`occlude()`) so clicks
+    /// outside its card are swallowed and dispatched as "cancel", and Esc
+    /// inside it does the same thing.
+    fn render_close_confirm_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus = self.close_confirm_focus.clone();
+
+        // The overlay itself. `.absolute()` + `.inset_0` + `.size_full()`
+        // stretches it to fill the root (which is the only positioned
+        // ancestor in this tree, so absolute resolves to the window bounds).
+        // The translucent background visually blocks the chat while keeping
+        // context visible behind it, like the native macOS alert sheet.
+        div()
+            .absolute()
+            .inset_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000099))
+            .occlude()
+            .track_focus(&focus)
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                // Esc on the modal = cancel. We check this BEFORE stop_propagation
+                // so the chat column wrapper's key handler doesn't see Esc twice;
+                // the listener below also returns early when the modal is gone,
+                // so Esc while it's hidden simply falls through to the input box.
+                if this.close_confirm_visible && ev.keystroke.key == "escape" {
+                    this.cancel_close_confirm(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            // Translucent backdrop click acts as cancel. Real cancel
+            // buttons are inside the card; this matches the macOS sheet
+            // idiom (click outside = dismiss) without leaving the user
+            // stuck on a modal they can't get out of.
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if this.close_confirm_visible {
+                        this.cancel_close_confirm(window, cx);
+                    }
+                }),
+            )
+            // The card itself. Centering already happened on the overlay,
+            // so this just needs to be a non-stretching child.
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .bg(rgb(dark::SIDEBAR_BG))
+                    .border_1()
+                    .border_color(rgb(dark::BORDER))
+                    .rounded(px(8.))
+                    .shadow_lg()
+                    .p_6()
+                    .w(px(440.))
+                    .on_mouse_down(
+                        // Clicks inside the card must not bubble up to the
+                        // backdrop-cancel listener; otherwise clicking on a
+                        // button would dismiss the modal *before* the
+                        // button's on_click could fire.
+                        gpui::MouseButton::Left,
+                        |_, _, cx| {
+                            cx.stop_propagation();
+                        },
+                    )
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(dark::TEXT))
+                            .child("Quit zerostack?"),
+                    )
+                    .child(div().text_sm().text_color(rgb(dark::TEXT_SECONDARY)).child(
+                        "Any streaming reply or pending tool call will be cancelled. \
+                                 Type /quit next time if you actually meant it.",
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .justify_end()
+                            .mt_2()
+                            .child(
+                                // Cancel button: dismisses the modal. Using
+                                // `on_click` (single press) here matches what a
+                                // "Cancel" button does in every native dialog.
+                                // The `.id(...)` is required: it promotes the
+                                // `Div` into a `Stateful<Div>` so the
+                                // `StatefulInteractiveElement::on_click` method
+                                // is in scope. Without that trait qualifier the
+                                // compiler can't find `.on_click` on plain `Div`.
+                                div()
+                                    .id("close-confirm-cancel")
+                                    .px_4()
+                                    .py_2()
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(rgb(dark::BORDER))
+                                    .bg(rgb(dark::CHAT_BG))
+                                    .text_color(rgb(dark::TEXT))
+                                    .text_sm()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _w, cx| {
+                                        this.cancel_close_confirm(_w, cx);
+                                    }))
+                                    .child("Cancel"),
+                            )
+                            .child(
+                                // Quit button: arms the latch and asks the
+                                // platform to quit. The next close round
+                                // hits on_window_should_close with
+                                // `close_confirm_armed = true` => return true,
+                                // and the window actually closes. Same
+                                // `.id("...")` requirement as the Cancel button
+                                // above for the same trait-resolution reason.
+                                div()
+                                    .id("close-confirm-quit")
+                                    .px_4()
+                                    .py_2()
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(rgb(dark::BORDER))
+                                    .bg(rgb(dark::ACCENT))
+                                    .text_color(rgb(0xFFFFFF))
+                                    .text_sm()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _w, cx| {
+                                        this.confirm_close_quit(cx);
+                                    }))
+                                    .child("Quit"),
+                            ),
+                    ),
+            )
+    }
+
+    /// Called by [`Window::on_window_should_close`] when the platform asks
+    /// the window to close. Returns `true` to let the close happen, `false`
+    /// to keep the window alive and present the modal.
+    fn handle_window_should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.close_confirm_armed {
+            // User already confirmed in the modal — let the close through.
+            // We don't reset `close_confirm_visible` here so the modal stays
+            // drawn until the next paint after the window destruct, but it
+            // doesn't matter: the app is exiting.
+            return true;
+        }
+        // First close attempt (or repeated accidental taps): show the
+        // modal and reject the close so the window stays alive.
+        self.open_close_confirm(window, cx);
+        false
+    }
+
+    /// Open the modal and hand focus to it. Used both from the platform
+    /// close callback and from future entry points (e.g. keyboard shortcut).
+    fn open_close_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_confirm_visible {
+            return;
+        }
+        self.close_confirm_visible = true;
+        window.focus(&self.close_confirm_focus, cx);
+        cx.notify();
+    }
+
+    /// "Cancel" path: dismiss the modal without quitting. Used by the
+    /// Cancel button, Esc, and backdrop-click.
+    fn cancel_close_confirm(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.close_confirm_visible {
+            return;
+        }
+        self.close_confirm_visible = false;
+        // Hand focus back to the input box so the user can keep typing
+        // without an extra click.
+        self.input_focus.focus(_window, cx);
+        cx.notify();
+    }
+
+    /// "Quit" path: latch the armed flag so the next `Window::on_window_should_close`
+    /// call returns `true`, then ask gpui to shut down. We also tear down the
+    /// bridge here so an in-flight `/quit` invocation matches the slash-command
+    /// behaviour used by [`ShellState::apply_event`] when the user types
+    /// `/quit` directly.
+    fn confirm_close_quit(&mut self, cx: &mut Context<Self>) {
+        self.close_confirm_armed = true;
+        self.bridge.shutdown();
+        cx.quit();
     }
 
     /// Insert a single character at the current cursor position and advance the cursor
@@ -1834,46 +2057,52 @@ impl ShellState {
         // back to content-fit height and `overflow_y_scroll` has nothing to
         // clip — so wheel events and PageUp/Down would hit a zero-budget
         // scroll region. This was the silent regression that broke scrolling.
-        div().flex_1().min_h_0().bg(rgb(dark::CHAT_BG)).flex().flex_col().child(
-            div()
-                .id("chat-scroll-area")
-                .flex_1()
-                .overflow_y_scroll()
-                .track_scroll(&chat_scroll)
-                .on_scroll_wheel(
-                    cx.listener(|this, ev: &gpui::ScrollWheelEvent, _window, cx| {
-                        // Wheel up means the user dragged the viewport upward into
-                        // history. Disable follow-tail so the streaming reply we are
-                        // about to receive does not snap them back down mid-line.
-                        // Wheel-down gestures don't touch the flag — the next
-                        // render of `render_chat` polls `is_chat_at_bottom` and
-                        // re-engages the tail when the user reaches the bottom.
-                        let dy = match ev.delta {
-                            ScrollDelta::Pixels(p) => p.y.as_f32(),
-                            ScrollDelta::Lines(p) => p.y * 24.0,
-                        };
-                        if dy < 0.0 {
-                            this.chat_follow_tail = false;
-                        }
-                        cx.notify();
-                    }),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .w_full()
-                        .min_w_0()
-                        .px_6()
-                        .py_5()
-                        .child(status_bar)
-                        .children(message_children)
-                        .when(messages.is_empty(), |d| {
-                            d.child(self.render_welcome(view_entity.clone()))
-                        }),
-                ),
-        )
+        div()
+            .flex_1()
+            .min_h_0()
+            .bg(rgb(dark::CHAT_BG))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("chat-scroll-area")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .track_scroll(&chat_scroll)
+                    .on_scroll_wheel(cx.listener(
+                        |this, ev: &gpui::ScrollWheelEvent, _window, cx| {
+                            // Wheel up means the user dragged the viewport upward into
+                            // history. Disable follow-tail so the streaming reply we are
+                            // about to receive does not snap them back down mid-line.
+                            // Wheel-down gestures don't touch the flag — the next
+                            // render of `render_chat` polls `is_chat_at_bottom` and
+                            // re-engages the tail when the user reaches the bottom.
+                            let dy = match ev.delta {
+                                ScrollDelta::Pixels(p) => p.y.as_f32(),
+                                ScrollDelta::Lines(p) => p.y * 24.0,
+                            };
+                            if dy < 0.0 {
+                                this.chat_follow_tail = false;
+                            }
+                            cx.notify();
+                        },
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .w_full()
+                            .min_w_0()
+                            .px_6()
+                            .py_5()
+                            .child(status_bar)
+                            .children(message_children)
+                            .when(messages.is_empty(), |d| {
+                                d.child(self.render_welcome(view_entity.clone()))
+                            }),
+                    ),
+            )
     }
 
     fn render_input(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3954,6 +4183,14 @@ impl Render for ShellState {
                     .child(self.render_chat(cx))
                     .child(self.render_input(cx)),
             )
+            // Close-confirmation modal. Even though it's a flex sibling
+            // here, `.absolute() + inset_0()` takes it out of normal flow
+            // and stretches it across the root (which is the only
+            // positioned ancestor). Inserted as the last child so it sits
+            // visually on top of the chat and sidebar when shown.
+            .when(self.close_confirm_visible, |d| {
+                d.child(self.render_close_confirm_overlay(cx))
+            })
     }
 }
 
@@ -3994,7 +4231,32 @@ pub fn run() {
                 show: true,
                 ..Default::default()
             },
-            |_window, _cx| view.clone(),
+            move |window, cx| {
+                // Intercept the OS close-button tap (and equivalents: "Quit
+                // Zerostack" from the system menu, Cmd+Q on platforms that
+                // forward it as a window close). The returned bool decides
+                // whether the window actually destroys: false keeps it
+                // alive and shows the modal; true lets the close through.
+                let view_for_close = view.clone();
+                window.on_window_should_close(cx, move |window, cx| {
+                    // `Window::on_window_should_close` runs inside a deadline-
+                    // sensitive platform hook, so we don't want to panic or
+                    // hold a borrow across app work. `Entity::update` has two
+                    // overloads with different generic orders — one returns
+                    // `R` directly, the other returns `Result<R>` — so
+                    // pinning the path via turbofish is brittle. Instead we
+                    // ferry the answer out through a captured local, which
+                    // works regardless of which overload Rust picks: a
+                    // released entity leaves us with the `true` default,
+                    // which equals "let the close go through".
+                    let mut allow_close = true;
+                    let _ = view_for_close.update(cx, |state, cx| {
+                        allow_close = state.handle_window_should_close(window, cx);
+                    });
+                    allow_close
+                });
+                view.clone()
+            },
         )
         .unwrap();
         cx.activate(true);
