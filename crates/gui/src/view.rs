@@ -1789,7 +1789,6 @@ impl ShellState {
             .bg(rgb(dark::SIDEBAR_BG))
             .border_r_1()
             .border_color(rgb(dark::BORDER))
-            .child(self.render_sidebar_top_pins(cx))
             .child(render_sidebar_header(
                 view_for_new,
                 view_for_refresh,
@@ -1883,137 +1882,6 @@ impl ShellState {
                         ),
                 )
             })
-            .child(self.render_user_profile_bar())
-    }
-
-    /// Render a small row of "pin" buttons at the top of the sidebar:
-    /// `+ New Session`, `Mission Control`, and `Search`. These mirror the
-    /// quick-access pills in the reference design — `+` reuses the same
-    /// `UserAction::CreateSession` code path as `PROJECTS · + New`, so
-    /// the user has one logical "start fresh" affordance regardless of
-    /// which visual surface they reach for. `Mission Control` focuses
-    /// the sidebar search box (treated as a generic command-launcher
-    /// for now — future expansion can split this out). `Search` does
-    /// the same.
-    fn render_sidebar_top_pins(&self, cx: &gpui::Context<Self>) -> gpui::AnyElement {
-        let view_entity = cx.entity().clone();
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .px_3()
-            .pt_3()
-            .pb_2()
-            .border_b_1()
-            .border_color(rgb(dark::BORDER))
-            .child(
-                div()
-                    .id(ElementId::Name("sidebar-new-session-pin".into()))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_2p5()
-                    .py_1p5()
-                    .rounded_md()
-                    .bg(rgb(dark::CHIP_BG))
-                    .border_1()
-                    .border_color(rgb(dark::CHIP_BORDER))
-                    .text_sm()
-                    .text_color(rgb(dark::TEXT))
-                    .cursor_pointer()
-                    .child(
-                        div()
-                            .text_color(rgb(dark::ACCENT))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("+"),
-                    )
-                    .child(div().child("New Session"))
-                    .hover(|this| this.bg(rgb(dark::CHIP_HOVER)))
-                    .on_click({
-                        let view_entity = view_entity.clone();
-                        move |_ev, _window, cx| {
-                            view_entity.update(cx, |state, cx| {
-                                let _ = state.bridge.send(UserAction::CreateSession { name: None });
-                                cx.notify();
-                            });
-                        }
-                    }),
-            )
-            .child(sidebar_pin_button(
-                "sidebar-mission-control".to_string(),
-                "◧",
-                "Mission Control",
-                view_entity.clone(),
-                |state, win, cx| state.sidebar_search_focus.focus(win, cx),
-            ))
-            .child(sidebar_pin_button(
-                "sidebar-search-pin".to_string(),
-                "⌕",
-                "Search",
-                view_entity,
-                |state, win, cx| state.sidebar_search_focus.focus(win, cx),
-            ))
-            .into_any_element()
-    }
-
-    /// Render the bottom user-profile pill that anchors the sidebar. The
-    /// reference design shows an avatar circle + name at the bottom of
-    /// the left rail, marking where personal settings would live. The
-    /// GUI has no profile concept yet, so we fall back to `$USER` /
-    /// `$USERNAME`, otherwise to a generic "Operator" placeholder. The
-    /// avatar uses the first character of the first two whitespace-
-    /// separated tokens, uppercased — Slack/Linear-style initials.
-    fn render_user_profile_bar(&self) -> gpui::AnyElement {
-        let raw = std::env::var("USER")
-            .or_else(|_| std::env::var("USERNAME"))
-            .unwrap_or_else(|_| "Operator".to_string());
-        let trimmed = raw.trim();
-        let display_name: SharedString = if trimmed.is_empty() {
-            SharedString::new("Operator")
-        } else {
-            SharedString::new(trimmed)
-        };
-        let initials: SharedString = {
-            let mut parts = trimmed.split_whitespace();
-            let first = parts.next().and_then(|p| p.chars().next());
-            let second = parts.next().and_then(|p| p.chars().next());
-            match (first, second) {
-                (Some(a), Some(b)) => SharedString::new(format!("{}{}", a, b).to_uppercase()),
-                (Some(a), None) => SharedString::new(a.to_string().to_uppercase()),
-                _ => SharedString::new("OP"),
-            }
-        };
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .py_3()
-            .border_t_1()
-            .border_color(rgb(dark::BORDER))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(28.0))
-                    .h(px(28.0))
-                    .rounded_full()
-                    .bg(rgb(dark::CHIP_ACCENT_BG))
-                    .border_1()
-                    .border_color(rgb(dark::ACCENT_DEEP))
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(dark::ACCENT))
-                    .child(initials),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(dark::TEXT))
-                    .child(display_name),
-            )
-            .into_any_element()
     }
 
     /// Render an empty-state welcome page inside the chat column: brand mark,
@@ -2275,51 +2143,6 @@ impl ShellState {
         // the property `maybe_follow_tail` keys off when new content arrives.
         self.chat_follow_tail = self.is_chat_at_bottom();
 
-        // Lightweight status row inside the chat scrollable area: provider /
-        // model · mode · token total · live "thinking" / "idle" pill on the
-        // right. Putting it inside the same scrollable region as the messages
-        // means it scrolls together with the conversation rather than sitting
-        // as a fixed strip above the history.
-        let status_bar = div()
-            .flex()
-            .items_center()
-            .gap_4()
-            .px_5()
-            .py_3()
-            .border_b_1()
-            .border_color(rgb(dark::BORDER))
-            .text_xs()
-            .child(
-                div()
-                    .text_color(rgb(dark::TEXT_SECONDARY))
-                    .child(format!("{} / {}", self.status_provider, self.status_model)),
-            )
-            .child(
-                div()
-                    .text_color(rgb(dark::TEXT_MUTED))
-                    .child(format!("mode: {}", self.status_mode)),
-            )
-            .child(
-                div()
-                    .text_color(rgb(dark::TEXT_MUTED))
-                    .child(format!("tokens: {}", self.status_tokens)),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .text_color(if self.is_thinking {
-                        rgb(dark::ACCENT)
-                    } else {
-                        rgb(dark::TEXT_MUTED)
-                    })
-                    .child(if self.is_thinking {
-                        "thinking…"
-                    } else {
-                        "idle"
-                    }),
-            )
-            .into_any_element();
-
         let message_children: Vec<gpui::AnyElement> = messages
             .iter()
             .map(|msg| render_message(msg, view_entity.clone()))
@@ -2370,7 +2193,6 @@ impl ShellState {
                             .min_w_0()
                             .px_6()
                             .py_5()
-                            .child(status_bar)
                             .children(message_children)
                             .when(messages.is_empty(), |d| {
                                 d.child(self.render_welcome(view_entity.clone()))
@@ -2900,45 +2722,6 @@ impl ShellState {
 /// Render a single sidebar pin button. The pin-row layout has a
 /// uniform padding/border style with an optional leading icon glyph;
 /// only the click handler and label differ between rows. Splitting
-/// this into a free function keeps `render_sidebar_top_pins` from
-/// wallpapering code with three near-identical 15-line div blocks
-/// that would otherwise drift out of sync silently.
-fn sidebar_pin_button<F>(
-    id: String,
-    icon: &'static str,
-    label: &'static str,
-    view_entity: gpui::Entity<ShellState>,
-    on_click_focus: F,
-) -> gpui::AnyElement
-where
-    F: Fn(&mut ShellState, &mut gpui::Window, &mut gpui::Context<ShellState>) + 'static,
-{
-    div()
-        .id(ElementId::Name(id.into()))
-        .flex()
-        .items_center()
-        .gap_2()
-        .px_2p5()
-        .py_1p5()
-        .rounded_md()
-        .text_sm()
-        .text_color(rgb(dark::TEXT_SECONDARY))
-        .cursor_pointer()
-        .child(div().text_color(rgb(dark::ICON_MUTED)).child(icon))
-        .child(div().child(label.to_string()))
-        .hover(|this| this.bg(rgb(dark::CHIP_BG)))
-        .on_click({
-            let view_entity = view_entity.clone();
-            move |_ev, window, cx| {
-                view_entity.update(cx, |state, cx| {
-                    on_click_focus(state, window, cx);
-                    cx.notify();
-                });
-            }
-        })
-        .into_any_element()
-}
-
 /// Render a small pill that just carries a label/symbol (`+` for the
 /// leading action chip, provider/model metadata, mode, MCP status,
 /// help, etc.). The optional trailing glyph (`▾` on the mode chip)
