@@ -208,6 +208,9 @@ pub struct Config {
     #[cfg(feature = "lsp")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp: Option<types::LspConfig>,
+    #[cfg(feature = "rtk")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtk: Option<types::RtkConfig>,
     #[cfg(feature = "advisor")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub advisor: Option<types::AdvisorConfig>,
@@ -278,7 +281,7 @@ impl Config {
     /// The model's input/output cost (USD per million tokens) straight from
     /// the static catalog, or `None` when the provider/model isn't listed or
     /// carries no baked-in pricing (e.g. OpenRouter, which prices live via
-    /// `fetch_openrouter_pricing` instead).
+    /// `fetch_live_model_info` instead).
     pub fn catalog_input_output_cost(provider: &str, model_id: &str) -> Option<(f64, f64)> {
         let entries = crate::models_catalog::catalog_entries(provider)?;
         entries
@@ -388,6 +391,13 @@ impl Config {
     #[cfg(feature = "lsp")]
     pub fn resolve_lsp(&self) -> Option<&types::LspConfig> {
         self.lsp.as_ref().filter(|l| l.enabled)
+    }
+
+    /// rtk output-filtering configuration, `Some` only when an `[rtk]` table
+    /// exists with `enabled = true`.
+    #[cfg(feature = "rtk")]
+    pub fn resolve_rtk(&self) -> Option<&types::RtkConfig> {
+        self.rtk.as_ref().filter(|r| r.enabled)
     }
 
     pub fn resolve_max_grep_results(&self) -> u64 {
