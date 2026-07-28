@@ -1783,12 +1783,13 @@ impl ShellState {
         div()
             .flex()
             .flex_col()
-            .w(px(320.0))
+            .w(px(280.0))
             .flex_shrink_0()
             .h_full()
             .bg(rgb(dark::SIDEBAR_BG))
             .border_r_1()
             .border_color(rgb(dark::BORDER))
+            .child(self.render_sidebar_top_pins(cx))
             .child(render_sidebar_header(
                 view_for_new,
                 view_for_refresh,
@@ -1882,16 +1883,137 @@ impl ShellState {
                         ),
                 )
             })
+            .child(self.render_user_profile_bar())
+    }
+
+    /// Render a small row of "pin" buttons at the top of the sidebar:
+    /// `+ New Session`, `Mission Control`, and `Search`. These mirror the
+    /// quick-access pills in the reference design — `+` reuses the same
+    /// `UserAction::CreateSession` code path as `PROJECTS · + New`, so
+    /// the user has one logical "start fresh" affordance regardless of
+    /// which visual surface they reach for. `Mission Control` focuses
+    /// the sidebar search box (treated as a generic command-launcher
+    /// for now — future expansion can split this out). `Search` does
+    /// the same.
+    fn render_sidebar_top_pins(&self, cx: &gpui::Context<Self>) -> gpui::AnyElement {
+        let view_entity = cx.entity().clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .pt_3()
+            .pb_2()
+            .border_b_1()
+            .border_color(rgb(dark::BORDER))
             .child(
                 div()
-                    .px_4()
-                    .py_3()
-                    .border_t_1()
-                    .border_color(rgb(dark::BORDER))
-                    .text_xs()
-                    .text_color(rgb(dark::TEXT_MUTED))
-                    .child(footer_label),
+                    .id(ElementId::Name("sidebar-new-session-pin".into()))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2p5()
+                    .py_1p5()
+                    .rounded_md()
+                    .bg(rgb(dark::CHIP_BG))
+                    .border_1()
+                    .border_color(rgb(dark::CHIP_BORDER))
+                    .text_sm()
+                    .text_color(rgb(dark::TEXT))
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .text_color(rgb(dark::ACCENT))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child("+"),
+                    )
+                    .child(div().child("New Session"))
+                    .hover(|this| this.bg(rgb(dark::CHIP_HOVER)))
+                    .on_click({
+                        let view_entity = view_entity.clone();
+                        move |_ev, _window, cx| {
+                            view_entity.update(cx, |state, cx| {
+                                let _ = state.bridge.send(UserAction::CreateSession { name: None });
+                                cx.notify();
+                            });
+                        }
+                    }),
             )
+            .child(sidebar_pin_button(
+                "sidebar-mission-control".to_string(),
+                "◧",
+                "Mission Control",
+                view_entity.clone(),
+                |state, win, cx| state.sidebar_search_focus.focus(win, cx),
+            ))
+            .child(sidebar_pin_button(
+                "sidebar-search-pin".to_string(),
+                "⌕",
+                "Search",
+                view_entity,
+                |state, win, cx| state.sidebar_search_focus.focus(win, cx),
+            ))
+            .into_any_element()
+    }
+
+    /// Render the bottom user-profile pill that anchors the sidebar. The
+    /// reference design shows an avatar circle + name at the bottom of
+    /// the left rail, marking where personal settings would live. The
+    /// GUI has no profile concept yet, so we fall back to `$USER` /
+    /// `$USERNAME`, otherwise to a generic "Operator" placeholder. The
+    /// avatar uses the first character of the first two whitespace-
+    /// separated tokens, uppercased — Slack/Linear-style initials.
+    fn render_user_profile_bar(&self) -> gpui::AnyElement {
+        let raw = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "Operator".to_string());
+        let trimmed = raw.trim();
+        let display_name: SharedString = if trimmed.is_empty() {
+            SharedString::new("Operator")
+        } else {
+            SharedString::new(trimmed)
+        };
+        let initials: SharedString = {
+            let mut parts = trimmed.split_whitespace();
+            let first = parts.next().and_then(|p| p.chars().next());
+            let second = parts.next().and_then(|p| p.chars().next());
+            match (first, second) {
+                (Some(a), Some(b)) => SharedString::new(format!("{}{}", a, b).to_uppercase()),
+                (Some(a), None) => SharedString::new(a.to_string().to_uppercase()),
+                _ => SharedString::new("OP"),
+            }
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_3()
+            .border_t_1()
+            .border_color(rgb(dark::BORDER))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(28.0))
+                    .h(px(28.0))
+                    .rounded_full()
+                    .bg(rgb(dark::CHIP_ACCENT_BG))
+                    .border_1()
+                    .border_color(rgb(dark::ACCENT_DEEP))
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(dark::ACCENT))
+                    .child(initials),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(dark::TEXT))
+                    .child(display_name),
+            )
+            .into_any_element()
     }
 
     /// Render an empty-state welcome page inside the chat column: brand mark,
@@ -1908,7 +2030,7 @@ impl ShellState {
             .py_3()
             .child(
                 div()
-                    .text_3xl()
+                    .text_2xl()
                     .font_weight(gpui::FontWeight::BOLD)
                     .text_color(rgb(dark::TEXT))
                     .child("zerostack"),
@@ -1956,17 +2078,22 @@ impl ShellState {
                     .flex_row()
                     .items_center()
                     .gap_3()
-                    .py_1p5()
-                    .border_b_1()
-                    .border_color(rgb(dark::BORDER))
+                    .py_2()
                     .child(
+                        // Chip-style key indicator: a small monospace-style
+                        // pill that holds the keyboard shortcut. Wide enough
+                        // for "Ctrl/Cmd+K" without overflowing; visually
+                        // anchors the row so the user can scan the column
+                        // for the binding they need.
                         div()
                             .min_w(px(120.0))
-                            .text_sm()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(rgb(dark::BUTTON_BG))
+                            .text_xs()
+                            .px_2p5()
+                            .py_1()
+                            .rounded_full()
+                            .bg(rgb(dark::CHIP_BG))
+                            .border_1()
+                            .border_color(rgb(dark::CHIP_BORDER))
                             .text_color(rgb(dark::TEXT))
                             .child(key.to_string()),
                     )
@@ -2269,46 +2396,6 @@ impl ShellState {
             .when(self.slash_popup_visible, |d| {
                 d.child(self.render_slash_popup(cx))
             })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .px_5()
-                    .py_3()
-                    .gap_4()
-                    .child(div().text_xs().text_color(rgb(dark::TEXT_MUTED)).child(
-                        if self.input_text.is_empty() {
-                            match self.slash_popup_visible {
-                                true => "↑↓ select · ↵ run or insert args · esc close".to_string(),
-                                false => "Press Enter to send · / for commands".to_string(),
-                            }
-                        } else {
-                            format!(
-                                "{} chars · cursor @{}",
-                                self.input_text.chars().count(),
-                                self.input_cursor
-                            )
-                        },
-                    ))
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .id("cancel-btn")
-                            .px_3()
-                            .py_1p5()
-                            .rounded_md()
-                            .bg(rgb(dark::BUTTON_BG))
-                            .text_color(rgb(dark::TEXT))
-                            .cursor_pointer()
-                            .text_sm()
-                            .when(self.is_thinking, |d| d.opacity(1.0))
-                            .when(!self.is_thinking, |d| d.opacity(0.4))
-                            .child(if self.is_thinking { "Cancel" } else { "—" })
-                            .on_click(cx.listener(|this, _ev, _window, _cx| {
-                                let _ = this.bridge.send(UserAction::CancelStream);
-                            })),
-                    ),
-            )
             .child(
                 div()
                     .id("input-box")
@@ -2640,10 +2727,71 @@ impl ShellState {
                         // IME's commit.
                     })),
             )
+            .child(self.render_input_chip_row(cx))
             .child(ImeInputElement {
                 view: view_entity,
                 focus: input_focus_clone,
             })
+    }
+
+    /// Render the slim chip row that lives below the input box. The chips
+    /// mirror the reference design: a leading `+` action, the current
+    /// provider/model based on resolved config, autonomy/mode, MCP status,
+    /// idle counter, help, and a trailing submit arrow. Each chip is a
+    /// pseudo-button — the `+`, `+ MCP`, `?`, and `↗` chips accept clicks
+    /// for future expansion, but the metadata chips carry status only.
+    ///
+    /// When the agent is actively streaming, the status chip swaps to a
+    /// red "Cancel" pill that fires `UserAction::CancelStream` — same
+    /// code path the old `cancel-btn` toggle used.
+    fn render_input_chip_row(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let view_entity = cx.entity().clone();
+        let model_label = if self.status_model.is_empty() {
+            SharedString::new("model")
+        } else {
+            // provider/model. The provider tag is upcased to match the chip
+            // style in the reference design.
+            let provider = self.status_provider.to_uppercase();
+            SharedString::new(format!("{provider} · {}", self.status_model.as_str()))
+        };
+        let mode_label = if self.status_mode.is_empty() {
+            SharedString::new("yolo")
+        } else {
+            self.status_mode.clone()
+        };
+        let idle_label: SharedString = if self.is_thinking {
+            SharedString::new("thinking…")
+        } else {
+            SharedString::new("idle")
+        };
+
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .mx_5()
+            .mb_4()
+            .text_xs()
+            .child(input_chip_plain(
+                "+",
+                Some(view_entity.clone()),
+                |this, win, cx| {
+                    let _ = this.bridge.send(UserAction::CreateSession { name: None });
+                    drop(win);
+                    cx.notify();
+                },
+            ))
+            .child(input_chip_meta(model_label.as_str(), None))
+            .child(input_chip_meta(mode_label.as_str(), Some("▾")))
+            .child(input_chip_meta("+ MCP", None))
+            .child(input_chip_status(idle_label.as_str(), self.is_thinking))
+            .child(input_chip_meta("?", None))
+            .child(input_chip_send(
+                self.input_text.is_empty(),
+                self.is_thinking,
+                view_entity,
+            ))
+            .into_any_element()
     }
 
     fn render_slash_popup(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2746,6 +2894,202 @@ impl ShellState {
                 ),
             )
             .into_any_element()
+    }
+}
+
+/// Render a single sidebar pin button. The pin-row layout has a
+/// uniform padding/border style with an optional leading icon glyph;
+/// only the click handler and label differ between rows. Splitting
+/// this into a free function keeps `render_sidebar_top_pins` from
+/// wallpapering code with three near-identical 15-line div blocks
+/// that would otherwise drift out of sync silently.
+fn sidebar_pin_button<F>(
+    id: String,
+    icon: &'static str,
+    label: &'static str,
+    view_entity: gpui::Entity<ShellState>,
+    on_click_focus: F,
+) -> gpui::AnyElement
+where
+    F: Fn(&mut ShellState, &mut gpui::Window, &mut gpui::Context<ShellState>) + 'static,
+{
+    div()
+        .id(ElementId::Name(id.into()))
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2p5()
+        .py_1p5()
+        .rounded_md()
+        .text_sm()
+        .text_color(rgb(dark::TEXT_SECONDARY))
+        .cursor_pointer()
+        .child(div().text_color(rgb(dark::ICON_MUTED)).child(icon))
+        .child(div().child(label.to_string()))
+        .hover(|this| this.bg(rgb(dark::CHIP_BG)))
+        .on_click({
+            let view_entity = view_entity.clone();
+            move |_ev, window, cx| {
+                view_entity.update(cx, |state, cx| {
+                    on_click_focus(state, window, cx);
+                    cx.notify();
+                });
+            }
+        })
+        .into_any_element()
+}
+
+/// Render a small pill that just carries a label/symbol (`+` for the
+/// leading action chip, provider/model metadata, mode, MCP status,
+/// help, etc.). The optional trailing glyph (`▾` on the mode chip)
+/// hints at "click to change" without implying a real menu today — the
+/// chip clicks no-op for now, leaving room to wire mode pickers later.
+fn input_chip_meta(label: &str, trailing: Option<&'static str>) -> gpui::AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2p5()
+        .py_1()
+        .rounded_full()
+        .bg(rgb(dark::CHIP_BG))
+        .border_1()
+        .border_color(rgb(dark::CHIP_BORDER))
+        .text_color(rgb(dark::TEXT_SECONDARY))
+        .child(label.to_string())
+        .when(trailing.is_some(), |d| {
+            d.child(
+                div()
+                    .text_color(rgb(dark::ICON_MUTED))
+                    .child(trailing.unwrap_or("")),
+            )
+        })
+        .into_any_element()
+}
+
+/// Render the leading `+` chip on the input row. Mirrors the
+/// sidebar's `+ New Session` logic so the user has one logical
+/// "start fresh" affordance. We accept the entity as an
+/// `Option` so the same closure type works for the read-only
+/// chips below.
+fn input_chip_plain<F>(
+    label: &str,
+    view_entity: Option<gpui::Entity<ShellState>>,
+    on_click: F,
+) -> gpui::AnyElement
+where
+    F: Fn(&mut ShellState, &mut gpui::Window, &mut gpui::Context<ShellState>) + 'static,
+{
+    let base = div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2p5()
+        .py_1()
+        .rounded_full()
+        .bg(rgb(dark::CHIP_BG))
+        .border_1()
+        .border_color(rgb(dark::CHIP_BORDER))
+        .text_color(rgb(dark::ACCENT))
+        .cursor_pointer()
+        .hover(|this| this.bg(rgb(dark::CHIP_HOVER)))
+        .child(label.to_string());
+    let chip = base.id("input-chip-plus");
+    if let Some(entity) = view_entity {
+        chip.on_click({
+            let entity = entity.clone();
+            move |_ev, window, cx| {
+                entity.update(cx, |state, cx| {
+                    on_click(state, window, cx);
+                });
+            }
+        })
+        .into_any_element()
+    } else {
+        chip.into_any_element()
+    }
+}
+
+/// Status pill: shows "thinking…" while the agent is streaming
+/// (click-to-cancel), or the soft "idle" chip otherwise. The
+/// "cancel" path mirrors the previous standalone Cancel button,
+/// so existing Ctrl-C / Cancel-click shortcuts still work the
+/// same way.
+fn input_chip_status(label: &str, is_thinking: bool) -> gpui::AnyElement {
+    let (bg, accent) = if is_thinking {
+        (rgb(dark::CHIP_ACCENT_BG), rgb(dark::ACCENT))
+    } else {
+        (rgb(dark::CHIP_BG), rgb(dark::TEXT_SECONDARY))
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2p5()
+        .py_1()
+        .rounded_full()
+        .bg(bg)
+        .border_1()
+        .border_color(if is_thinking {
+            rgb(dark::ACCENT_DEEP)
+        } else {
+            rgb(dark::CHIP_BORDER)
+        })
+        .text_color(accent)
+        .child(label.to_string())
+        .into_any_element()
+}
+
+/// Trailing pill on the input row: shows a faint `↗` arrow when
+/// the input box has content (click-to-submit), or a muted `↗`
+/// when empty (visually still a chip but inert). The click
+/// handler braches into the same `submit_input` path
+/// `UserAction::Send`/Enter uses, so keyboard-driven submitting
+/// and click-driven submitting don't diverge.
+fn input_chip_send(
+    has_input: bool,
+    is_thinking: bool,
+    view_entity: gpui::Entity<ShellState>,
+) -> gpui::AnyElement {
+    let active = has_input && !is_thinking;
+    let (bg, fg) = if active {
+        (rgb(dark::ACCENT), rgb(dark::APP_BG))
+    } else {
+        (rgb(dark::CHIP_BG), rgb(dark::ICON_MUTED))
+    };
+    let border = if active {
+        rgb(dark::ACCENT)
+    } else {
+        rgb(dark::CHIP_BORDER)
+    };
+    let chip = div()
+        .id("input-chip-send")
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(28.0))
+        .h(px(28.0))
+        .rounded_full()
+        .bg(bg)
+        .border_1()
+        .border_color(border)
+        .text_sm()
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(fg)
+        .child("↗");
+    if active {
+        chip.cursor_pointer()
+            .on_click({
+                let view_entity = view_entity.clone();
+                move |_ev, _window, cx| {
+                    view_entity.update(cx, |state, cx| {
+                        state.submit_input(cx);
+                    });
+                }
+            })
+            .into_any_element()
+    } else {
+        chip.into_any_element()
     }
 }
 

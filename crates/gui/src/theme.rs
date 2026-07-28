@@ -17,6 +17,21 @@ pub mod dark {
     pub const BUTTON_BG: u32 = 0x18181C;
     pub const BUTTON_HOVER: u32 = 0x232328;
 
+    // Pill-shaped chips used in the input-bar status row, sidebar quick
+    // actions, and the welcome-page shortcut cards. Subtle border + dark
+    // fill so they read as inert metadata even at small sizes; the hover
+    // step is gentle so a row of them sits quietly rather than competing
+    // for attention.
+    pub const CHIP_BG: u32 = 0x131318;
+    pub const CHIP_HOVER: u32 = 0x1E1E24;
+    pub const CHIP_BORDER: u32 = 0x26262C;
+    pub const CHIP_ACCENT_BG: u32 = 0x1F1A2E;
+
+    // The sidebar's small `--` and `>` glyphs etc. share a single muted
+    // tone so they don't pull focus from the session names. Tied to
+    // `BORDER_HOVER` so a hover on the row tints both at once.
+    pub const ICON_MUTED: u32 = 0x6E6E75;
+
     pub const BORDER: u32 = 0x1F1F24;
     pub const BORDER_HOVER: u32 = 0x2E2E34;
 
@@ -25,6 +40,7 @@ pub mod dark {
     pub const TEXT_MUTED: u32 = 0x6E6E75;
 
     pub const ACCENT: u32 = 0xC4B5FD;
+    pub const ACCENT_DEEP: u32 = 0x2A2440;
     pub const SUCCESS: u32 = 0xA6E3A1;
     pub const WARNING: u32 = 0xF9E2AF;
     pub const ERROR: u32 = 0xF38BA8;
