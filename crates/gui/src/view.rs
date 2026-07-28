@@ -1149,6 +1149,33 @@ impl ShellState {
                 self.chat.push(ChatMessage::system(text));
                 self.is_thinking = false;
             }
+            CoreEvent::BtwStarted { id } => {
+                self.chat
+                    .push(ChatMessage::system(format!("[btw #{id}] thinking...")));
+            }
+            CoreEvent::BtwComplete {
+                id,
+                response,
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+                cache_creation_input_tokens,
+            } => {
+                self.chat
+                    .push(ChatMessage::system(format!("[btw #{id}] answer:")));
+                self.chat.push(ChatMessage::assistant(response.to_string()));
+                let total_in = input_tokens + cached_input_tokens + cache_creation_input_tokens;
+                if total_in > 0 || output_tokens > 0 {
+                    self.status_tokens = self
+                        .status_tokens
+                        .saturating_add(total_in)
+                        .saturating_add(output_tokens);
+                }
+            }
+            CoreEvent::BtwError { id, message } => {
+                self.chat
+                    .push(ChatMessage::system(format!("[btw #{id}] error: {message}")));
+            }
         }
         // Follow-tail: jump to the bottom only if the user has stayed scrolled
         // to the bottom. If they walked up to read history, leave their scroll

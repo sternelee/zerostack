@@ -231,10 +231,20 @@ fn run_event_loop(
                 event = engine_event_rx.recv() => {
                     match event {
                         Some(event) => {
+                            let is_stop = matches!(event, CoreEvent::AgentStopped);
                             if matches!(event, CoreEvent::MessageComplete { .. }) {
                                 engine.save_current_session();
                             }
                             let _ = event_tx.send(event);
+                            // TUI parity: once the main run stops, replay any
+                            // queued inputs as new runs so the user doesn't have
+                            // to wait for the agent to become idle.
+                            if is_stop {
+                                let more = engine.drain_pending_inputs().await;
+                                for ev in more {
+                                    let _ = event_tx.send(ev);
+                                }
+                            }
                         }
                         None => break,
                     }

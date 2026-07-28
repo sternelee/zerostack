@@ -78,6 +78,27 @@ pub enum CoreEvent {
     AgentStopped,
     ConfigChanged,
 
+    // === /btw side-question output ===
+    /// A `/btw` side question has been spawned and is running in parallel with
+    /// the main session. The frontend can show a transient "thinking" marker.
+    BtwStarted {
+        id: u32,
+    },
+    /// `/btw` side question completed with a full response.
+    BtwComplete {
+        id: u32,
+        response: CompactString,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+    },
+    /// `/btw` side question failed.
+    BtwError {
+        id: u32,
+        message: CompactString,
+    },
+
     // === Slash command output ===
     /// Human-readable output from a slash command (e.g. /help, /sessions).
     CommandOutput {

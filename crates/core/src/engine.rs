@@ -7,7 +7,7 @@ use crate::agent::tools;
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::context::{self, ContextFiles};
-use crate::event::AgentEvent;
+use crate::event::{AgentEvent, BtwEvent};
 use crate::events::{ChatMessage, CoreEvent, InitialState, SessionInfo, UserAction};
 use crate::permission::SecurityMode;
 use crate::permission::ask::{AskRequest, AskSender, UserDecision};
@@ -45,6 +45,23 @@ pub struct CoreEngine {
     pending_permissions: std::collections::HashMap<u64, oneshot::Sender<UserDecision>>,
     /// Next permission request id.
     next_permission_id: u64,
+
+    /// Inputs submitted while the main agent was already running. The TUI
+    /// queues plain-text follow-ups and replays them once the current turn
+    /// finishes, so the user can keep typing instead of being blocked.
+    pending_inputs: std::collections::VecDeque<CompactString>,
+
+    /// Next id for `/btw` side questions. Monotonically incremented so the
+    /// frontend can label parallel side questions (`[btw #1]`, `[btw #2]`).
+    btw_next_id: u32,
+    /// Number of `/btw` side questions currently in flight.
+    btw_inflight: usize,
+    /// Sender passed to `spawn_btw`; a background task forwards the resulting
+    /// `BtwEvent`s into `event_tx` as `CoreEvent`s.
+    btw_event_tx: mpsc::Sender<BtwEvent>,
+    /// Abort handles for in-flight `/btw` tasks, so engine shutdown or a
+    /// CancelStream can abort them too.
+    btw_abort: Vec<(u32, tokio::task::AbortHandle)>,
 }
 
 impl CoreEngine {
@@ -90,6 +107,35 @@ impl CoreEngine {
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
+        // Channel for `/btw` side-question results. The runner sends `BtwEvent`s
+        // here; a dedicated task rewrites them as `CoreEvent`s so the bridge
+        // loop doesn't need to select on an extra receiver.
+        let (btw_event_tx, mut btw_event_rx) = mpsc::channel::<BtwEvent>(32);
+        let event_tx_for_btw = event_tx.clone();
+        tokio::spawn(async move {
+            while let Some(bev) = btw_event_rx.recv().await {
+                let ev = match bev {
+                    BtwEvent::Done {
+                        id,
+                        response,
+                        input_tokens,
+                        output_tokens,
+                        cached_input_tokens,
+                        cache_creation_input_tokens,
+                    } => CoreEvent::BtwComplete {
+                        id,
+                        response,
+                        input_tokens,
+                        output_tokens,
+                        cached_input_tokens,
+                        cache_creation_input_tokens,
+                    },
+                    BtwEvent::Error { id, message } => CoreEvent::BtwError { id, message },
+                };
+                let _ = event_tx_for_btw.send(ev);
+            }
+        });
+
         let mut engine = Self {
             config: cfg,
             sessions: vec![session],
@@ -111,6 +157,11 @@ impl CoreEngine {
             ask_rx,
             pending_permissions: std::collections::HashMap::new(),
             next_permission_id: 0,
+            pending_inputs: std::collections::VecDeque::new(),
+            btw_next_id: 1,
+            btw_inflight: 0,
+            btw_event_tx,
+            btw_abort: Vec::new(),
         };
 
         // Build the initial agent
@@ -210,6 +261,19 @@ impl CoreEngine {
         match action {
             UserAction::SendMessage { text } => self.handle_send_message(text).await,
             UserAction::CancelStream => {
+                // TUI parity: if any `/btw` side questions are in flight,
+                // Ctrl-C/CancelStream cancels them first; otherwise it cancels
+                // the main run.
+                if self.btw_inflight > 0 {
+                    for (_, h) in self.btw_abort.drain(..) {
+                        h.abort();
+                    }
+                    self.btw_inflight = 0;
+                    let _ = self.event_tx.send(CoreEvent::CommandOutput {
+                        text: CompactString::from("btw cancelled"),
+                    });
+                    return vec![];
+                }
                 if let Some(handle) = self.current_task.take() {
                     handle.abort();
                 }
@@ -426,7 +490,22 @@ impl CoreEngine {
                     text: CompactString::from(format!("dropped {} file(s)", count)),
                 }]
             }
-            UserAction::RunSlashCommand { command } => self.handle_slash_command(&command).await,
+            UserAction::RunSlashCommand { command } => {
+                let t = command.trim_start();
+                if t == "/queue" || t.starts_with("/queue ") {
+                    self.handle_queue_command(t.strip_prefix("/queue").unwrap_or("").trim())
+                } else if t == "/btw" || t.starts_with("/btw ") {
+                    self.handle_btw(&command).await
+                } else if self.current_task.is_some() {
+                    vec![CoreEvent::CommandOutput {
+                        text: CompactString::from(
+                            "busy: wait for the current run to finish, or use /btw for a side question",
+                        ),
+                    }]
+                } else {
+                    self.handle_slash_command(&command).await
+                }
+            }
             UserAction::ReloadConfig => {
                 let (cfg, _) = crate::config::load();
                 self.config = cfg;
@@ -463,8 +542,32 @@ impl CoreEngine {
 
     /// Handle a SendMessage: build history, spawn the agent runner, and
     /// forward AgentEvents as CoreEvents via the event channel.
+    ///
+    /// TUI parity: when the main agent is already running, plain text is
+    /// queued and replayed after the current turn finishes; command-like
+    /// input (`/`, `.`, `!`) is rejected so the user doesn't accidentally
+    /// interrupt the in-flight turn.
     async fn handle_send_message(&mut self, text: CompactString) -> Vec<CoreEvent> {
-        // Cancel any currently running task
+        if self.current_task.is_some() {
+            let t = text.trim_start();
+            if t.is_empty() {
+                return vec![];
+            }
+            if t.starts_with('/') || t.starts_with('.') || t.starts_with('!') {
+                return vec![CoreEvent::CommandOutput {
+                    text: CompactString::from(
+                        "busy: wait for the current run to finish, or use /btw for a side question",
+                    ),
+                }];
+            }
+            self.pending_inputs.push_back(text.clone());
+            return vec![CoreEvent::CommandOutput {
+                text: CompactString::from(format!("queued: {text}")),
+            }];
+        }
+
+        // Cancel any currently running task (defensive: we just checked it's
+        // None, but keep the guard in case the invariant ever slips).
         if let Some(handle) = self.current_task.take() {
             handle.abort();
         }
@@ -601,6 +704,119 @@ impl CoreEngine {
 
         // Return empty - events come asynchronously via the channel
         vec![]
+    }
+
+    /// If the main agent just stopped and there are queued inputs, start the
+    /// next one. Called from the bridge loop after it forwards
+    /// `CoreEvent::AgentStopped`. Returns any immediate events (currently none:
+    /// the new run's events arrive asynchronously).
+    pub async fn drain_pending_inputs(&mut self) -> Vec<CoreEvent> {
+        if self.current_task.is_some() {
+            return vec![];
+        }
+        let Some(next) = self.pending_inputs.pop_front() else {
+            return vec![];
+        };
+        self.handle_send_message(next).await
+    }
+
+    /// Spawn an isolated, tool-less `/btw` side question that runs in parallel
+    /// with the main session. The result arrives later as `CoreEvent::BtwComplete`
+    /// or `CoreEvent::BtwError`. Mirrors the TUI's `App::run_btw`.
+    async fn handle_btw(&mut self, text: &str) -> Vec<CoreEvent> {
+        let btw_text = text
+            .trim_start()
+            .strip_prefix("/btw")
+            .map(|s| s.trim())
+            .unwrap_or("");
+        if btw_text.is_empty() {
+            return vec![CoreEvent::CommandOutput {
+                text: CompactString::from("usage: /btw <message>"),
+            }];
+        }
+
+        let id = self.btw_next_id;
+        self.btw_next_id = self.btw_next_id.wrapping_add(1);
+
+        // Use the current session's history as context. If for some reason
+        // there is no current session, create a minimal one so the agent still
+        // has a model/provider/context window configured.
+        let session = self.current_session().cloned().unwrap_or_else(|| {
+            let qm_map = crate::config::quick_models_map(&self.config);
+            Session::new(
+                &self.provider,
+                &self.model,
+                self.config
+                    .resolve_context_window(&self.provider, &self.model, &qm_map),
+                "",
+            )
+        });
+        let snapshot = runner::convert_history(&session);
+
+        let model = self.client.completion_model(self.model.to_string());
+        let temperature = crate::config::resolve_temperature(&self.cli, &self.config, &self.model);
+        let extra_body = crate::config::resolve_extra_body(&self.config, &self.model);
+        let btw_agent = crate::provider::build_btw_agent(
+            model,
+            &self.cli,
+            &self.config,
+            &self.context,
+            &self.permission,
+            &self.ask_tx,
+            self.reasoning_enabled,
+            temperature,
+            extra_body,
+        );
+        let runner = btw_agent.spawn_btw(
+            btw_text.to_string(),
+            snapshot,
+            self.btw_event_tx.clone(),
+            id,
+            self.config.retry.clone(),
+        );
+        self.btw_abort.push((id, runner.abort_handle));
+        self.btw_inflight += 1;
+
+        vec![CoreEvent::BtwStarted { id }]
+    }
+
+    /// Manage the pending-input queue. Mirrors the TUI's `/queue` command.
+    fn handle_queue_command(&mut self, arg: &str) -> Vec<CoreEvent> {
+        match arg {
+            "clear" => {
+                let n = self.pending_inputs.len();
+                self.pending_inputs.clear();
+                vec![CoreEvent::CommandOutput {
+                    text: CompactString::from(format!("queue cleared ({n} removed)")),
+                }]
+            }
+            "pop" => match self.pending_inputs.pop_back() {
+                Some(x) => vec![CoreEvent::CommandOutput {
+                    text: CompactString::from(format!("unqueued: {x}")),
+                }],
+                None => vec![CoreEvent::CommandOutput {
+                    text: CompactString::from("queue is empty"),
+                }],
+            },
+            "" | "ls" | "list" => {
+                if self.pending_inputs.is_empty() {
+                    vec![CoreEvent::CommandOutput {
+                        text: CompactString::from("queue is empty"),
+                    }]
+                } else {
+                    let mut lines = vec![format!("queued ({}):", self.pending_inputs.len())];
+                    for (i, q) in self.pending_inputs.iter().enumerate() {
+                        lines.push(format!("  {}. {q}", i + 1));
+                    }
+                    vec![CoreEvent::CommandOutput {
+                        text: CompactString::from(lines.join("\n")),
+                    }]
+                }
+            }
+            _ => vec![CoreEvent::CommandOutput {
+                text: CompactString::from("usage: /queue [ls|clear|pop]"),
+            }],
+        }
     }
 
     /// Handle slash commands that the GUI can dispatch.
