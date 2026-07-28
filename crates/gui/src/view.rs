@@ -4389,9 +4389,11 @@ pub fn run() {
     //  - `$HOME/.config/zerostack/extensions/` directly — necessary on
     //    macOS, where users sometimes create this themselves, since the
     //    `dirs` crate won't surface it via `data_dir` / `config_dir`;
-    //  - `<cwd>/.zerostack/extensions/`;
-    //  - in-tree `tests/extensions/` if the binary is run from the
-    //    workspace root.
+    //  - `<cwd>/.zerostack/extensions/`.
+    //
+    // Users can also point at a single catch-all directory with
+    // `ZS_EXTENSIONS_DIR=~/my-exts zerostack-gui`; that env var prepends
+    // to the scan list and `~` is expanded to `$HOME`.
     //
     // Errors are logged but not fatal: a broken extension in the user's
     // home dir shouldn't keep the GUI from booting. The Wasm host's own

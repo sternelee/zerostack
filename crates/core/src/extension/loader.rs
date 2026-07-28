@@ -192,23 +192,12 @@ pub fn discover_extensions(extensions_dir: &Path) -> Vec<ExtensionBundle> {
 /// 3. **Project-local `<cwd>/.zerostack/extensions/`**, so a repo can ship a
 ///    workspace-bundled Wasm artifact under version control without a
 ///    `--extension` flag.
-/// 4. **In-tree `tests/extensions/`**, the workspace's own metadata-free
-///    Wasm artifacts that show up when developing zerostack itself. We walk
-///    up the cwd looking for a `Cargo.toml` whose workspace lists `tests/
-///    extensions/...` so this works whether the user is in `crates/gui/`,
-///    at the workspace root, or deeper.
 ///
 /// The returned list is in priority order — earlier entries *win* over
 /// later entries when two directories share an extension id (see
 /// `ExtensionManager::load_all`, which iterates this list and skips ids
 /// already seen). Roughly: project-local overrides first, then per-user
-/// XDG-style paths, then platform fallback globals; the in-tree
-/// `tests/extensions/` directory sits at the bottom because its
-/// `extension.toml`s often reference `target/wasm32-wasip2/...` paths
-/// that only exist after a developer runs `cargo build --target
-/// wasm32-wasip2` — first to load wins, and a checkout sitting at a
-/// higher priority would silently shadow the user's manually-installed
-/// bundles.
+/// XDG-style paths, then platform fallback globals.
 pub fn extension_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
@@ -259,22 +248,11 @@ pub fn extension_dirs() -> Vec<PathBuf> {
     //    `~/Library/Application Support/zerostack/extensions/`, the
     //    canonical install location the `.app` bundles target; on Linux
     //    this resolves to `~/.local/share/zerostack/extensions/`.
-    //    Above the in-tree checkout so a user override anywhere in
-    //    steps 1–4 automatically wins, but lower than the explicit
-    //    `~/.config/...` probe so users who created that directory
-    //    intentionally see their manual install honoured.
+    //    Lower priority than the explicit `~/.config/...` probe so
+    //    users who created that directory intentionally see their
+    //    manual install honoured.
     if let Some(data_dir) = dirs::data_dir() {
         dirs.push(data_dir.join("zerostack").join("extensions"));
-    }
-
-    // 6. In-tree `tests/extensions/` when developing from inside a
-    //    workspace checkout. Sits at the *lowest* priority because its
-    //    examples typically point at `target/wasm32-wasip2/...` paths
-    //    that exist only after `cargo build --target wasm32-wasip2` —
-    //    a developer editing that target dir for testing is fine to
-    //    be shadowed by their manual install.
-    if let Some(in_tree) = find_in_tree_tests_extensions() {
-        dirs.push(in_tree);
     }
 
     dirs
@@ -300,28 +278,6 @@ fn expand_tilde(raw: &str) -> String {
         return format!("{home}{rest}");
     }
     raw.to_string()
-}
-
-/// Walk up the current directory looking for a `tests/extensions/` folder that
-/// sits beside a `Cargo.toml`. Returns `None` when the cwd isn't inside the
-/// zerostack workspace — handy for users who reinstall the binary elsewhere
-/// or build with `cargo install`.
-fn find_in_tree_tests_extensions() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    let mut cur: std::path::PathBuf = cwd;
-    loop {
-        let manifest = cur.join("Cargo.toml");
-        // The workspace root has both a `Cargo.toml` and a top-level
-        // `tests/extensions/` directory. If both are present, we've found
-        // the right anchor.
-        let in_tree = cur.join("tests").join("extensions");
-        if manifest.is_file() && in_tree.is_dir() {
-            return Some(in_tree);
-        }
-        if !cur.pop() {
-            return None;
-        }
-    }
 }
 
 #[cfg(test)]

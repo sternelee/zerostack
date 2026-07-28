@@ -173,19 +173,12 @@ pub fn discover_extensions(extensions_dir: &Path) -> Vec<ExtensionBundle> {
 ///    installing a binary from a package manager.
 /// 3. **Project-local `<cwd>/.zerostack/extensions/`** for workspace-bundled
 ///    Wasm artifacts under version control.
-/// 4. **In-tree `tests/extensions/`** when developing from inside a workspace
-///    checkout — `Cargo.toml` of the root crate is our anchor.
-///
 /// The returned list is in priority order: earlier entries *win* over
 /// later entries when two directories share an `extension.toml` with
 /// the same `id`. `ExtensionManager::load_all` walks the list in order
 /// and skips ids already registered, which means project-local
 /// extensions naturally override platform defaults without any extra
-/// coordination. The in-tree `tests/extensions/` directory sits at the
-/// *bottom* because its example manifests commonly point at
-/// `target/wasm32-wasip2/...` paths that only resolve after
-/// `cargo build --target wasm32-wasip2` — placing it higher would
-/// silently shadow the user's manual install at `~/.config/...`.
+/// coordination.
 pub fn extension_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
@@ -230,21 +223,10 @@ pub fn extension_dirs() -> Vec<PathBuf> {
     // 5. The `dirs` data-dir fallback. macOS resolves to
     //    `~/Library/Application Support/zerostack/extensions/`, which is
     //    the canonical install location the `.app` bundle targets.
-    //    Linux resolves to `~/.local/share/zerostack/extensions/`. Sits
-    //    above the in-tree checkout so a user override anywhere in
-    //    steps 1–4 automatically wins.
+    //    Linux resolves to `~/.local/share/zerostack/extensions/`.
+    //    Lowest priority — anything upstream in 1–4 automatically wins.
     if let Some(data_dir) = dirs::data_dir() {
         dirs.push(data_dir.join("zerostack").join("extensions"));
-    }
-
-    // 6. In-tree `tests/extensions/` when developing from inside a
-    //    workspace checkout. Sits at the *lowest* priority because
-    //    its dev manifests default to `target/wasm32-wasip2/...`
-    //    entrypoints that aren't built by default — a checkout at a
-    //    higher priority would silently shadow the user's manual
-    //    install.
-    if let Some(in_tree) = find_in_tree_tests_extensions() {
-        dirs.push(in_tree);
     }
 
     dirs
@@ -269,25 +251,6 @@ fn expand_tilde(raw: &str) -> String {
         return format!("{home}{rest}");
     }
     raw.to_string()
-}
-
-/// Walk up the current directory looking for a `tests/extensions/` folder
-/// that sits beside a `Cargo.toml`. Returns `None` when the cwd isn't
-/// inside the zerostack workspace — handy for users who reinstall the
-/// binary elsewhere or build with `cargo install`.
-fn find_in_tree_tests_extensions() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    let mut cur: std::path::PathBuf = cwd;
-    loop {
-        let manifest = cur.join("Cargo.toml");
-        let in_tree = cur.join("tests").join("extensions");
-        if manifest.is_file() && in_tree.is_dir() {
-            return Some(in_tree);
-        }
-        if !cur.pop() {
-            return None;
-        }
-    }
 }
 
 #[cfg(test)]
