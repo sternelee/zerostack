@@ -65,6 +65,7 @@ advisor = []
 extensions = ["dep:wasmtime", "dep:wasmtime-wasi", "zerostack-extension-api"]
 hooks = []
 lsp = ["dep:lsp-types"]
+rtk = []
 
 [dependencies]
 rig = { version = "0.40", features = ["rmcp"] }

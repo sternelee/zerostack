@@ -21,6 +21,8 @@ mod checker_tests;
 #[cfg(test)]
 mod config_tests;
 #[cfg(test)]
+mod context_tests;
+#[cfg(test)]
 mod convert_history_tests;
 #[cfg(test)]
 mod crc_tests;
@@ -34,6 +36,10 @@ mod feed_tests;
 mod grep_tests;
 #[cfg(test)]
 mod headless_ask_tests;
+#[cfg(all(test, feature = "subagents"))]
+mod headless_subagent_record_tests;
+#[cfg(test)]
+mod headless_tool_record_tests;
 #[cfg(all(test, feature = "hooks"))]
 mod hooks;
 #[cfg(test)]
@@ -70,6 +76,8 @@ mod provider_tests;
 mod renderer_tests;
 #[cfg(test)]
 mod resumed_history_tests;
+#[cfg(all(test, feature = "rtk"))]
+mod rtk_tests;
 #[cfg(all(test, feature = "export"))]
 mod session_export_tests;
 #[cfg(test)]

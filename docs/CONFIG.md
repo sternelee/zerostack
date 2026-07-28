@@ -58,6 +58,8 @@ data files.
 
 All config keys are optional. CLI flags and their environment-backed values
 (such as `ZS_PROVIDER` and `ZS_MODEL`) take precedence where both exist.
+Unknown top-level keys (typos, or keys gated behind a cargo feature that is
+not compiled in) produce a warning at startup — they are otherwise ignored.
 
 Example (YAML):
 
@@ -171,7 +173,7 @@ Accepted top-level keys:
 | `extra_body`              | object  | Provider-specific JSON shallow-merged into every completion request body as a global default (e.g. OpenRouter `plugins` routing presets). A matching `quick_models` entry's `extra_body` overrides this. See Provider-specific request body parameters below. |
 | `no_tools`                | boolean | Disable all tools. Default: `false`.                                                                                                                                        |
 | `no_context_files`        | boolean | Disable loading global/project `AGENTS.md`, `CLAUDE.md`, and `ARCHITECTURE.md` (if `archmd` feature enabled) context files. Default: `false`.                               |
-| `context_window`          | integer | Session context-window size used for status and auto-compaction. When unset, auto-detected from the selected model's catalog entry; falls back to `128000` if the model is not in the catalog. A value of `0` disables auto-compaction. |
+| `context_window`          | integer | Session context-window size used for status and auto-compaction. When unset, auto-detected from the selected model's catalog entry or, for custom providers, live from `GET {base_url}/models` when it reports `context_length`; falls back to `128000` otherwise. A value of `0` disables auto-compaction. |
 | `reserve_tokens`          | integer | Tokens to reserve before compaction is triggered. When unset globally, falls back to the active quick model's `reserve_tokens` field, then to the hardcoded default of `8192`.                                                                                                         |
 | `keep_recent_tokens`      | integer | Approximate recent-token budget kept verbatim during compaction. Default: `10000`.                                                                                          |
 | `max_text_file_size`      | integer | Maximum allowed file size in bytes for read/write tool operations. Default: `1048576` (1 MB).                                                                               |
@@ -180,8 +182,8 @@ Accepted top-level keys:
 | `compact_enabled`         | boolean | Master switch for all automatic conversation compaction (both between-turn and mid-turn). Default: `false`. When `false`, nothing is ever compacted automatically.            |
 | `mid_turn_compact_threshold` | number | Opt-in mid-turn compaction. Fraction of the context window (`0.0`–`1.0`) of real provider prompt pressure at which to compact *during* a turn, not just between turns. Unset by default, meaning no mid-turn compaction. Honored only when `compact_enabled` is `true`. Recommended starting value: `0.80`. See Mid-turn compaction below.            |
 | `always_show_welcome`     | boolean | Always show the welcome banner on startup, bypassing the one-shot marker file. Default: `false`.                                                                               |
-| `auto-update-prompts`     | boolean | When `true`, always regenerate prompts on version change without asking. When `false`, never regenerate. When unset, asks interactively.                                         |
-| `auto-update-themes`      | boolean | When `true`, always regenerate themes on version change without asking. When `false`, never regenerate. When unset, asks interactively.                                         |
+| `auto-update-prompts`     | boolean | When `true`, update prompt files that changed in the new version without asking. When `false`, never update. When unset, asks interactively. Nothing happens when the installed prompts already match the embedded defaults. |
+| `auto-update-themes`      | boolean | When `true`, update theme files that changed in the new version without asking. When `false`, never update. When unset, asks interactively. Nothing happens when the installed themes already match the embedded defaults. |
 | `edit_system`             | string  | Edit system mode: `"similarity"` (SEARCH/REPLACE with fuzzy matching, default) or `"hashedit"` (CRC-32 tag-based CAS edits). See Edit System Modes below.                     |
 | `custom_providers`        | object  | Map of provider aliases to `{ "provider_type", "base_url", "api_key_env", "api_style", "headers", "danger_accept_invalid_certs", "timeout_secs" }`. `provider_type` must resolve to a built-in provider type; `api_key_env` is optional. For OpenAI providers, `api_style` selects `"responses"` or `"completions"`, `headers` sets custom HTTP headers (values support `${ENV_VAR}` expansion), and `timeout_secs` overrides the HTTP timeout. `danger_accept_invalid_certs` disables TLS verification. See the OpenAI API styles section below. |
 | `permission`              | object  | Permission rules using glob patterns; see the permission config notes below.                                |
@@ -1143,6 +1145,44 @@ Behavior notes:
   diagnostics", never a failed edit.
 - Post-edit diagnostics are capped (errors first, ~20 lines); nothing is
   appended when the file is clean.
+
+## rtk output filtering
+
+zerostack can route bash commands through [rtk](https://github.com/rtk-ai/rtk),
+an external CLI proxy that filters and compresses command output before it
+reaches the model context (e.g. tests report failures only, `git status`
+returns a compact summary). rtk claims up to 90% reduction of bash output
+tokens.
+
+This integration is behind the non-default `rtk` Cargo feature — build with
+`--features rtk` to enable it.
+
+When enabled, every `bash` tool command is passed through `rtk rewrite` before
+execution. rtk decides which commands have a compact equivalent — unsupported
+commands run unchanged. Permission checks always run against the original
+command, so existing permission patterns keep working. The integration is
+fail-open: if the binary is missing, times out, or errors, the original
+command runs unfiltered.
+
+### TOML
+
+```toml
+[rtk]
+enabled = true
+# path = "rtk"    # rtk binary; default resolves `rtk` via PATH
+```
+
+### YAML
+
+```yaml
+rtk:
+  enabled: true
+  path: rtk
+```
+
+When active, a short note is appended to the system prompt telling the model
+that bash output is compacted and that rtk writes full raw output to a tee log
+on failure.
 
 ## Logging
 
