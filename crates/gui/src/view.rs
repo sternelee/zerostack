@@ -583,6 +583,44 @@ pub struct ShellState {
     /// sidebar handles so we can hand focus to it on open and recover it on
     /// dismiss without confusing the existing focus paths.
     close_confirm_focus: FocusHandle,
+
+    // === Input-bar picker state ===
+    /// Cached quick-model entries from the resolved config, sorted by
+    /// display name. Loaded once at startup; the chip-row click handler
+    /// toggles `model_picker_visible` to surface this list above the input
+    /// box. The entries correspond to what `/model <provider/model>`
+    /// accepts — calling `UserAction::SetModel { model }` flips the agent
+    /// without us needing to manage the swap in the GUI directly.
+    quick_models: Vec<QuickModelEntry>,
+    /// Listing of the current working directory, refreshed once at startup
+    /// (cheap `read_dir` cap of 64 entries). Drives the `+` chip's file
+    /// picker; clicking a row fires `UserAction::AddFile { path }` which
+    /// the engine resolves absolutely and pushes into `context.extra_files`.
+    cwd_files: Vec<String>,
+    model_picker_visible: bool,
+    model_picker_selected: usize,
+    model_picker_scroll: UniformListScrollHandle,
+    file_picker_visible: bool,
+    file_picker_selected: usize,
+    file_picker_scroll: UniformListScrollHandle,
+}
+
+/// One row in the model picker popup. Each entry corresponds to a single
+/// `QuickModelConfig` key in the resolved config — we surface the friendly
+/// name in the popup and pass the underlying `provider/model` to
+/// `UserAction::SetModel` so the engine keeps the canonical id form.
+#[derive(Clone, Debug)]
+struct QuickModelEntry {
+    /// Key from `cfg.quick_models` (e.g. `"deepseek-v4-pro"`). Shown as
+    /// the primary label so the user knows which quick model they're
+    /// picking.
+    name: String,
+    /// Provider id (e.g. `"deepseek"`). Used for the secondary label.
+    provider: String,
+    /// `provider/model`form  that the engine accepts as `SetModel`'s
+    /// argument. Built from the config but kept separate so we never have
+    /// to split/re-join at click time.
+    model_arg: String,
 }
 
 /// One permission prompt the engine has handed us but not yet resolved. We
@@ -636,6 +674,14 @@ impl ShellState {
             close_confirm_visible: false,
             close_confirm_armed: false,
             close_confirm_focus: cx.focus_handle(),
+            quick_models: load_quick_models(),
+            cwd_files: load_cwd_files(),
+            model_picker_visible: false,
+            model_picker_selected: 0,
+            model_picker_scroll: UniformListScrollHandle::new(),
+            file_picker_visible: false,
+            file_picker_selected: 0,
+            file_picker_scroll: UniformListScrollHandle::new(),
         }
     }
 
@@ -1762,20 +1808,6 @@ impl ShellState {
         // sessions are currently visible. We split "on disk" from "matching
         // the current filter" so the user can see when a query is narrowing
         // the list without losing the global count.
-        let footer_label = if filter_active {
-            if group_count <= 1 {
-                format!("{total_visible} shown · {total_sessions_on_disk} total")
-            } else {
-                format!(
-                    "{total_visible} shown · {group_count} project(s) · {total_sessions_on_disk} total"
-                )
-            }
-        } else if group_count <= 1 {
-            format!("{total_sessions_on_disk} session(s)")
-        } else {
-            format!("{total_sessions_on_disk} session(s) · {group_count} project(s)")
-        };
-
         let view_for_search = view_entity.clone();
         let view_for_refresh = view_entity.clone();
         let view_for_new = view_entity.clone();
@@ -2218,6 +2250,12 @@ impl ShellState {
             .when(self.slash_popup_visible, |d| {
                 d.child(self.render_slash_popup(cx))
             })
+            .when(self.model_picker_visible, |d| {
+                d.child(self.render_model_picker(cx))
+            })
+            .when(self.file_picker_visible, |d| {
+                d.child(self.render_file_picker(cx))
+            })
             .child(
                 div()
                     .id("input-box")
@@ -2347,6 +2385,122 @@ impl ShellState {
                                 }
                                 "a" => {
                                     this.input_cursor = 0;
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // Model picker has higher priority than the input box and the slash
+                        // popup: when it's open we want Up/Down/Enter to navigate
+                        // the model list, and Esc to dismiss. We always
+                        // `stop_propagation` so the underlying input text
+                        // doesn't see the keystroke once a selection is made.
+                        if this.model_picker_visible {
+                            match key {
+                                "up" => {
+                                    let len = this.quick_models.len();
+                                    if len > 0 {
+                                        let cur = this.model_picker_selected as isize - 1;
+                                        this.model_picker_selected =
+                                            cur.rem_euclid(len as isize) as usize;
+                                        this.model_picker_scroll.scroll_to_item(
+                                            this.model_picker_selected,
+                                            ScrollStrategy::Nearest,
+                                        );
+                                    }
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                                "down" => {
+                                    let len = this.quick_models.len();
+                                    if len > 0 {
+                                        let cur = this.model_picker_selected as isize + 1;
+                                        this.model_picker_selected =
+                                            cur.rem_euclid(len as isize) as usize;
+                                        this.model_picker_scroll.scroll_to_item(
+                                            this.model_picker_selected,
+                                            ScrollStrategy::Nearest,
+                                        );
+                                    }
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                                "enter" => {
+                                    if let Some(entry) =
+                                        this.quick_models.get(this.model_picker_selected).cloned()
+                                    {
+                                        let _ = this.bridge.send(UserAction::SetModel {
+                                            model: CompactString::new(entry.model_arg.as_str()),
+                                        });
+                                        this.model_picker_visible = false;
+                                    }
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                                "escape" => {
+                                    this.model_picker_visible = false;
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // File picker mirrors the model picker: same keymap.
+                        if this.file_picker_visible {
+                            match key {
+                                "up" => {
+                                    let len = this.cwd_files.len();
+                                    if len > 0 {
+                                        let cur = this.file_picker_selected as isize - 1;
+                                        this.file_picker_selected =
+                                            cur.rem_euclid(len as isize) as usize;
+                                        this.file_picker_scroll.scroll_to_item(
+                                            this.file_picker_selected,
+                                            ScrollStrategy::Nearest,
+                                        );
+                                    }
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                                "down" => {
+                                    let len = this.cwd_files.len();
+                                    if len > 0 {
+                                        let cur = this.file_picker_selected as isize + 1;
+                                        this.file_picker_selected =
+                                            cur.rem_euclid(len as isize) as usize;
+                                        this.file_picker_scroll.scroll_to_item(
+                                            this.file_picker_selected,
+                                            ScrollStrategy::Nearest,
+                                        );
+                                    }
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                                "enter" => {
+                                    if let Some(path) =
+                                        this.cwd_files.get(this.file_picker_selected).cloned()
+                                    {
+                                        let _ = this.bridge.send(UserAction::AddFile {
+                                            path: CompactString::new(path.as_str()),
+                                        });
+                                        this.file_picker_visible = false;
+                                    }
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                                "escape" => {
+                                    this.file_picker_visible = false;
+                                    cx.notify();
                                     cx.stop_propagation();
                                     return;
                                 }
@@ -2587,6 +2741,13 @@ impl ShellState {
             SharedString::new("idle")
         };
 
+        // Capture picker-open state for the trigger chips so they get the
+        // accent fill when their popup is showing — the user gets a tight
+        // visual link between "I see this chip depressed" and "the dropdown
+        // is open above me".
+        let file_chip_active = self.file_picker_visible;
+        let model_chip_active = self.model_picker_visible;
+
         div()
             .flex()
             .items_center()
@@ -2594,16 +2755,39 @@ impl ShellState {
             .mx_5()
             .mb_4()
             .text_xs()
-            .child(input_chip_plain(
+            .child(input_chip_trigger(
+                "input-chip-add",
                 "+",
-                Some(view_entity.clone()),
-                |this, win, cx| {
-                    let _ = this.bridge.send(UserAction::CreateSession { name: None });
-                    drop(win);
+                file_chip_active,
+                view_entity.clone(),
+                |state, _, cx| {
+                    // Toggle the file picker; close the model picker if it
+                    // was open so only one dropdown shows at a time.
+                    let was_open = state.file_picker_visible;
+                    state.file_picker_visible = !was_open;
+                    if state.file_picker_visible {
+                        state.model_picker_visible = false;
+                        state.cwd_files = load_cwd_files();
+                        state.file_picker_selected = 0;
+                    }
                     cx.notify();
                 },
             ))
-            .child(input_chip_meta(model_label.as_str(), None))
+            .child(input_chip_trigger(
+                "input-chip-model",
+                model_label.as_str(),
+                model_chip_active,
+                view_entity.clone(),
+                |state, _, cx| {
+                    let was_open = state.model_picker_visible;
+                    state.model_picker_visible = !was_open;
+                    if state.model_picker_visible {
+                        state.file_picker_visible = false;
+                        state.model_picker_selected = 0;
+                    }
+                    cx.notify();
+                },
+            ))
             .child(input_chip_meta(mode_label.as_str(), Some("▾")))
             .child(input_chip_meta("+ MCP", None))
             .child(input_chip_status(idle_label.as_str(), self.is_thinking))
@@ -2613,6 +2797,197 @@ impl ShellState {
                 self.is_thinking,
                 view_entity,
             ))
+            .into_any_element()
+    }
+
+    /// Render the dropdown above the input box listing the cached
+    /// `QuickModelEntry` rows. Clicking a row fires
+    /// `UserAction::SetModel { model }` with the canonical `provider/model`
+    /// string the engine expects, and the picker auto-closes. Lines up
+    /// vertically with the input column (same `mx_5()` inset) so the user
+    /// sees the trigger chip and its options in the same column.
+    fn render_model_picker(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let count = self.quick_models.len();
+        if count == 0 {
+            return div().into_any_element();
+        }
+        let model_picker_scroll = self.model_picker_scroll.clone();
+        let current = self
+            .model_picker_selected
+            .min(self.quick_models.len().saturating_sub(1));
+        let entries: Vec<QuickModelEntry> = self.quick_models.clone();
+        let view_entity = cx.entity().clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_0()
+            .mx_5()
+            .mb_1()
+            .p_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(dark::CHIP_BORDER))
+            .bg(rgb(dark::BUTTON_BG))
+            .max_h(px(220.0))
+            .text_sm()
+            .child(label_hint("model"))
+            .child(
+                div().h(px(180.)).child(
+                    uniform_list(
+                        "model-picker-list",
+                        count,
+                        cx.processor(move |_this, range: std::ops::Range<usize>, _window, _cx| {
+                            range
+                                .map(|idx| {
+                                    let entry = &entries[idx];
+                                    let view_for_click = view_entity.clone();
+                                    let model_arg_for_click = entry.model_arg.clone();
+                                    div()
+                                        .id(("model-picker-row", idx))
+                                        .flex()
+                                        .gap_3()
+                                        .px_2()
+                                        .py_1p5()
+                                        .rounded_sm()
+                                        .bg(if idx == current {
+                                            rgb(dark::BUTTON_HOVER)
+                                        } else {
+                                            rgba(0x00000000)
+                                        })
+                                        .when(idx == current, |d| {
+                                            d.border_l_2().border_color(rgb(dark::ACCENT))
+                                        })
+                                        .child({
+                                            let name_owned = entry.name.clone();
+                                            div()
+                                                .text_color(rgb(dark::ACCENT))
+                                                .text_xs()
+                                                .min_w(px(96.0))
+                                                .child(name_owned)
+                                        })
+                                        .child({
+                                            let provider_owned = entry.provider.clone();
+                                            div()
+                                                .text_color(rgb(dark::TEXT_MUTED))
+                                                .text_xs()
+                                                .child(provider_owned)
+                                        })
+                                        .child(div().flex_1())
+                                        .child({
+                                            let model_arg_owned = entry.model_arg.clone();
+                                            div()
+                                                .text_color(rgb(dark::TEXT_MUTED))
+                                                .text_xs()
+                                                .overflow_hidden()
+                                                .child(model_arg_owned)
+                                        })
+                                        .on_click(move |_ev, _window, cx| {
+                                            view_for_click.update(cx, |state, cx| {
+                                                let _ = state.bridge.send(UserAction::SetModel {
+                                                    model: CompactString::new(
+                                                        model_arg_for_click.as_str(),
+                                                    ),
+                                                });
+                                                state.model_picker_visible = false;
+                                                cx.notify();
+                                            });
+                                        })
+                                })
+                                .collect()
+                        }),
+                    )
+                    .track_scroll(&model_picker_scroll)
+                    .h_full(),
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// Render the dropdown above the input box listing files in the
+    /// current working directory. Clicking a row fires
+    /// `UserAction::AddFile { path }` (the engine resolves to absolute +
+    /// canonical), and the picker auto-closes. The list cap (64) plus
+    /// ignored `.git`/`target`/etc. directories keeps the surface short;
+    /// users needing the long tail route through `/add <path>`.
+    fn render_file_picker(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let count = self.cwd_files.len();
+        if count == 0 {
+            return div().into_any_element();
+        }
+        let file_picker_scroll = self.file_picker_scroll.clone();
+        let current = self
+            .file_picker_selected
+            .min(self.cwd_files.len().saturating_sub(1));
+        let entries: Vec<String> = self.cwd_files.clone();
+        let view_entity = cx.entity().clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_0()
+            .mx_5()
+            .mb_1()
+            .p_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(dark::CHIP_BORDER))
+            .bg(rgb(dark::BUTTON_BG))
+            .max_h(px(220.0))
+            .text_sm()
+            .child(label_hint("file picker"))
+            .child(
+                div().h(px(180.)).child(
+                    uniform_list(
+                        "file-picker-list",
+                        count,
+                        cx.processor(move |_this, range: std::ops::Range<usize>, _window, _cx| {
+                            range
+                                .map(|idx| {
+                                    let path = &entries[idx];
+                                    let view_for_click = view_entity.clone();
+                                    let path_for_click = path.clone();
+                                    div()
+                                        .id(("file-picker-row", idx))
+                                        .flex()
+                                        .gap_3()
+                                        .px_2()
+                                        .py_1p5()
+                                        .rounded_sm()
+                                        .bg(if idx == current {
+                                            rgb(dark::BUTTON_HOVER)
+                                        } else {
+                                            rgba(0x00000000)
+                                        })
+                                        .when(idx == current, |d| {
+                                            d.border_l_2().border_color(rgb(dark::ACCENT))
+                                        })
+                                        .child({
+                                            let display = path_to_display(path);
+                                            div()
+                                                .text_color(rgb(dark::TEXT))
+                                                .text_xs()
+                                                .min_w(px(96.0))
+                                                .child(display)
+                                        })
+                                        .child(div().flex_1())
+                                        .on_click(move |_ev, _window, cx| {
+                                            view_for_click.update(cx, |state, cx| {
+                                                let _ = state.bridge.send(UserAction::AddFile {
+                                                    path: CompactString::new(
+                                                        path_for_click.as_str(),
+                                                    ),
+                                                });
+                                                state.file_picker_visible = false;
+                                                cx.notify();
+                                            });
+                                        })
+                                })
+                                .collect()
+                        }),
+                    )
+                    .track_scroll(&file_picker_scroll)
+                    .h_full(),
+                ),
+            )
             .into_any_element()
     }
 
@@ -2753,46 +3128,6 @@ fn input_chip_meta(label: &str, trailing: Option<&'static str>) -> gpui::AnyElem
 /// Render the leading `+` chip on the input row. Mirrors the
 /// sidebar's `+ New Session` logic so the user has one logical
 /// "start fresh" affordance. We accept the entity as an
-/// `Option` so the same closure type works for the read-only
-/// chips below.
-fn input_chip_plain<F>(
-    label: &str,
-    view_entity: Option<gpui::Entity<ShellState>>,
-    on_click: F,
-) -> gpui::AnyElement
-where
-    F: Fn(&mut ShellState, &mut gpui::Window, &mut gpui::Context<ShellState>) + 'static,
-{
-    let base = div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .px_2p5()
-        .py_1()
-        .rounded_md()
-        .bg(rgb(dark::CHIP_BG))
-        .border_1()
-        .border_color(rgb(dark::CHIP_BORDER))
-        .text_color(rgb(dark::ACCENT))
-        .cursor_pointer()
-        .hover(|this| this.bg(rgb(dark::CHIP_HOVER)))
-        .child(label.to_string());
-    let chip = base.id("input-chip-plus");
-    if let Some(entity) = view_entity {
-        chip.on_click({
-            let entity = entity.clone();
-            move |_ev, window, cx| {
-                entity.update(cx, |state, cx| {
-                    on_click(state, window, cx);
-                });
-            }
-        })
-        .into_any_element()
-    } else {
-        chip.into_any_element()
-    }
-}
-
 /// Status pill: shows "thinking…" while the agent is streaming
 /// (click-to-cancel), or the soft "idle" chip otherwise. The
 /// "cancel" path mirrors the previous standalone Cancel button,
@@ -2874,6 +3209,154 @@ fn input_chip_send(
     } else {
         chip.into_any_element()
     }
+}
+
+/// Render a small pill chip that opens (or dismisses) one of the input-bar
+/// pickers. Same shape as the plain metadata chips, but with hover/active
+/// state driven by `active` — when true, the chip bg flips to the accent
+/// tint and the text picks up the accent hue so the user sees an obvious
+/// "this dropdown is currently open" feedback. The trailing chevron is
+/// left to the caller; we don't bake one in so the helper covers both
+/// the `+` row and the model row uniformly.
+fn input_chip_trigger<F>(
+    id: &'static str,
+    label: &str,
+    active: bool,
+    view_entity: gpui::Entity<ShellState>,
+    on_click: F,
+) -> gpui::AnyElement
+where
+    F: Fn(&mut ShellState, &mut gpui::Window, &mut gpui::Context<ShellState>) + 'static,
+{
+    let (bg, fg, border) = if active {
+        (
+            rgb(dark::CHIP_ACCENT_BG),
+            rgb(dark::ACCENT),
+            rgb(dark::ACCENT_DEEP),
+        )
+    } else {
+        (
+            rgb(dark::CHIP_BG),
+            rgb(dark::TEXT_SECONDARY),
+            rgb(dark::CHIP_BORDER),
+        )
+    };
+    div()
+        .id(ElementId::Name(id.into()))
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2p5()
+        .py_1()
+        .rounded_md()
+        .bg(bg)
+        .border_1()
+        .border_color(border)
+        .text_xs()
+        .text_color(fg)
+        .cursor_pointer()
+        .hover(|this| this.bg(rgb(dark::CHIP_HOVER)))
+        .child(label.to_string())
+        .on_click({
+            let view_entity = view_entity.clone();
+            move |_ev, window, cx| {
+                view_entity.update(cx, |state, cx| {
+                    on_click(state, window, cx);
+                });
+            }
+        })
+        .into_any_element()
+}
+
+/// Load the quick-model list from the resolved config. The engine has
+/// already loaded `cfg` from `~/.config/zerostack/config.toml` and merged
+/// defaults, so we just point at the same source. We sort by the friendly
+/// name (`key`) so the picker popup presents a stable, predictable
+/// order — `cfg.quick_models` is a `HashMap`, so iteration order is
+/// otherwise non-deterministic across runs.
+fn load_quick_models() -> Vec<QuickModelEntry> {
+    let (cfg, _is_first) = zerostack_core::config::load();
+    let mut entries: Vec<QuickModelEntry> = cfg
+        .quick_models
+        .as_ref()
+        .map(|qm| {
+            qm.iter()
+                .map(|(key, qmc)| QuickModelEntry {
+                    name: key.to_string(),
+                    provider: qmc.provider.to_string(),
+                    model_arg: qmc.model.to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    entries
+}
+
+/// List of files in the current working directory. Refreshed once at
+/// startup. We deliberately cap to a small number and skip common
+/// noise directories (`.git`, hidden dirs) — the picker is a quick
+/// "attach this file" affordance, not a project-wide browser, so the
+/// first ~64 names the user sees is what matters. Hidden screenshot/
+/// tool-cache folders can always be reached through the `/add` slash
+/// command for the long tail.
+fn load_cwd_files() -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(".") else {
+        return names;
+    };
+    for entry in entries.flatten() {
+        if names.len() >= 64 {
+            break;
+        }
+        let raw = entry.file_name();
+        let name = raw.to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        // Skip directories that are known noise targets — `.git`,
+        // `target`, `node_modules` style — when the user is in a fresh
+        // checkout they don't want these crowding the picker.
+        if matches!(
+            name.as_str(),
+            "target" | "node_modules" | "dist" | "build" | "__pycache__"
+        ) {
+            continue;
+        }
+        names.push(name);
+    }
+    names.sort();
+    names
+}
+
+/// Compact label header for the picker popups (e.g. `model`, `file picker`).
+/// Kept tiny and muted so it doesn't compete with the actual list rows.
+fn label_hint(text: &'static str) -> gpui::AnyElement {
+    div()
+        .text_xs()
+        .px_2()
+        .py_1()
+        .text_color(rgb(dark::TEXT_MUTED))
+        .child(text)
+        .into_any_element()
+}
+
+/// Render a path string for the file picker: truncate the directory prefix
+/// so the row stays roughly on-screen for any depth (the picker scrolls if
+/// it's longer than the row, but keeping it under ~48 columns means the
+/// user doesn't need to scroll horizontally inside a row).
+fn path_to_display(path: &str) -> String {
+    if path.len() <= 48 {
+        return path.to_string();
+    }
+    // Keep the trailing 30 chars which usually hold the basename and a hint
+    // about its parent: `…/parent/very_long_filename.rs`.
+    let head_budget = 16;
+    let tail_budget = 30;
+    let ellipsis = "…/";
+    let head = &path[..head_budget.min(path.len())];
+    let tail_start = path.len().saturating_sub(tail_budget);
+    format!("{head}{ellipsis}{}", &path[tail_start..])
 }
 
 // === IME (Unicode / Chinese) input plumbing =====================================
