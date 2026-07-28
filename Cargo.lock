@@ -13599,6 +13599,8 @@ dependencies = [
  "pulldown-cmark",
  "serde_json",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "zerostack-core",
 ]
 

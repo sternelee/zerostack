@@ -15,6 +15,18 @@ path = "src/lib.rs"
 name = "zerostack-gui"
 path = "src/main.rs"
 
+[features]
+# Enables the Wasm extension registry inside the GUI. Mirrors the
+# equivalent flag on `zerostack-core`. When this is off the GUI builds
+# without any of the extension code paths and `#[cfg(feature =
+# "extensions")]` blocks in `view.rs` collapse to empty. Note this is
+# purely a source-gate; the `extensions` feature on `zerostack-core` is
+# enabled *unconditionally* via the dep below so that the linker has
+# the extension symbols available — this flag is what the `view.rs`
+# code-gates look at.
+extensions = []
+default = ["extensions"]
+
 [dependencies]
 zerostack-core = { path = "../core", default-features = false, features = ["extensions"] }
 gpui = { path = "../../../../../Downloads/zed-main/crates/gpui" }
@@ -24,6 +36,8 @@ tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
 compact_str = { version = "0.9", features = ["serde"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_macos = { path = "../../../../../Downloads/zed-main/crates/gpui_macos", features = ["font-kit"] }

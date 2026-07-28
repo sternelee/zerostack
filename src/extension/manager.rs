@@ -1,5 +1,6 @@
 //! Extension manager — orchestrates discovery, loading, and lifecycle.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::extension::host::ExtensionHost;
@@ -72,9 +73,44 @@ impl ExtensionManager {
         let mn = self.model_name.clone();
         let pt = self.project_trusted;
 
+        // Log the directory list at info level so the user can see *exactly*
+        // what we searched when an extension is "missing". Mirrors the same
+        // tracing line in `crates/core/src/extension/manager.rs` so the GUI
+        // binary and the CLI/TUI binary are greppable from the same root.
+        tracing::info!(
+            ?dirs,
+            "scanning extension directories for auto-discovered Wasm extensions",
+        );
+
+        // Dedupe by extension `id`. The dirs come back from
+        // `loader::extension_dirs` in **priority order** — earlier
+        // entries win — so we record ids we've already registered and
+        // skip subsequent bundles carrying the same id, regardless of
+        // which directory they're sitting in. A project that ships its
+        // own pinned extension at `.zerostack/extensions/` therefore
+        // silently shadows the user's global install without any
+        // configuration ceremony, but if the user doesn't ship a pin
+        // we still pick up the global at the slot below.
+        let mut seen_ids: HashSet<String> = HashSet::new();
+
         for dir in &dirs {
+            if !dir.is_dir() {
+                // Most users populate only one or two slots in the
+                // priority list; missing directories are expected, not
+                // an error.
+                continue;
+            }
             let bundles = loader::discover_extensions(dir);
             for bundle in bundles {
+                let id = bundle.manifest.id.clone();
+                if !seen_ids.insert(id.clone()) {
+                    tracing::debug!(
+                        extension_id = %id,
+                        ?dir,
+                        "skipping duplicate extension; already registered from a higher-priority directory",
+                    );
+                    continue;
+                }
                 self.load_bundle(bundle, &cwd, &sid, &mn, pt);
             }
         }

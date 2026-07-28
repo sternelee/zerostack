@@ -160,21 +160,134 @@ pub fn discover_extensions(extensions_dir: &Path) -> Vec<ExtensionBundle> {
     bundles
 }
 
-/// Returns standard extension directories to scan.
+/// Returns standard extension directories to scan, in increasing order of
+/// specificity (most generic first, most specific last) so neither
+/// accidentally shadows the other.
+///
+/// 1. **Global data dir** (XDG_DATA_HOME on Linux,
+///    `~/Library/Application Support` on macOS) under `zerostack/extensions/`.
+/// 2. **Global config dir** (XDG_CONFIG_HOME on Linux — typically
+///    `~/.config/zerostack/extensions/`), the same XDG location the user
+///    already has. On macOS this aliases the data dir, which is fine —
+///    XDG-style config dirs are the more familiar surface for Linux users
+///    installing a binary from a package manager.
+/// 3. **Project-local `<cwd>/.zerostack/extensions/`** for workspace-bundled
+///    Wasm artifacts under version control.
+/// 4. **In-tree `tests/extensions/`** when developing from inside a workspace
+///    checkout — `Cargo.toml` of the root crate is our anchor.
+///
+/// The returned list is in priority order: earlier entries *win* over
+/// later entries when two directories share an `extension.toml` with
+/// the same `id`. `ExtensionManager::load_all` walks the list in order
+/// and skips ids already registered, which means project-local
+/// extensions naturally override platform defaults without any extra
+/// coordination. The in-tree `tests/extensions/` directory sits at the
+/// *bottom* because its example manifests commonly point at
+/// `target/wasm32-wasip2/...` paths that only resolve after
+/// `cargo build --target wasm32-wasip2` — placing it higher would
+/// silently shadow the user's manual install at `~/.config/...`.
 pub fn extension_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
-    // Global extensions.
-    if let Some(data_dir) = dirs::data_dir() {
-        dirs.push(data_dir.join("zerostack").join("extensions"));
+    // 1. Explicit override via env var — handy when the user wants a
+    //    single catch-all directory without splitting across XDG paths.
+    //    Inserted *first* so a manual install in `ZS_EXTENSIONS_DIR`
+    //    shadows the auto-discovered defaults, matching the conventions
+    //    used by `ZS_DATA_DIR` / `ZS_CONFIG_DIR` in `session/storage.rs`.
+    if let Some(raw) = std::env::var_os("ZS_EXTENSIONS_DIR") {
+        let expanded = expand_tilde(&raw.to_string_lossy());
+        dirs.push(PathBuf::from(expanded));
     }
 
-    // Project-local extensions.
+    // 2. Project-local `.zerostack/extensions/`, sitting next to the
+    //    user's `Cargo.toml` (or whatever they're working on). Pinned to
+    //    the cwd at startup — projects that ship their own pinned
+    //    extension versions commit them next to their workspace, and
+    //    this is the path that picks them up.
     if let Ok(cwd) = std::env::current_dir() {
         dirs.push(cwd.join(".zerostack").join("extensions"));
     }
 
+    // 3. Hand-rolled `~/.config/zerostack/extensions/` probe. macOS maps
+    //    `config_dir` to `~/Library/Application Support`, so step 4
+    //    misses the path a Linux-fluent user typically creates at
+    //    `~/.config/...`. Higher priority than the platform globals
+    //    because users who bothered to create it usually want it to
+    //    override the OS default.
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".config").join("zerostack").join("extensions"));
+    }
+
+    // 4. The `dirs` config-dir XDG slot. On Linux this is the same as
+    //    step 3, but kept for parity with `XDG_CONFIG_HOME` overrides
+    //    that point at a non-default location. On macOS this maps to
+    //    `~/Library/Application Support` (same path as step 5 — the
+    //    dedupe below handles the duplicate).
+    if let Some(config_dir) = dirs::config_dir() {
+        dirs.push(config_dir.join("zerostack").join("extensions"));
+    }
+
+    // 5. The `dirs` data-dir fallback. macOS resolves to
+    //    `~/Library/Application Support/zerostack/extensions/`, which is
+    //    the canonical install location the `.app` bundle targets.
+    //    Linux resolves to `~/.local/share/zerostack/extensions/`. Sits
+    //    above the in-tree checkout so a user override anywhere in
+    //    steps 1–4 automatically wins.
+    if let Some(data_dir) = dirs::data_dir() {
+        dirs.push(data_dir.join("zerostack").join("extensions"));
+    }
+
+    // 6. In-tree `tests/extensions/` when developing from inside a
+    //    workspace checkout. Sits at the *lowest* priority because
+    //    its dev manifests default to `target/wasm32-wasip2/...`
+    //    entrypoints that aren't built by default — a checkout at a
+    //    higher priority would silently shadow the user's manual
+    //    install.
+    if let Some(in_tree) = find_in_tree_tests_extensions() {
+        dirs.push(in_tree);
+    }
+
     dirs
+}
+
+/// Expand a leading `~` or `~/` in a path string to the user's home
+/// directory. No-op when the path doesn't start with `~` or `HOME`
+/// is unset. `~user/...` is left to the OS to resolve later.
+fn expand_tilde(raw: &str) -> String {
+    if !raw.starts_with('~') {
+        return raw.to_string();
+    }
+    let home = match std::env::var_os("HOME") {
+        Some(h) => h.to_string_lossy().into_owned(),
+        None => return raw.to_string(),
+    };
+    if raw == "~" {
+        return home;
+    }
+    let rest = &raw[1..];
+    if rest.starts_with('/') || rest.is_empty() {
+        return format!("{home}{rest}");
+    }
+    raw.to_string()
+}
+
+/// Walk up the current directory looking for a `tests/extensions/` folder
+/// that sits beside a `Cargo.toml`. Returns `None` when the cwd isn't
+/// inside the zerostack workspace — handy for users who reinstall the
+/// binary elsewhere or build with `cargo install`.
+fn find_in_tree_tests_extensions() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let mut cur: std::path::PathBuf = cwd;
+    loop {
+        let manifest = cur.join("Cargo.toml");
+        let in_tree = cur.join("tests").join("extensions");
+        if manifest.is_file() && in_tree.is_dir() {
+            return Some(in_tree);
+        }
+        if !cur.pop() {
+            return None;
+        }
+    }
 }
 
 #[cfg(test)]

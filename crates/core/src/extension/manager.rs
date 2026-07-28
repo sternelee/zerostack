@@ -1,5 +1,6 @@
 //! Extension manager — orchestrates discovery, loading, and lifecycle.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::extension::host::ExtensionHost;
@@ -72,9 +73,55 @@ impl ExtensionManager {
         let mn = self.model_name.clone();
         let pt = self.project_trusted;
 
+        // Log the directory list at info level so the user can see *exactly*
+        // what we searched when an extension is "missing" — common support
+        // cases are the user dropping the .wasm into `~/Library/...` on
+        // macOS while the launcher is run from `~/.config/...` on Linux,
+        // and so on. The TUI log path (`src/extension/manager.rs`) emits
+        // the same line so both frontends stay greppable.
+        tracing::info!(
+            ?dirs,
+            "scanning extension directories for auto-discovered Wasm extensions",
+        );
+
+        // Dedupe by extension `id`. The dirs come back from
+        // `loader::extension_dirs` in **priority order** — earlier
+        // entries win — so we record ids we've already registered and
+        // skip subsequent bundles carrying the same id, regardless of
+        // which directory they're sitting in. This is what lets a
+        // project pin a specific build of an extension at
+        // `.zerostack/extensions/` and have it silently shadow the
+        // user's global install without a config-file ceremony.
+        //
+        // We bail at `discover_extensions` time (per id, not per file
+        // path) because different copy locations of the same extension
+        // yield identical ids and the in-Wasm component identity is
+        // bound to the id, not the path. A project-pin still wins
+        // because the project directory sits higher in the priority
+        // list — we register it first, then skip the global.
+        let mut seen_ids = HashSet::new();
+
         for dir in &dirs {
+            if !dir.is_dir() {
+                // Quietly skip paths that don't exist. Missing dirs
+                // are expected — most users only have one or two
+                // entries populated in the priority list — so this is
+                // intentionally not a warning, just a fast-path early
+                // out so we don't `read_dir` a non-existent path
+                // every boot.
+                continue;
+            }
             let bundles = loader::discover_extensions(dir);
             for bundle in bundles {
+                let id = bundle.manifest.id.clone();
+                if !seen_ids.insert(id.clone()) {
+                    tracing::debug!(
+                        extension_id = %id,
+                        ?dir,
+                        "skipping duplicate extension; already registered from a higher-priority directory",
+                    );
+                    continue;
+                }
                 self.load_bundle(bundle, &cwd, &sid, &mn, pt);
             }
         }

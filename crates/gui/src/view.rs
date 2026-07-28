@@ -4358,6 +4358,19 @@ impl Render for ShellState {
 /// Program entry: build the engine on a background thread, drain its events into the
 /// root view from a 30Hz tick, quit cleanly when the last window closes.
 pub fn run() {
+    // Initialise the tracing subscriber so the engine thread's logs land on
+    // stderr. The GUI owns stdout (it's the drawing surface on macOS), so
+    // investigating "why didn't my extension load?" requires
+    // `RUST_LOG=info zerostack-gui 2>&1`. The bridge runs in its own OS
+    // thread, but the tracing subscriber writes to the *process* stderr
+    // (a global writer), so we register it before launching anything else.
+    crate::tracing_init::init();
+    eprintln!(
+        "zerostack-gui starting up; run with RUST_LOG=info to surface \
+         extension discovery logs on stderr"
+    );
+    tracing::info!("zerostack-gui starting up");
+
     let (model, provider) = resolve_provider_model();
     let bridge = GuiBridge::launch(
         &model,
@@ -4366,37 +4379,60 @@ pub fn run() {
     );
 
     // Initialise the Wasm extension registry before any UI state is built.
-    // We pass an empty path list so the manager only picks up auto-discovered
-    // extensions from the standard search directories — `~/.config/zerostack/extensions`
-    // on Linux/Windows and `~/Library/Application Support/zerostack/extensions`
-    // on macOS, plus the in-tree `tests/extensions/` artifacts when the
-    // binary is run from the workspace root. We don't expose `--extension`
-    // CLI flags for the GUI yet; mirroring the TUI would require adding a
-    // clap layer in `crates/gui/src/main.rs`, which is more surface than
-    // this slim mapper warrants. The TUI's matching call site lives in
-    // `src/startup.rs::initialise_extensions`.
+    // We pass an empty path list so `init_from_paths` only picks up
+    // auto-discovered extensions from the search directories — namely:
+    //  - `ZS_EXTENSIONS_DIR` if set (with `~` expanded to `$HOME`);
+    //  - `dirs::data_dir() / zerostack / extensions` (`~/Library/Application
+    //    Support/zerostack/extensions/` on macOS);
+    //  - `dirs::config_dir() / zerostack / extensions` (the same path on
+    //    macOS since `dirs` aliases the two, but distinct on Linux XDG);
+    //  - `$HOME/.config/zerostack/extensions/` directly — necessary on
+    //    macOS, where users sometimes create this themselves, since the
+    //    `dirs` crate won't surface it via `data_dir` / `config_dir`;
+    //  - `<cwd>/.zerostack/extensions/`;
+    //  - in-tree `tests/extensions/` if the binary is run from the
+    //    workspace root.
     //
     // Errors are logged but not fatal: a broken extension in the user's
     // home dir shouldn't keep the GUI from booting. The Wasm host's own
-    // `load_all()` path already collects per-path problems into
-    // `manager.errors()` and emits a `tracing::warn!` per entry, so by the
-    // time we get here the manager either succeeded or has a coherent
-    // what-loaded-and-what-didn't state.
+    // `load_all()` collects per-path problems into `manager.errors()`
+    // and emits a `tracing::warn!` per entry, so by the time control
+    // returns we either have a coherent what-loaded-and-what-didn't
+    // state, or the failing path is in the log.
+    //
+    // We don't expose `--extension` CLI flags for the GUI yet; mirroring
+    // the TUI would require adding a clap layer in
+    // `crates/gui/src/main.rs`, which is more surface area than this slim
+    // mapper warrants. The TUI's matching call site lives in
+    // `src/startup.rs::initialise_extensions`.
     #[cfg(feature = "extensions")]
-    if let Err(e) =
-        zerostack_core::extension::registry::init_from_paths(&[] as &[std::path::PathBuf])
-    {
-        tracing::warn!(error = %e, "extension registry init failed; picker will still show engine commands");
-    } else {
-        let names = zerostack_core::extension::registry::extension_command_names();
-        if !names.is_empty() {
-            tracing::info!(
-                count = names.len(),
-                ?names,
-                "extensions loaded into GUI slash picker"
-            );
+    match zerostack_core::extension::registry::init_from_paths(&[] as &[std::path::PathBuf]) {
+        Err(e) => {
+            eprintln!("[extensions] init failed: {e}");
+            tracing::warn!(error = %e, "extension registry init failed; picker will still show engine commands");
         }
-    };
+        Ok(()) => {
+            let names = zerostack_core::extension::registry::extension_command_names();
+            // Belt-and-suspenders: `tracing::info!` covers the case where
+            // the subscriber writes through `tracing-subscriber`'s env
+            // filter, but real users often run the GUI as an `.app` and
+            // miss env-filter wiring. We unconditionally mirror to stderr
+            // so a "did anything load?" answer is visible even on macOS
+            // where stdout is owned by the drawing surface.
+            eprintln!(
+                "[extensions] discovered {} command(s): {:?}",
+                names.len(),
+                names
+            );
+            if !names.is_empty() {
+                tracing::info!(
+                    count = names.len(),
+                    ?names,
+                    "extensions loaded into GUI slash picker"
+                );
+            }
+        }
+    }
 
     application().run(move |cx: &mut App| {
         let bridge_for_state = bridge;
