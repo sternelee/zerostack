@@ -544,12 +544,32 @@ pub async fn handle_slash(
                 } else {
                     String::new()
                 };
-                if let Some(output) =
-                    crate::extension::registry::dispatch_command(cmd_name, &full_args)
-                {
-                    let mut out = output;
+                let (output, queued_prompts) =
+                    crate::extension::registry::dispatch_with_prompts(cmd_name, &full_args);
+                if let Some(out) = output {
+                    let mut out = out;
                     out.push('\n');
                     ctx.renderer.write(&out, crate::ui::C_TOOL)?;
+                    // Route queued prompts into the agent input queue based
+                    // on deliverAs. We only handle `follow-up` and `next-turn`
+                    // here — `steer` requires mid-run injection handled by
+                    // the runner, which is wired in `event_handler.rs`.
+                    for (prompt_text, deliver_as) in queued_prompts {
+                        use crate::extension::host::types::DeliverAs as D;
+                        match deliver_as {
+                            D::FollowUp | D::NextTurn => {
+                                let _ = ctx.input.load_text(&prompt_text);
+                                let _ = ctx
+                                    .renderer
+                                    .write("[queued agent prompt]\n", crate::ui::C_RESULT);
+                            }
+                            D::Steer => {
+                                // Surface the steer prompt for the next turn;
+                                // mid-run steering lives in the runner.
+                                let _ = ctx.input.load_text(&prompt_text);
+                            }
+                        }
+                    }
                     // Sync session name from extension to session object.
                     let ext_name = crate::extension::registry::get_session_name();
                     if !ext_name.is_empty() && ext_name != ctx.session.name.as_str() {

@@ -1,0 +1,14 @@
+id = "test/permission-gate"
+name = "Permission Gate"
+version = "0.1.0"
+schema_version = 1
+description = "Example extension that gates destructive bash calls via on_tool_call."
+
+[extension]
+entrypoint = "target/wasm32-wasip2/debug/permission_gate.wasm"
+
+[capabilities]
+tools = true
+commands = false
+lifecycle = false
+ui = false

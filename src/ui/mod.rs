@@ -1,4 +1,5 @@
 mod app;
+pub(crate) mod dialogs;
 mod event_handler;
 pub(crate) mod events;
 pub(crate) mod feed;
@@ -119,6 +120,7 @@ pub(super) const C_ERROR: Color = Color::Red;
 pub(super) const C_TOOL: Color = Color::Yellow;
 pub(super) const C_PERM: Color = Color::Magenta;
 pub(super) const C_BTW: Color = Color::Cyan;
+pub(super) const C_RESULT: Color = Color::DarkGrey;
 #[cfg(feature = "advisor")]
 pub(super) const C_HANDOFF: Color = Color::Green;
 

@@ -61,6 +61,7 @@ cargo test test_name
 
 # Build Wasm extensions
 cargo build -p test-echo --target wasm32-wasip2
+cargo build -p session-name --target wasm32-wasip2
 cargo build -p pi-simplify --target wasm32-wasip2
 
 # Build release (intentional, for distribution)
@@ -154,12 +155,39 @@ cargo build --release
 
 ## Extension System
 
-- **WIT contract**: `crates/extension-api/wit/extension-v0.2.0.wit` (v0.3.0 with trigger-prompt)
-- **Capabilities**: `tools`, `commands`, `lifecycle`, `provider`, `ui`, `exec`, `http`, `session`
+- **WIT contract**: `crates/extension-api/wit/extension-v0.5.0.wit` (breaking)
+- **Package**: `zerostack:extension@0.5.0`
+- **Capabilities (manifest `extension.toml`)**: `tools`, `commands`, `lifecycle`, `provider`, `ui`, `exec`, `http`, `session`
 - **Defaults**: `tools: true`, `commands: true`, others `false`
-- **Tool namespacing**: `ext_id__tool_name` (double underscore separator)
-- **Command registration**: Extension calls `register_command()` in `init()`, host namespaces as `ext_id__command_name`
-- **Bare name resolution**: Both tools and commands support bare names when unambiguous
-- **Context**: `get_context()` returns `{cwd, session_id, model_name, project_trusted}`
-- **Lifecycle**: `session_start()`, `session_shutdown()` optional exports
-- **Trigger prompt**: `trigger-prompt(prompt, deliver_as)` injects prompt into agent input
+- **Tool namespacing**: `ext_id__tool_name` (double underscore); bare names resolve when unambiguous
+- **Command registration**: `register_command()` in `init()`, namespaced as `ext_id__command_name`. Conflicts get `:N` suffix in picker; host logs a warning.
+- **Context**: `get_context()` returns `{cwd, session_id, model_name, project_trusted, has_ui}`
+- **Lifecycle exports**: `session_start()`, `session_shutdown()` (optional, host detects presence)
+- **Async init**: `init_async()` (optional)
+- **Trigger prompt**: `trigger_prompt(prompt, deliver-as)` where `deliver-as` ∈ {`steer`, `follow-up`, `next-turn`}
+- **Session control**: `get_session_name`, `set_session_name`, `set_terminal_title`
+- **Tool definition fields**: `execution-mode` (`parallel`/`sequential`), `deferred` for deferred loading
+- **Tool output fields**: `terminate`, `added-tool-names`, `is-partial`
+- **Event hooks** (each guest export is invoked by the host; traps = no handler):
+  - `on_tool_call(name, call_id, input_json) → tool-call-decision { block?, reason?, new-input-json? }`
+  - `on_tool_result(name, call_id, input_json, content, details, is_error) → tool-result-patch`
+  - `on_user_bash(command, cwd) → string`
+  - `on_set_session_name(name) → bool`
+  - `on_session_before_compact(reason) → string`
+  - `on_session_compacted(reason, summary) → ()`
+  - `on_context(messages_json) → string`
+  - `on_before_agent_start(prompt) → string`
+  - `on_input(text, source) → string`
+  - `on_message_update(message_json) → ()`
+  - `on_event(name, payload_json) → ()` (cross-extension events)
+- **Arguments preparation**: `prepare_arguments(name, args_json) → string` (`ok:<json>` / `block:<msg>` / `patch:<json>` prefixes)
+- **UI prompts**: `select`, `confirm`, `input`, `notify` (host implementation gates on `has_ui`)
+- **UI status**: `set_status(key, text|None)`, `set_widget(key, lines|None, placement|None)`, `set_title`, `toast`
+- **Agent control**: `send_message`, `send_user_message`, `append_entry`, `set_model`, `get_active_tools`, `set_active_tools`, `compact`
+- **Capabilities**: provider registration, exec (`run`), http (`request`), truncator (`truncate_tail`, `truncate_head`, `cap_output`)
+- **Cross-extension**: events-bus (`publish`/`subscribe`/`unsubscribe`), file-mutation-queue, permissions, resources-discover, logger
+- **Resource limits**: 200M fuel, 96 MiB memory, 512 KiB stack, 10 k table entries, 60 s call timeout
+- **Project-trust gate**: `.zerostack/extensions/` is only auto-loaded when `project_trusted = true`
+- **Version-pin**: `extension.toml.minimum_zerostack_version` is checked at load time
+- **Prompt snippet/guidelines injection**: `ToolDefinition.prompt_snippet` / `prompt_guidelines` are folded into the agent's system preamble (`Extension_preamble_block`)
+- **Schema validation**: server-side JSON Schema validation in `ExtensionToolWrapper` (subset of draft 2020-12: type, properties, required, enum, items)
