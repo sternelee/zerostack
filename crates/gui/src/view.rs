@@ -597,6 +597,8 @@ pub struct ShellState {
     /// picker; clicking a row fires `UserAction::AddFile { path }` which
     /// the engine resolves absolutely and pushes into `context.extra_files`.
     cwd_files: Vec<String>,
+    /// Files currently injected into the agent context.
+    context_files: Vec<String>,
     model_picker_visible: bool,
     model_picker_selected: usize,
     model_picker_scroll: UniformListScrollHandle,
@@ -676,6 +678,7 @@ impl ShellState {
             close_confirm_focus: cx.focus_handle(),
             quick_models: load_quick_models(),
             cwd_files: load_cwd_files(),
+            context_files: Vec::new(),
             model_picker_visible: false,
             model_picker_selected: 0,
             model_picker_scroll: UniformListScrollHandle::new(),
@@ -1124,6 +1127,9 @@ impl ShellState {
                 self.status_provider = SharedString::new(provider.as_str());
                 self.status_tokens = tokens_used;
                 self.status_mode = SharedString::new(mode.as_str());
+            }
+            CoreEvent::ContextFilesUpdated { files } => {
+                self.context_files = files.into_iter().map(|path| path.to_string()).collect();
             }
             CoreEvent::AgentStarted => {
                 // New user turn; reset the streaming placeholder and the
@@ -2283,6 +2289,9 @@ impl ShellState {
             .when(self.file_picker_visible, |d| {
                 d.child(self.render_file_picker(cx))
             })
+            .when(!self.context_files.is_empty(), |d| {
+                d.child(self.render_context_files(cx))
+            })
             .child(
                 div()
                     .id("input-box")
@@ -2735,6 +2744,58 @@ impl ShellState {
                 view: view_entity,
                 focus: input_focus_clone,
             })
+    }
+
+    /// Persistent, removable context chips above the composer. The engine
+    /// remains the source of truth: a click requests removal and the row only
+    /// changes after `ContextFilesUpdated` comes back.
+    fn render_context_files(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let view_entity = cx.entity().clone();
+        let chips = self.context_files.iter().map(|path| {
+            let full_path = path.clone();
+            let label = std::path::Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path)
+                .to_string();
+            let view_for_remove = view_entity.clone();
+            div()
+                .id(ElementId::Name(format!("context-file-{path}").into()))
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(dark::CHIP_BORDER))
+                .bg(rgb(dark::CHIP_BG))
+                .text_xs()
+                .text_color(rgb(dark::TEXT_SECONDARY))
+                .child("▧")
+                .child(label)
+                .child(div().ml_1().text_color(rgb(dark::ICON_MUTED)).child("×"))
+                .hover(|d| {
+                    d.bg(rgb(dark::CHIP_HOVER))
+                        .border_color(rgb(dark::BORDER_HOVER))
+                })
+                .on_click(move |_ev, _window, cx| {
+                    view_for_remove.update(cx, |state, _cx| {
+                        let _ = state.bridge.send(UserAction::DropFile {
+                            path: CompactString::new(full_path.as_str()),
+                        });
+                    });
+                })
+        });
+
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .mx_5()
+            .mt_2()
+            .children(chips)
+            .into_any_element()
     }
 
     /// Render the slim chip row that lives below the input box. The chips

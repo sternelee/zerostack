@@ -551,21 +551,30 @@ pub async fn handle_slash(
                 } else {
                     String::new()
                 };
-                // Use the dual-return-value path so we can also drain any
-                // prompts the extension queued via `trigger-prompt`. Without
-                // this, an extension like `pi-simplify` would print the file
-                // list but never actually kick off the agent to review the
-                // code. See `AgentRunState::pending_inputs` for the drain.
                 let (output, queued_prompts) =
                     crate::extension::registry::dispatch_with_prompts(cmd_name, &full_args);
                 if output.is_some() || !queued_prompts.is_empty() {
-                    if let Some(output) = output {
-                        let mut out = output;
+                    if let Some(out) = output {
+                        let mut out = out;
                         out.push('\n');
                         ctx.renderer.write(&out, crate::ui::C_TOOL)?;
                     }
-                    for prompt in queued_prompts {
-                        ctx.pending_inputs.push_back(prompt);
+                    // Route queued prompts into the agent input queue based
+                    // on deliverAs. We only handle `follow-up` and `next-turn`
+                    // here — `steer` requires mid-run injection handled by
+                    // the runner, which is wired in `event_handler.rs`.
+                    for (prompt_text, deliver_as) in queued_prompts {
+                        use crate::extension::host::types::DeliverAs as D;
+                        match deliver_as {
+                            D::FollowUp | D::NextTurn => {
+                                ctx.pending_inputs.push_back(prompt_text);
+                            }
+                            D::Steer => {
+                                // Surface the steer prompt for the next turn;
+                                // mid-run steering lives in the runner.
+                                ctx.pending_inputs.push_back(prompt_text);
+                            }
+                        }
                     }
                     // Sync session name from extension to session object.
                     let ext_name = crate::extension::registry::get_session_name();

@@ -220,6 +220,19 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
             preamble.push_str(content);
         }
     }
+
+    // Append `prompt_snippet` / `prompt_guidelines` for extension tools so
+    // the model is aware of available extension-side tools and any usage
+    // constraints. Tool names are passed through verbatim (already
+    // namespaced by `host`).
+    #[cfg(feature = "extensions")]
+    {
+        let block = crate::extension::registry::extension_preamble_block();
+        if !block.is_empty() {
+            preamble.push_str("\n\n---\n\n");
+            preamble.push_str(&block);
+        }
+    }
     for content in &extra_files_content {
         preamble.push_str("\n\n---\n\n");
         preamble.push_str(content);

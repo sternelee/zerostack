@@ -23,6 +23,7 @@ wit_bindgen::generate!({
 use crate::zerostack::extension::command_registry::CommandDefinition;
 use crate::zerostack::extension::external_dirs as ext_dirs;
 use crate::zerostack::extension::tool_registry::ToolDefinition;
+use crate::zerostack::extension::types::ExecutionMode;
 
 struct AddDirExtension;
 
@@ -63,7 +64,9 @@ impl Guest for AddDirExtension {
                         .into(),
                 parameters_schema: r#"{"type":"object","properties":{"path":{"type":"string","description":"Directory path to add"}},"required":["path"]}"#.into(),
                 prompt_snippet: None,
-                prompt_guidelines: vec![],
+                prompt_guidelines: None,
+                execution_mode: Some(ExecutionMode::Parallel),
+                deferred: Some(false),
             },
             ToolDefinition {
                 name: "remove_directory".into(),
@@ -74,7 +77,9 @@ impl Guest for AddDirExtension {
                         .into(),
                 parameters_schema: r#"{"type":"object","properties":{"path":{"type":"string","description":"Directory path to remove"}},"required":["path"]}"#.into(),
                 prompt_snippet: None,
-                prompt_guidelines: vec![],
+                prompt_guidelines: None,
+                execution_mode: Some(ExecutionMode::Parallel),
+                deferred: Some(false),
             },
             ToolDefinition {
                 name: "list_directories".into(),
@@ -85,7 +90,9 @@ impl Guest for AddDirExtension {
                         .into(),
                 parameters_schema: r#"{"type":"object","properties":{}}"#.into(),
                 prompt_snippet: None,
-                prompt_guidelines: vec![],
+                prompt_guidelines: None,
+                execution_mode: Some(ExecutionMode::Parallel),
+                deferred: Some(false),
             },
         ] {
             crate::zerostack::extension::tool_registry::register_tool(&def)
@@ -115,6 +122,9 @@ impl Guest for AddDirExtension {
                 content: format!("directory added: {path}"),
                 details: serde_json::json!({ "path": path }).to_string(),
                 is_error: false,
+                terminate: None,
+                added_tool_names: None,
+                is_partial: None,
             })
         } else if name.ends_with("remove_directory") {
             let path = path_arg(&params_json)?;
@@ -123,6 +133,9 @@ impl Guest for AddDirExtension {
                 content: format!("directory removed: {path}"),
                 details: serde_json::json!({ "path": path }).to_string(),
                 is_error: false,
+                terminate: None,
+                added_tool_names: None,
+                is_partial: None,
             })
         } else if name.ends_with("list_directories") {
             let dirs = ext_dirs::list_dirs();
@@ -143,6 +156,9 @@ impl Guest for AddDirExtension {
                 content,
                 details: serde_json::json!({ "dirs": &dirs }).to_string(),
                 is_error: false,
+                terminate: None,
+                added_tool_names: None,
+                is_partial: None,
             })
         } else {
             Err(format!("unknown tool: {name}"))
@@ -167,6 +183,67 @@ impl Guest for AddDirExtension {
     }
 
     fn session_shutdown() -> Result<(), String> {
+        Ok(())
+    }
+
+    // ── v0.5.0 event hooks — no-op defaults ──
+    fn prepare_arguments(_name: String, args_json: String) -> Result<String, String> {
+        Ok(format!("ok:{args_json}"))
+    }
+    fn on_tool_call(
+        _name: String,
+        _call_id: String,
+        _input_json: String,
+    ) -> Result<ToolCallDecision, String> {
+        Ok(ToolCallDecision {
+            block: None,
+            reason: None,
+            new_input_json: None,
+        })
+    }
+    fn on_tool_result(
+        _name: String,
+        _call_id: String,
+        _input_json: String,
+        _content: String,
+        _details: String,
+        _is_error: bool,
+    ) -> Result<ToolResultPatch, String> {
+        Ok(ToolResultPatch {
+            content: None,
+            details: None,
+            is_error: None,
+            drop: None,
+        })
+    }
+    fn on_user_bash(_command: String, _cwd: String) -> Result<String, String> {
+        Ok(String::new())
+    }
+    fn on_set_session_name(_name: String) -> Result<bool, String> {
+        Ok(false)
+    }
+    fn on_session_before_compact(_reason: String) -> Result<String, String> {
+        Ok(String::new())
+    }
+    fn on_session_compacted(_reason: String, _summary: String) -> Result<(), String> {
+        Ok(())
+    }
+    fn on_context(_messages_json: String) -> Result<String, String> {
+        Ok(String::new())
+    }
+    fn on_before_agent_start(_prompt: String) -> Result<String, String> {
+        Ok(String::new())
+    }
+    fn on_input(_text: String, _source: String) -> Result<String, String> {
+        Ok(String::new())
+    }
+    fn on_message_update(_message_json: String) -> Result<(), String> {
+        Ok(())
+    }
+    fn on_event(_name: String, _payload_json: String) -> Result<(), String> {
+        Ok(())
+    }
+    fn init_async() -> Result<(), String> {
         Ok(())
     }
 }
@@ -291,10 +368,8 @@ fn suggest_external_dirs() -> Vec<String> {
             let has_context = p.join("AGENTS.md").exists()
                 || p.join("CLAUDE.md").exists()
                 || p.join("Cargo.toml").exists();
-            if has_context {
-                if let Ok(canon) = p.canonicalize() {
-                    push_unique(&mut out, &canon.to_string_lossy());
-                }
+            if has_context && let Ok(canon) = p.canonicalize() {
+                push_unique(&mut out, &canon.to_string_lossy());
             }
         }
     }

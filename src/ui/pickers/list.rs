@@ -99,7 +99,7 @@ fn available_commands() -> Vec<&'static str> {
 /// Get dynamic extension-registered command names.
 #[cfg(feature = "extensions")]
 fn extension_commands() -> Vec<String> {
-    let cmds = crate::extension::registry::extension_command_names();
+    let cmds = crate::extension::registry::extension_command_names_with_conflicts();
     if !cmds.is_empty() {
         tracing::debug!(?cmds, "extension commands added to picker");
     }

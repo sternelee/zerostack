@@ -72,6 +72,10 @@ pub enum CoreEvent {
         tokens_used: u64,
         mode: String,
     },
+    /// Authoritative list of files injected into the agent context.
+    ContextFilesUpdated {
+        files: Vec<CompactString>,
+    },
     /// Agent started processing (frontend can show "thinking" indicator).
     AgentStarted,
     /// Agent finished (counterpart to AgentStarted).
@@ -223,4 +227,5 @@ pub struct InitialState {
     pub model: CompactString,
     pub provider: CompactString,
     pub mode: String,
+    pub context_files: Vec<CompactString>,
 }

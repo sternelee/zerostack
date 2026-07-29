@@ -26,6 +26,7 @@ mod ui;
 
 #[cfg(test)]
 mod tests;
+mod version;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

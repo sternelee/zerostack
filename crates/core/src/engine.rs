@@ -246,6 +246,12 @@ impl CoreEngine {
             model: self.model.clone(),
             provider: self.provider.clone(),
             mode: self.mode.to_string(),
+            context_files: self
+                .context
+                .extra_files
+                .iter()
+                .map(|path| CompactString::new(path.to_string_lossy()))
+                .collect(),
         }
     }
 
@@ -441,13 +447,16 @@ impl CoreEngine {
                         message: CompactString::new(format!("rebuild failed: {e}")),
                     }];
                 }
-                vec![CoreEvent::CommandOutput {
-                    text: CompactString::from(format!(
-                        "added: {} ({}B)",
-                        canonical.display(),
-                        size
-                    )),
-                }]
+                vec![
+                    CoreEvent::CommandOutput {
+                        text: CompactString::from(format!(
+                            "added: {} ({}B)",
+                            canonical.display(),
+                            size
+                        )),
+                    },
+                    self.emit_context_files_updated(),
+                ]
             }
             UserAction::DropFile { path } => {
                 let path = resolve_path(&path);
@@ -464,9 +473,12 @@ impl CoreEngine {
                             message: CompactString::new(format!("rebuild failed: {e}")),
                         }];
                     }
-                    vec![CoreEvent::CommandOutput {
-                        text: CompactString::from(format!("dropped: {}", canonical.display())),
-                    }]
+                    vec![
+                        CoreEvent::CommandOutput {
+                            text: CompactString::from(format!("dropped: {}", canonical.display())),
+                        },
+                        self.emit_context_files_updated(),
+                    ]
                 } else {
                     vec![CoreEvent::CommandOutput {
                         text: CompactString::from(format!(
@@ -486,9 +498,12 @@ impl CoreEngine {
                         }];
                     }
                 }
-                vec![CoreEvent::CommandOutput {
-                    text: CompactString::from(format!("dropped {} file(s)", count)),
-                }]
+                vec![
+                    CoreEvent::CommandOutput {
+                        text: CompactString::from(format!("dropped {} file(s)", count)),
+                    },
+                    self.emit_context_files_updated(),
+                ]
             }
             UserAction::RunSlashCommand { command } => {
                 let t = command.trim_start();
@@ -985,13 +1000,16 @@ impl CoreEngine {
                         message: CompactString::new(format!("rebuild failed: {e}")),
                     }];
                 }
-                vec![CoreEvent::CommandOutput {
-                    text: CompactString::from(format!(
-                        "added: {} ({}B)",
-                        canonical.display(),
-                        size
-                    )),
-                }]
+                vec![
+                    CoreEvent::CommandOutput {
+                        text: CompactString::from(format!(
+                            "added: {} ({}B)",
+                            canonical.display(),
+                            size
+                        )),
+                    },
+                    self.emit_context_files_updated(),
+                ]
             }
             "/drop" | "/drop-all" => {
                 if cmd == "/drop-all" || (cmd == "/drop" && parts.len() < 2) {
@@ -1000,9 +1018,12 @@ impl CoreEngine {
                     if count > 0 {
                         let _ = self.rebuild_agent().await;
                     }
-                    return vec![CoreEvent::CommandOutput {
-                        text: CompactString::from(format!("dropped {} file(s)", count)),
-                    }];
+                    return vec![
+                        CoreEvent::CommandOutput {
+                            text: CompactString::from(format!("dropped {} file(s)", count)),
+                        },
+                        self.emit_context_files_updated(),
+                    ];
                 }
                 let path = resolve_path(parts[1]);
                 let canonical = path.canonicalize().unwrap_or(path);
@@ -1014,9 +1035,12 @@ impl CoreEngine {
                 {
                     self.context.extra_files.remove(i);
                     let _ = self.rebuild_agent().await;
-                    vec![CoreEvent::CommandOutput {
-                        text: CompactString::from(format!("dropped: {}", canonical.display())),
-                    }]
+                    vec![
+                        CoreEvent::CommandOutput {
+                            text: CompactString::from(format!("dropped: {}", canonical.display())),
+                        },
+                        self.emit_context_files_updated(),
+                    ]
                 } else {
                     vec![CoreEvent::CommandOutput {
                         text: CompactString::from(format!(
@@ -1194,6 +1218,17 @@ impl CoreEngine {
             provider: self.provider.clone(),
             tokens_used: self.tokens_used,
             mode: self.mode.to_string(),
+        }
+    }
+
+    fn emit_context_files_updated(&self) -> CoreEvent {
+        CoreEvent::ContextFilesUpdated {
+            files: self
+                .context
+                .extra_files
+                .iter()
+                .map(|path| CompactString::new(path.to_string_lossy()))
+                .collect(),
         }
     }
 }

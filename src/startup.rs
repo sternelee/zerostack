@@ -503,7 +503,14 @@ impl Startup {
         #[cfg(feature = "extensions")]
         {
             let extension_paths: Vec<std::path::PathBuf> = self.cli.extension.clone();
-            crate::extension::registry::init_from_paths(&extension_paths)
+            // Project-trust gate: in restrictive/read-only modes we still load
+            // globally-installed extensions but skip the project's
+            // `.zerostack/extensions/` directory.
+            let trust = matches!(
+                resolve_mode(&self.cli, &self.cfg),
+                crate::permission::SecurityMode::Standard | crate::permission::SecurityMode::Yolo
+            );
+            crate::extension::registry::init_from_paths(&extension_paths, trust)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             tracing::info!(count = extension_paths.len(), "extensions initialized");
         }

@@ -1,21 +1,31 @@
 //! Extension manager — orchestrates discovery, loading, and lifecycle.
+//!
+//! v0.5.0 changes:
+//! - Project-trust gate for project-local `.zerostack/extensions/`.
+//! - Version-pin check via `extension.toml.minimum_zerostack_version`.
+//! - Conflict diagnostics (tool name + slash command name).
+//! - Capability-enforced host imports; unsupported exports are *trapped*
+//!   (extension side cannot silently call them).
+//! - Provider registration queue surfaced.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::extension::host::ExtensionHost;
 use crate::extension::loader::{self, Capabilities, ExtensionBundle};
-use crate::extension::{ExtensionMeta, RegisteredTool};
+use crate::extension::{ExtensionMeta, LoadDiagnostics, RegisteredTool};
 
 /// Top-level extension manager. Owns the ExtensionHost and coordinates
 /// extension discovery, loading, queries, and teardown.
 pub(crate) struct ExtensionManager {
     host: ExtensionHost,
-    /// Metadata for loaded extensions by id.
     extensions: Vec<ExtensionMeta>,
     /// Bundles that failed to load (with error).
     errors: Vec<(PathBuf, String)>,
-    /// Current context (updated per-session).
+    /// Conflict + capability diagnostics emitted during load.
+    diagnostics: LoadDiagnostics,
+    /// Whether the host currently has a TUI to pop up dialogs.
+    has_ui: bool,
     cwd: String,
     session_id: String,
     model_name: String,
@@ -23,13 +33,14 @@ pub(crate) struct ExtensionManager {
 }
 
 impl ExtensionManager {
-    /// Create a new ExtensionManager with an empty host.
     pub fn new() -> Result<Self, String> {
         let host = ExtensionHost::new()?;
         Ok(Self {
             host,
             extensions: Vec::new(),
             errors: Vec::new(),
+            diagnostics: LoadDiagnostics::default(),
+            has_ui: false,
             cwd: std::env::current_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
@@ -39,7 +50,11 @@ impl ExtensionManager {
         })
     }
 
-    /// Update context for all loaded extensions.
+    pub fn set_has_ui(&mut self, has_ui: bool) {
+        self.has_ui = has_ui;
+        self.propagate_context();
+    }
+
     pub fn update_context(
         &mut self,
         cwd: &str,
@@ -51,27 +66,36 @@ impl ExtensionManager {
         self.session_id = session_id.to_string();
         self.model_name = model_name.to_string();
         self.project_trusted = project_trusted;
-        self.host
-            .update_context(cwd, session_id, model_name, project_trusted);
+        self.propagate_context();
     }
 
-    /// Call session_start on all loaded extensions.
+    fn propagate_context(&mut self) {
+        self.host.update_context(
+            &self.cwd,
+            &self.session_id,
+            &self.model_name,
+            self.project_trusted,
+            self.has_ui,
+        );
+    }
+
     pub fn call_session_start(&mut self) {
         self.host.call_session_start();
     }
 
-    /// Call session_shutdown on all loaded extensions.
     pub fn call_session_shutdown(&mut self) {
         self.host.call_session_shutdown();
     }
 
     /// Discover and load all extensions from standard directories.
+    /// Returns the metadata of newly loaded extensions.
     pub fn load_all(&mut self) -> Vec<&ExtensionMeta> {
         let dirs = loader::extension_dirs();
         let cwd = self.cwd.clone();
         let sid = self.session_id.clone();
         let mn = self.model_name.clone();
         let pt = self.project_trusted;
+        let project_trusted_gate = pt; // alias for readability
 
         // Log the directory list at info level so the user can see *exactly*
         // what we searched when an extension is "missing". Mirrors the same
@@ -100,6 +124,15 @@ impl ExtensionManager {
                 // an error.
                 continue;
             }
+            let is_project_local = dir.ends_with(".zerostack/extensions");
+            if is_project_local && !project_trusted_gate {
+                tracing::warn!(
+                    dir = %dir.display(),
+                    "skipping project-local extensions: project is not trusted"
+                );
+                continue;
+            }
+
             let bundles = loader::discover_extensions(dir);
             for bundle in bundles {
                 let id = bundle.manifest.id.clone();
@@ -115,16 +148,26 @@ impl ExtensionManager {
             }
         }
 
+        // Conflict diagnostics collected after all extensions loaded.
+        let cmd_conflicts = self.host.command_conflicts();
+        for (name, exts) in cmd_conflicts {
+            self.diagnostics.command_conflicts.push((name, exts));
+        }
+        let tool_conflicts = self.host.tool_conflicts();
+        for (name, exts) in tool_conflicts {
+            self.diagnostics.tool_conflicts.push((name, exts));
+        }
+
         self.extensions.iter().collect()
     }
 
-    /// Load a single extension from a bundle.
     fn load_bundle(&mut self, bundle: ExtensionBundle, cwd: &str, sid: &str, mn: &str, pt: bool) {
         let extension_id = bundle.manifest.id.clone();
         let wasm_path = bundle.wasm_path.clone();
 
         match self.host.load_extension(
             &extension_id,
+            Some(&bundle.manifest),
             &wasm_path,
             &bundle.manifest.capabilities,
             cwd,
@@ -153,9 +196,9 @@ impl ExtensionManager {
         }
     }
 
-    /// Load a extension from an explicit .wasm path (for CLI --extension flag).
-    /// Tries to find and parse an adjacent `extension.toml` for metadata and
-    /// capabilities; falls back to a sensible default.
+    /// Load a single .wasm extension (used by `--extension <path>`).
+    /// Tries to find an adjacent `extension.toml`; falls back to permissive
+    /// defaults (tools + commands enabled).
     pub fn load_standalone(&mut self, wasm_path: &Path) -> Result<ExtensionMeta, String> {
         let extension_id = wasm_path
             .file_stem()
@@ -163,9 +206,7 @@ impl ExtensionManager {
             .unwrap_or("standalone")
             .to_string();
 
-        // Try to find extension.toml next to the .wasm file, or in a parent dir.
         let manifest = find_manifest(wasm_path);
-
         let caps = manifest
             .as_ref()
             .map(|m| m.capabilities.clone())
@@ -177,6 +218,7 @@ impl ExtensionManager {
 
         let meta = self.host.load_extension(
             &extension_id,
+            manifest.as_ref(),
             wasm_path,
             &caps,
             &self.cwd,
@@ -196,36 +238,47 @@ impl ExtensionManager {
         Ok(meta)
     }
 
-    /// Get all tool definitions from loaded extensions.
     pub fn all_tools(&self) -> Vec<RegisteredTool> {
         self.host.all_tools()
     }
 
-    /// Execute a extension tool by name.
+    /// Execute an extension-registered tool. Returns `(content, details, is_error, terminate, added_tool_names)`.
     pub fn execute_tool(
         &mut self,
         tool_name: &str,
         params_json: &str,
-    ) -> Result<(String, String, bool), String> {
-        // Update context before each tool execution.
-        self.host.update_context(
-            &self.cwd,
-            &self.session_id,
-            &self.model_name,
-            self.project_trusted,
+    ) -> Result<(String, String, bool, bool, Vec<String>), String> {
+        self.propagate_context();
+
+        let call_id = format!(
+            "{}-{}-{}",
+            tool_name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
         );
 
-        let output = self.host.execute_tool(tool_name, params_json)?;
-        Ok((output.content, output.details, output.is_error))
+        let output = self.host.execute_tool(tool_name, params_json, &call_id)?;
+        let terminate = output.terminate.unwrap_or(false);
+        let added = output.added_tool_names.unwrap_or_default();
+        Ok((
+            output.content,
+            output.details,
+            output.is_error,
+            terminate,
+            added,
+        ))
     }
 
     /// Drain queued prompts from all extensions (called after command dispatch).
-    pub fn take_queued_prompts(&mut self) -> Vec<String> {
+    pub fn take_queued_prompts(
+        &mut self,
+    ) -> Vec<(String, crate::extension::host::types::DeliverAs)> {
         self.host.take_queued_prompts()
     }
 
-    /// Dispatch a slash command to the extension that registered it.
-    /// Returns Some(output) if a extension handled the command, None otherwise.
     pub fn dispatch_command(&mut self, name: &str, args: &str) -> Result<Option<String>, String> {
         self.host.dispatch_command(name, args)
     }
@@ -238,13 +291,27 @@ impl ExtensionManager {
         &self.errors
     }
 
-    /// Get the current session name.
+    pub fn diagnostics(&self) -> &LoadDiagnostics {
+        &self.diagnostics
+    }
+
+    pub fn pending_provider_registrations(&self) -> Vec<(String, String, Option<String>)> {
+        self.host.pending_provider_registrations()
+    }
+
+    pub fn drain_status_updates(&mut self) -> Vec<(String, Option<String>)> {
+        self.host.drain_status_updates()
+    }
+
+    pub fn drain_widget_updates(&mut self) -> Vec<(String, Option<Vec<String>>, Option<String>)> {
+        self.host.drain_widget_updates()
+    }
+
     pub fn get_session_name(&self) -> String {
         self.host.get_session_name()
     }
 
-    /// Set the session name.
-    pub fn set_session_name(&self, name: &str) {
+    pub fn set_session_name(&mut self, name: &str) {
         self.host.set_session_name(name);
     }
 
@@ -261,21 +328,34 @@ impl ExtensionManager {
     ) -> Result<(), String> {
         self.host.restore_external_dirs(extension_id, dirs)
     }
+
+    pub fn get_terminal_title(&self) -> String {
+        self.host.get_terminal_title()
+    }
+
+    /// Reload: unload all extensions and re-discover from disk.
+    /// Emits `session_shutdown` to existing extensions before clearing.
+    pub fn reload(&mut self) -> Result<(), String> {
+        self.host.call_session_shutdown();
+        self.host = ExtensionHost::new()?;
+        self.extensions.clear();
+        self.errors.clear();
+        self.diagnostics = LoadDiagnostics::default();
+        self.load_all();
+        Ok(())
+    }
 }
 
-/// Look for `extension.toml` adjacent to the .wasm file, or one directory up.
 fn find_manifest(wasm_path: &Path) -> Option<loader::ExtensionManifest> {
-    // Check same directory as .wasm.
     if let Some(dir) = wasm_path.parent() {
-        let same_dir = dir.join("extension.toml");
-        if same_dir.exists() {
-            return loader::parse_manifest(&same_dir).ok();
+        let same = dir.join("extension.toml");
+        if same.exists() {
+            return loader::parse_manifest(&same).ok();
         }
-        // Check parent directory.
         if let Some(parent) = dir.parent() {
-            let parent_manifest = parent.join("extension.toml");
-            if parent_manifest.exists() {
-                return loader::parse_manifest(&parent_manifest).ok();
+            let par = parent.join("extension.toml");
+            if par.exists() {
+                return loader::parse_manifest(&par).ok();
             }
         }
     }

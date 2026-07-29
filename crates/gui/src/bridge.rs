@@ -120,6 +120,9 @@ fn run_event_loop(
             tokens_used: 0,
             mode: initial_state.mode.clone(),
         });
+        let _ = event_tx.send(CoreEvent::ContextFilesUpdated {
+            files: initial_state.context_files.clone(),
+        });
 
         // Merge in-memory engine state with on-disk sessions so the sidebar shows
         // every chat asset the user has stored. Cap at 100 to keep startup latency
