@@ -27,7 +27,7 @@ CLI (clap) → main.rs
 ## Key Directories
 
 | Directory | Purpose |
-|-----------|---------|
+| ----------- | --------- |
 | `src/agent/` | Agent building, tool definitions, runner loop |
 | `src/ui/` | TUI: renderer, event loop, slash commands, pickers, input |
 | `src/config/` | Config loading (TOML/YAML), config struct, types |
@@ -73,6 +73,7 @@ cargo build --release
 ## Code Conventions
 
 ### Formatting & Naming
+
 - `cargo fmt` (standard Rust style)
 - Module names: `snake_case` (e.g., `git_worktree`, `shell_mode`)
 - Struct/enum: `CamelCase` (e.g., `SlashCtx`, `MessageRole`, `AgentEvent`)
@@ -82,29 +83,34 @@ cargo build --release
 - Prefer `SmallVec` over `Vec` for small fixed-size collections
 
 ### Error Handling
+
 - `anyhow::Result` for application-level errors
 - `String` as error type for extension host (Wasm boundary)
 - `tracing` for logging (never `println!`/`eprintln!` in library code)
 - Log levels: `debug` for agent stream events, `info` for startup/extension loading, `warn` for discovery errors, `error` for failures
 
 ### Async Patterns
+
 - `tokio` runtime, single-threaded by default (`flavor = "current_thread"`), multi-threaded via `multithread` feature
 - Uses `tokio::sync::mpsc` for agent events, user events
 - `rig` (0.39) for LLM provider interactions — streaming responses via `StreamingChat`
 - Agent runner uses `spawn_blocking` for sync Wasm extension tool calls
 
 ### Feature Gating (`#[cfg(feature = "...")]`)
+
 - Optional features: `mcp`, `subagents`, `memory`, `loop`, `git-worktree`, `extensions`, `archmd`, `advisor`, `multimodal`, `acp`, `status-signals`
 - Feature-gated code uses `#[cfg(feature = "...")]` blocks around imports, struct fields, and match arms
 - Two `ensure_agent` copies (with/without `mcp` feature) exist in `event_handler.rs`
 
 ### State Management
+
 - `OnceLock<Arc<Mutex<T>>>` for global extension registry
 - `LazyLock` for test artifacts (preferred over `OnceLock` when initializer is known at declaration)
 - `Arc<AtomicBool>` for shared boolean flags (e.g., `is_running`)
 - Session state passed by `&mut` through the TUI event loop
 
 ### TUI Patterns
+
 - `SlashCtx<'a>` bundles all mutable references needed by slash commands
 - Slash commands are dispatched in `ui::slash::mod::handle_slash()`
 - New slash commands: add handler function, add to `BASE_COMMANDS` in `src/ui/pickers/list.rs`, implement in `src/ui/slash/`
@@ -113,7 +119,7 @@ cargo build --release
 ## Important Files
 
 | File | Role |
-|------|------|
+| ------ | ------ |
 | `src/main.rs` | Entry point, CLI parsing, provider selection, TUI/headless branching |
 | `src/cli.rs` | Clap argument definitions |
 | `src/agent/builder.rs` | `build_agent_inner()` — agent construction with tools, preamble |
@@ -126,7 +132,7 @@ cargo build --release
 | `src/event.rs` | `AgentEvent`, `BtwEvent`, `UserEvent` enums |
 | `src/extension/host.rs` | wasmtime component-model runtime, WIT host impls |
 | `src/extension/registry.rs` | Global extension registry (OnceLock), tool/command dispatch |
-| `crates/extension-api/wit/extension-v0.2.0.wit` | WIT interface for Wasm extension authors |
+| `crates/extension-api/wit/extension-v0.5.0.wit` | WIT interface for Wasm extension authors |
 | `Cargo.toml` | Workspace config, feature flags, dependency versions |
 | `AGENTS.md` | Build constraints (this repo's own agent instructions) |
 | `docs/CONFIG.md` | User-facing config documentation |

@@ -30,16 +30,13 @@ pub type ExtensionId = String;
 /// How an extension tool should be invoked: parallel with sibling tools or
 /// sequentially to itself (stateful tools).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ToolExecutionMode {
+    #[default]
     Parallel,
     Sequential,
 }
 
-impl Default for ToolExecutionMode {
-    fn default() -> Self {
-        Self::Parallel
-    }
-}
 
 /// Whether a tool is a "deferred" tool. The model may opt into requesting
 /// the tool by name when the relevant conversation requires it.

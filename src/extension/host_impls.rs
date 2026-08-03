@@ -18,7 +18,7 @@ use crate::extension::host::zerostack::extension::{
     ui_prompt as wit_uip, ui_status as wit_uis,
 };
 use crate::extension::host::{
-    ExtGuestState, ExtensionHost, ExtensionWorld, NAMESPACE_SEPARATOR, namespaced_tool_name, types,
+    ExtGuestState, ExtensionHost, ExtensionWorld, namespaced_tool_name, types,
 };
 
 // Compile-time bridge: WIT-bindgen generates `wasmtime::component::__internal::String`
@@ -40,9 +40,7 @@ impl wit_tr::Host for ExtGuestState {
             prompt_guidelines: def.prompt_guidelines.unwrap_or_default(),
             extension_id: self.extension_id.clone(),
             execution_mode: def
-                .execution_mode
-                .map(types::ExecutionMode::from)
-                .map(crate::extension::ToolExecutionMode::from)
+                .execution_mode.map(crate::extension::ToolExecutionMode::from)
                 .unwrap_or_default(),
             loading_mode: if def.deferred.unwrap_or(false) {
                 crate::extension::ToolLoadingMode::Deferred

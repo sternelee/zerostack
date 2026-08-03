@@ -56,6 +56,8 @@ mod lsp_tests;
 mod markdown_tests;
 #[cfg(all(test, feature = "mcp"))]
 mod mcp_oauth_tests;
+#[cfg(all(test, feature = "mcp"))]
+mod mcp_timeout_tests;
 #[cfg(all(test, feature = "memory"))]
 mod memory_tests;
 #[cfg(test)]
@@ -106,5 +108,7 @@ mod todo_tests;
 mod tools_filter_tests;
 #[cfg(test)]
 mod tools_mod_tests;
+#[cfg(test)]
+mod tui_loop_tests;
 #[cfg(all(test, feature = "git-worktree"))]
 mod worktree_tests;

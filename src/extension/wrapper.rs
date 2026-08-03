@@ -150,17 +150,16 @@ fn validate_against_schema(
             return Err(format!("expected type '{t}', got {}", json_type(value)));
         }
     }
-    if let Some(props) = schema.get("properties").and_then(|v| v.as_object()) {
-        if let Some(obj) = value.as_object() {
+    if let Some(props) = schema.get("properties").and_then(|v| v.as_object())
+        && let Some(obj) = value.as_object() {
             for (k, sub_schema) in props {
                 if let Some(v) = obj.get(k) {
                     validate_against_schema(v, sub_schema)?;
                 }
             }
         }
-    }
-    if let Some(req) = schema.get("required").and_then(|v| v.as_array()) {
-        if let Some(obj) = value.as_object() {
+    if let Some(req) = schema.get("required").and_then(|v| v.as_array())
+        && let Some(obj) = value.as_object() {
             for k in req {
                 if let Some(name) = k.as_str()
                     && !obj.contains_key(name)
@@ -169,7 +168,6 @@ fn validate_against_schema(
                 }
             }
         }
-    }
     if let Some(enum_vals) = schema.get("enum").and_then(|v| v.as_array())
         && !enum_vals.iter().any(|v| v == value)
     {
