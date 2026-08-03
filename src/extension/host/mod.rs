@@ -4,7 +4,7 @@
 //! through the optional event exports declared in the WIT world.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,8 +15,6 @@ use crate::extension::loader::Capabilities;
 use crate::extension::{
     ExtensionId, ExtensionMeta, RegisteredCommand, RegisteredTool, ToolExecutionMode,
 };
-
-pub mod v4;
 
 wasmtime::component::bindgen!({
     path: "crates/extension-api/wit/extension-v0.5.0.wit",
@@ -29,7 +27,6 @@ const GUEST_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const NAMESPACE_SEPARATOR: &str = "__";
 
 pub(crate) use self::zerostack::extension::types;
-pub(crate) use self::zerostack::extension::types::ToolCallDecision as _ToolCallDecision;
 pub(crate) use self::zerostack::extension::types::ToolOutput as GuestToolOutput;
 pub(crate) use self::zerostack::extension::types::ToolResultPatch as _ToolResultPatch;
 
@@ -208,11 +205,6 @@ impl ExtensionHost {
             |state: &mut ExtGuestState| state,
         )
         .map_err(|e| format!("failed to add extension imports to linker: {e}"))?;
-        // Register the v0.4.0 world for backward compatibility — installed
-        // `.wasm` files compiled against the original
-        // `zerostack:extension@0.4.0` package version still satisfy their
-        // imports through this world.
-        v4::add_v4_linker(&mut linker)?;
         apply_capability_gating(&mut linker, capabilities);
 
         let mut store = Store::new(
@@ -378,9 +370,9 @@ impl ExtensionHost {
         let pre_new_input: Option<String>;
         match resolved.instance.call_on_tool_call(
             &mut resolved.store,
-            &tool_name.to_string(),
-            &call_id.to_string(),
-            &params_json.to_string(),
+            tool_name,
+            call_id,
+            params_json,
         ) {
             Ok(Ok(d)) => {
                 pre_block = d.block.unwrap_or(false);
@@ -409,8 +401,8 @@ impl ExtensionHost {
         // -- prepare-arguments hook (call unconditionally) ---
         match resolved.instance.call_prepare_arguments(
             &mut resolved.store,
-            &tool_name.to_string(),
-            &effective_params.to_string(),
+            tool_name,
+            effective_params,
         ) {
             Ok(Ok(decision)) => {
                 apply_prepare_decision(decision, effective_params)?;
@@ -423,11 +415,7 @@ impl ExtensionHost {
         // -- tool-execute (required export) ---
         let output = resolved
             .instance
-            .call_tool_execute(
-                &mut resolved.store,
-                &tool_name.to_string(),
-                &effective_params.to_string(),
-            )
+            .call_tool_execute(&mut resolved.store, tool_name, effective_params)
             .map_err(|e| format!("tool_execute trap: {e}"))?
             .map_err(|e| format!("tool_execute failed: {e}"))?;
 
@@ -435,9 +423,9 @@ impl ExtensionHost {
         let out_clone: GuestToolOutput = output;
         let final_output = match resolved.instance.call_on_tool_result(
             &mut resolved.store,
-            &tool_name.to_string(),
-            &call_id.to_string(),
-            &effective_params.to_string(),
+            tool_name,
+            call_id,
+            effective_params,
             &out_clone.content,
             &out_clone.details,
             out_clone.is_error,
@@ -823,6 +811,4 @@ impl From<types::ExecutionMode> for ToolExecutionMode {
 
 // Re-export so manager/registry can use the host's surface without going
 // through `self::zerostack::extension` paths.
-pub(crate) mod reexports {
-    pub(crate) use super::ExtensionHost;
-}
+pub(crate) mod reexports {}
