@@ -8,8 +8,20 @@ mod tests {
     use crate::extension::manager::ExtensionManager;
 
     static TEST_EXTENSION_ARTIFACT: LazyLock<std::path::PathBuf> = LazyLock::new(|| {
+        // Cargo always builds to the workspace-root `target/`, not
+        // the crate-local one. Walk up past any intermediate Cargo.toml
+        // that lacks `[workspace]` until we find the real root.
         let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let artifact = manifest_dir
+        let workspace_root = manifest_dir
+            .ancestors()
+            .find(|p| {
+                let toml = p.join("Cargo.toml");
+                std::fs::read_to_string(&toml)
+                    .map(|c| c.contains("[workspace]"))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(&manifest_dir);
+        let artifact = workspace_root
             .join("target")
             .join("wasm32-wasip2")
             .join("debug")

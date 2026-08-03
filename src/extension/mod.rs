@@ -36,6 +36,7 @@ pub enum ToolExecutionMode {
     Sequential,
 }
 
+
 /// Whether a tool is a "deferred" tool. The model may opt into requesting
 /// the tool by name when the relevant conversation requires it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

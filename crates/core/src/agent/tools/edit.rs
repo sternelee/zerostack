@@ -165,22 +165,20 @@ fn find_best_match(content: &str, search: &str) -> MatchResult {
     // Step 3: unicode-normalized match
     let content_uni = normalize_unicode(&content_norm);
     let search_uni = normalize_unicode(&search_norm);
-    if content_uni != content_norm || search_uni != search_norm {
-        if let Some(uni_pos) = content_uni.find(&search_uni) {
+    if (content_uni != content_norm || search_uni != search_norm)
+        && let Some(uni_pos) = content_uni.find(&search_uni) {
             let (byte_start, byte_end) = compute_byte_range(content, uni_pos, search_uni.len());
             return MatchResult::Normalized(byte_start, byte_end);
         }
-    }
 
     // Step 4: comment-prefix-stripped match
     let content_nocmt = strip_comment_prefixes(&content_norm);
     let search_nocmt = strip_comment_prefixes(&search_norm);
-    if content_nocmt != content_norm || search_nocmt != search_norm {
-        if let Some(cmt_pos) = content_nocmt.find(&search_nocmt) {
+    if (content_nocmt != content_norm || search_nocmt != search_norm)
+        && let Some(cmt_pos) = content_nocmt.find(&search_nocmt) {
             let (byte_start, byte_end) = compute_byte_range(content, cmt_pos, search_nocmt.len());
             return MatchResult::Normalized(byte_start, byte_end);
         }
-    }
 
     // Step 5: fuzzy line-level matching
     let search_lines: Vec<&str> = search.lines().collect();

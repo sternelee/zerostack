@@ -567,12 +567,15 @@ pub async fn handle_slash(
                         use crate::extension::host::types::DeliverAs as D;
                         match deliver_as {
                             D::FollowUp | D::NextTurn => {
-                                ctx.pending_inputs.push_back(prompt_text);
+                                ctx.input.load_text(&prompt_text);
+                                let _ = ctx
+                                    .renderer
+                                    .write("[queued agent prompt]\n", crate::ui::C_RESULT);
                             }
                             D::Steer => {
                                 // Surface the steer prompt for the next turn;
                                 // mid-run steering lives in the runner.
-                                ctx.pending_inputs.push_back(prompt_text);
+                                ctx.input.load_text(&prompt_text);
                             }
                         }
                     }

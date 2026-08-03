@@ -100,6 +100,6 @@ pub fn extension_command_names() -> Vec<String> {
     mgr.list()
         .iter()
         .flat_map(|meta| meta.command_names.iter().cloned())
-        .map(|name| format!("/{}", name.rsplitn(2, "__").next().unwrap_or(&name)))
+        .map(|name| format!("/{}", name.rsplit("__").next().unwrap_or(&name)))
         .collect()
 }

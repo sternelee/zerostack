@@ -16,8 +16,6 @@ use crate::extension::{
     ExtensionId, ExtensionMeta, RegisteredCommand, RegisteredTool, ToolExecutionMode,
 };
 
-pub mod v4;
-
 wasmtime::component::bindgen!({
     path: "crates/extension-api/wit/extension-v0.5.0.wit",
     world: "extension-world",
@@ -212,11 +210,6 @@ impl ExtensionHost {
             |state: &mut ExtGuestState| state,
         )
         .map_err(|e| format!("failed to add extension imports to linker: {e}"))?;
-        // Register the v0.4.0 world for backward compatibility — installed
-        // `.wasm` files compiled against the original
-        // `zerostack:extension@0.4.0` package version still satisfy their
-        // imports through this world.
-        v4::add_v4_linker(&mut linker)?;
         apply_capability_gating(&mut linker, capabilities);
 
         let mut store = Store::new(

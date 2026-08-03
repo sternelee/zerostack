@@ -20,18 +20,6 @@
 ///     `steer`, `follow-up`, `next-turn`.
 /// - Capability gating is enforced at link time: undeclared host imports
 ///   trap on call instead of running silently.
-///
-/// ## v0.4.0 → v0.5.0 (breaking)
-/// - Package renamed: `zerostack:extension@0.5.0`
-/// - `tool-registry.unregister-tool` and `command-registry.unregister-command`
-///   no longer accept `result<_, string>` (errors are now host-side warnings).
-///
-/// ## v0.3.0 → v0.4.0
-/// - Added `session-control` host import (get / set session name, terminal title).
-/// - Added optional `session-start` and `session-shutdown` exports.
-///
-/// ## v0.2.0 → v0.3.0
-/// - Added `trigger-prompt` host import.
 
 package zerostack:extension@0.5.0;
 

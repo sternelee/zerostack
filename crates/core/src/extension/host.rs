@@ -1,7 +1,4 @@
-//! Extension host — wasmtime component-model runtime for extensions.
-//!
-//! Uses the preserved v0.4 compatibility WIT world. The main CLI host owns
-//! the complete v0.5 implementation; this core-side host has not migrated yet.
+//! Extension host — wasmtime component-model runtime for extensions (v0.5.0).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -16,7 +13,7 @@ use crate::extension::{ExtensionId, ExtensionMeta, RegisteredCommand, Registered
 
 // Generate host bindings from the WIT world.
 wasmtime::component::bindgen!({
-    path: "../extension-api/wit/v0.4.0/extension.wit",
+    path: "../extension-api/wit/extension-v0.5.0.wit",
     world: "extension-world",
 });
 
@@ -84,6 +81,7 @@ impl ExtGuestState {
                 session_id: String::new(),
                 model_name: String::new(),
                 project_trusted: false,
+                has_ui: false,
             },
             queued_prompts: Vec::new(),
             session_state,
@@ -119,29 +117,29 @@ impl self::zerostack::extension::tool_registry::Host for ExtGuestState {
         &mut self,
         def: ToolDefinition,
     ) -> Result<(), wasmtime::component::__internal::String> {
-        let name: String = def.name.into();
+        let name: String = def.name;
         let namespaced = namespaced_tool_name(&self.extension_id, &name);
 
         // Reject duplicate bare name if another extension already registered it.
         self.tools.push(RegisteredTool {
             name: namespaced,
-            label: def.label.into(),
-            description: def.description.into(),
-            parameters_schema: def.parameters_schema.into(),
-            prompt_snippet: def.prompt_snippet.map(Into::into),
-            prompt_guidelines: def.prompt_guidelines.into_iter().map(Into::into).collect(),
+            label: def.label,
+            description: def.description,
+            parameters_schema: def.parameters_schema,
+            prompt_snippet: def.prompt_snippet,
+            prompt_guidelines: def
+                .prompt_guidelines
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
             extension_id: self.extension_id.clone(),
         });
         Ok(())
     }
 
-    fn unregister_tool(
-        &mut self,
-        name: wasmtime::component::__internal::String,
-    ) -> Result<(), wasmtime::component::__internal::String> {
+    fn unregister_tool(&mut self, name: wasmtime::component::__internal::String) {
         let namespaced = namespaced_tool_name(&self.extension_id, &name);
         self.tools.retain(|t| t.name != namespaced);
-        Ok(())
     }
 }
 
@@ -152,26 +150,22 @@ impl self::zerostack::extension::command_registry::Host for ExtGuestState {
         &mut self,
         def: CommandDefinition,
     ) -> Result<(), wasmtime::component::__internal::String> {
-        let name: String = def.name.into();
+        let name: String = def.name;
         let namespaced = namespaced_tool_name(&self.extension_id, &name);
         self.commands.insert(
             namespaced.clone(),
             RegisteredCommand {
                 name: namespaced,
-                description: def.description.into(),
+                description: def.description,
                 extension_id: self.extension_id.clone(),
             },
         );
         Ok(())
     }
 
-    fn unregister_command(
-        &mut self,
-        name: wasmtime::component::__internal::String,
-    ) -> Result<(), wasmtime::component::__internal::String> {
+    fn unregister_command(&mut self, name: wasmtime::component::__internal::String) {
         let namespaced = namespaced_tool_name(&self.extension_id, &name);
         self.commands.remove(&namespaced);
-        Ok(())
     }
 }
 
@@ -189,9 +183,9 @@ impl self::zerostack::extension::trigger_prompt::Host for ExtGuestState {
     fn trigger_prompt(
         &mut self,
         prompt: wasmtime::component::__internal::String,
-        _deliver_as: wasmtime::component::__internal::String,
+        _deliver_as: self::zerostack::extension::trigger_prompt::DeliverAs,
     ) -> Result<(), wasmtime::component::__internal::String> {
-        self.queued_prompts.push(prompt.into());
+        self.queued_prompts.push(prompt);
         Ok(())
     }
 }
@@ -227,6 +221,295 @@ impl self::zerostack::extension::session_control::Host for ExtGuestState {
         if let Ok(mut s) = self.session_state.lock() {
             s.1 = title.clone();
         }
+    }
+}
+
+// ── v0.5.0 host impl stubs (core host is minimal; GUI binds its own) ──
+
+impl self::zerostack::extension::external_dirs::Host for ExtGuestState {
+    fn add_dir(
+        &mut self,
+        _path: wasmtime::component::__internal::String,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("external-dirs not supported in this host".into())
+    }
+    fn remove_dir(
+        &mut self,
+        _path: wasmtime::component::__internal::String,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("external-dirs not supported in this host".into())
+    }
+    fn list_dirs(&mut self) -> Vec<wasmtime::component::__internal::String> {
+        Vec::new()
+    }
+    fn has_dir(&mut self, _path: wasmtime::component::__internal::String) -> bool {
+        false
+    }
+}
+
+impl self::zerostack::extension::provider_registry::Host for ExtGuestState {
+    fn register_provider(
+        &mut self,
+        _cfg: self::zerostack::extension::provider_registry::ProviderConfig,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("provider-registry not supported in this host".into())
+    }
+    fn unregister_provider(
+        &mut self,
+        _name: wasmtime::component::__internal::String,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("provider-registry not supported in this host".into())
+    }
+}
+
+impl self::zerostack::extension::ui_prompt::Host for ExtGuestState {
+    fn select(
+        &mut self,
+        _title: wasmtime::component::__internal::String,
+        _options: Vec<self::zerostack::extension::ui_prompt::SelectOption>,
+    ) -> wasmtime::component::__internal::String {
+        String::new()
+    }
+    fn confirm(
+        &mut self,
+        _title: wasmtime::component::__internal::String,
+        _message: wasmtime::component::__internal::String,
+    ) -> bool {
+        false
+    }
+    fn input(
+        &mut self,
+        _title: wasmtime::component::__internal::String,
+        _placeholder: Option<wasmtime::component::__internal::String>,
+    ) -> wasmtime::component::__internal::String {
+        String::new()
+    }
+    fn notify(
+        &mut self,
+        _message: wasmtime::component::__internal::String,
+        _level: Option<wasmtime::component::__internal::String>,
+    ) {
+    }
+}
+
+impl self::zerostack::extension::ui_status::Host for ExtGuestState {
+    fn set_status(
+        &mut self,
+        _key: wasmtime::component::__internal::String,
+        _text: Option<wasmtime::component::__internal::String>,
+    ) {
+    }
+    fn set_widget(
+        &mut self,
+        _key: wasmtime::component::__internal::String,
+        _lines: Option<Vec<wasmtime::component::__internal::String>>,
+        _placement: Option<wasmtime::component::__internal::String>,
+    ) {
+    }
+    fn set_title(&mut self, _title: wasmtime::component::__internal::String) {}
+    fn toast(&mut self, _message: wasmtime::component::__internal::String) {}
+}
+
+impl self::zerostack::extension::agent_control::Host for ExtGuestState {
+    fn send_message(
+        &mut self,
+        _text: wasmtime::component::__internal::String,
+        _deliver_as: Option<wasmtime::component::__internal::String>,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("agent-control not supported in this host".into())
+    }
+    fn send_user_message(
+        &mut self,
+        _text: wasmtime::component::__internal::String,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("agent-control not supported in this host".into())
+    }
+    fn append_entry(
+        &mut self,
+        _custom_type: wasmtime::component::__internal::String,
+        _data_json: wasmtime::component::__internal::String,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("agent-control not supported in this host".into())
+    }
+    fn set_model(
+        &mut self,
+        _provider: wasmtime::component::__internal::String,
+        _name: wasmtime::component::__internal::String,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("agent-control not supported in this host".into())
+    }
+    fn get_active_tools(&mut self) -> Vec<wasmtime::component::__internal::String> {
+        Vec::new()
+    }
+    fn set_active_tools(
+        &mut self,
+        _names: Vec<wasmtime::component::__internal::String>,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("agent-control not supported in this host".into())
+    }
+    fn compact(
+        &mut self,
+        _custom_instructions: Option<wasmtime::component::__internal::String>,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("agent-control not supported in this host".into())
+    }
+}
+
+impl self::zerostack::extension::exec::Host for ExtGuestState {
+    fn run(
+        &mut self,
+        _command: wasmtime::component::__internal::String,
+        _args: Vec<wasmtime::component::__internal::String>,
+        _cwd: Option<wasmtime::component::__internal::String>,
+        _timeout_ms: Option<u32>,
+    ) -> Result<self::zerostack::extension::exec::ExecResult, wasmtime::component::__internal::String>
+    {
+        Err("exec not supported in this host".into())
+    }
+}
+
+impl self::zerostack::extension::http::Host for ExtGuestState {
+    fn request(
+        &mut self,
+        _method: wasmtime::component::__internal::String,
+        _url: wasmtime::component::__internal::String,
+        _headers: Option<
+            Vec<(
+                wasmtime::component::__internal::String,
+                wasmtime::component::__internal::String,
+            )>,
+        >,
+        _body: Option<wasmtime::component::__internal::String>,
+        _timeout_ms: Option<u32>,
+    ) -> Result<wasmtime::component::__internal::String, wasmtime::component::__internal::String>
+    {
+        Err("http not supported in this host".into())
+    }
+}
+
+impl self::zerostack::extension::file_mutation_queue::Host for ExtGuestState {
+    fn with_lock(
+        &mut self,
+        _path: wasmtime::component::__internal::String,
+        _callback_id: u64,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("file-mutation-queue not supported in this host".into())
+    }
+}
+
+impl self::zerostack::extension::truncator::Host for ExtGuestState {
+    fn truncate_tail(
+        &mut self,
+        content: wasmtime::component::__internal::String,
+        _max_bytes: u32,
+    ) -> wasmtime::component::__internal::String {
+        content
+    }
+    fn truncate_head(
+        &mut self,
+        content: wasmtime::component::__internal::String,
+        _max_bytes: u32,
+    ) -> wasmtime::component::__internal::String {
+        content
+    }
+    fn cap_output(
+        &mut self,
+        content: wasmtime::component::__internal::String,
+        _max_bytes: Option<u32>,
+        _max_lines: Option<u32>,
+    ) -> wasmtime::component::__internal::String {
+        content
+    }
+}
+
+impl self::zerostack::extension::compaction::Host for ExtGuestState {
+    fn before_compact(
+        &mut self,
+        _reason: wasmtime::component::__internal::String,
+    ) -> Result<
+        self::zerostack::extension::compaction::CompactionDecision,
+        wasmtime::component::__internal::String,
+    > {
+        Err("compaction not supported in this host".into())
+    }
+    fn after_compact(
+        &mut self,
+        _reason: wasmtime::component::__internal::String,
+        _summary: wasmtime::component::__internal::String,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("compaction not supported in this host".into())
+    }
+}
+
+impl self::zerostack::extension::events_bus::Host for ExtGuestState {
+    fn subscribe(
+        &mut self,
+        _name: wasmtime::component::__internal::String,
+        _handler_id: u64,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("events-bus not supported in this host".into())
+    }
+    fn unsubscribe(
+        &mut self,
+        _name: wasmtime::component::__internal::String,
+        _handler_id: u64,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("events-bus not supported in this host".into())
+    }
+    fn publish(
+        &mut self,
+        _name: wasmtime::component::__internal::String,
+        _payload_json: wasmtime::component::__internal::String,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("events-bus not supported in this host".into())
+    }
+}
+
+impl self::zerostack::extension::permissions::Host for ExtGuestState {
+    fn check(
+        &mut self,
+        _tool: wasmtime::component::__internal::String,
+        _pattern: wasmtime::component::__internal::String,
+    ) -> Result<
+        self::zerostack::extension::permissions::Verdict,
+        wasmtime::component::__internal::String,
+    > {
+        Err("permissions not supported in this host".into())
+    }
+    fn trust_project(&mut self) -> Result<bool, wasmtime::component::__internal::String> {
+        Err("permissions not supported in this host".into())
+    }
+    fn set_project_trusted(
+        &mut self,
+        _trusted: bool,
+    ) -> Result<(), wasmtime::component::__internal::String> {
+        Err("permissions not supported in this host".into())
+    }
+}
+
+impl self::zerostack::extension::resources_discover::Host for ExtGuestState {
+    fn discover(
+        &mut self,
+    ) -> Result<
+        Vec<(
+            wasmtime::component::__internal::String,
+            wasmtime::component::__internal::String,
+        )>,
+        wasmtime::component::__internal::String,
+    > {
+        Err("resources-discover not supported in this host".into())
+    }
+}
+
+impl self::zerostack::extension::logger::Host for ExtGuestState {
+    fn log(
+        &mut self,
+        level: self::zerostack::extension::logger::LogLevel,
+        target: wasmtime::component::__internal::String,
+        message: wasmtime::component::__internal::String,
+    ) {
+        let level_str = format!("{level:?}");
+        tracing::debug!(%level_str, %target, %message, "extension log");
     }
 }
 
@@ -292,6 +575,7 @@ impl ExtensionHost {
                 session_id: session_id.to_string(),
                 model_name: model_name.to_string(),
                 project_trusted,
+                has_ui: false,
             };
         }
 
@@ -358,6 +642,7 @@ impl ExtensionHost {
                 session_id: session_id.to_string(),
                 model_name: model_name.to_string(),
                 project_trusted,
+                has_ui: false,
             };
         }
     }
@@ -438,7 +723,7 @@ impl ExtensionHost {
                 // Strip namespace prefix to get the bare name.
                 let bare = tool
                     .name
-                    .rsplitn(2, NAMESPACE_SEPARATOR)
+                    .rsplit(NAMESPACE_SEPARATOR)
                     .next()
                     .unwrap_or(&tool.name);
                 if bare == tool_name && !candidates.iter().any(|(eid, _)| eid == id) {
@@ -497,9 +782,9 @@ impl ExtensionHost {
         let mut candidates: Vec<(String, String)> = Vec::new();
         for (id, inst) in self.instances.iter() {
             let state = inst.store.data();
-            for (cmd_name, _) in &state.commands {
+            for cmd_name in state.commands.keys() {
                 let bare = cmd_name
-                    .rsplitn(2, NAMESPACE_SEPARATOR)
+                    .rsplit(NAMESPACE_SEPARATOR)
                     .next()
                     .unwrap_or(cmd_name);
                 if bare == command_name && !candidates.iter().any(|(eid, _)| eid == id) {

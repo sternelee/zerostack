@@ -1,4 +1,4 @@
-mod app;
+pub(crate) mod app;
 pub(crate) mod dialogs;
 mod event_handler;
 pub(crate) mod events;
@@ -8,6 +8,7 @@ pub(crate) mod markdown;
 mod permission_handler;
 pub(crate) mod pickers;
 pub(crate) mod renderer;
+pub(crate) mod roles;
 pub(crate) mod slash;
 pub(crate) mod state;
 pub(crate) mod statusline;
@@ -34,7 +35,7 @@ use crate::permission::ask::AskReceiver;
 use crate::permission::checker::PermCheck;
 use crate::permission::{self, SecurityMode};
 use crate::provider::AnyAgent;
-use crate::session::{MessageRole, Session};
+use crate::session::{MessageRole, PromptRef, Session};
 use crate::ui::event_handler::ensure_agent;
 #[cfg(feature = "advisor")]
 use crate::ui::events::sanitize_output;
@@ -63,6 +64,7 @@ pub(crate) enum PromptModeOutcome {
 pub(crate) fn apply_prompt_mode(
     name: &str,
     context: &mut ContextFiles,
+    session: &mut Session,
     permission: &Option<PermCheck>,
 ) -> PromptModeOutcome {
     let Some(content) = context.prompts.get(name) else {
@@ -75,6 +77,10 @@ pub(crate) fn apply_prompt_mode(
         content.clone()
     });
     context.current_prompt_name = Some(name.to_string());
+    session.prompt = Some(PromptRef {
+        name: name.into(),
+        source: crate::context::prompts::source_of(name),
+    });
     apply_mode_directive(mode_directive, permission)
 }
 
@@ -156,7 +162,13 @@ pub(crate) fn refresh_display(
     renderer.draw_bottom(&input.buffer, input.cursor, &statusline, run.is_running)?;
     if let Some(ref mut picker) = input.picker {
         let was_active = picker.active();
-        picker.draw()?;
+        // Pickers paint straight onto real stdout, bypassing the render
+        // backend; in headless test runs there is no usable terminal (and on
+        // CI stdout is a non-blocking pipe, so the burst of escape sequences
+        // fails with EAGAIN). Key handling is unaffected — only painting.
+        if !renderer.is_headless() {
+            picker.draw()?;
+        }
         if was_active {
             // The picker painted over the chat and bottom regions, which the
             // dirty-region tracking cannot see; force a full repaint next

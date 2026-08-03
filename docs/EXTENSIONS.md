@@ -31,32 +31,32 @@ manifest directory (`extension.toml` + `extension.wasm`). The WIT contract is
 
 ### Required guest exports
 
-- `init() -> result<_, string>` — register tools/commands.
-- `tool-execute(name, params-json) -> result<tool-output, string>` — runs a registered tool.
-- `on-command(name, args) -> result<string, string>` — runs a registered slash command.
-- All other v0.5.0 events as no-ops.
++ `init() -> result<_, string>` — register tools/commands.
++ `tool-execute(name, params-json) -> result<tool-output, string>` — runs a registered tool.
++ `on-command(name, args) -> result<string, string>` — runs a registered slash command.
++ All other v0.5.0 events as no-ops.
 
 ### Optional guest exports (host invokes unconditionally; trap = "no handler")
 
-- `session-start`, `session-shutdown`
-- `init-async`
-- `prepare-arguments(name, args-json) -> string | "ok:<json>" | "block:<msg>" | "patch:<json>"`
-- `on-tool-call(name, call-id, input-json) -> tool-call-decision`
-- `on-tool-result(name, call-id, input-json, content, details, is-error) -> tool-result-patch`
-- `on-user-bash(command, cwd) -> string`
-- `on-set-session-name(name) -> bool`
-- `on-session-before-compact(reason) -> string`
-- `on-session-compacted(reason, summary) -> ()`
-- `on-context(messages-json) -> string`
-- `on-before-agent-start(prompt) -> string`
-- `on-input(text, source) -> string`
-- `on-message-update(message-json) -> ()`
-- `on-event(name, payload-json) -> ()` (cross-extension events)
++ `session-start`, `session-shutdown`
++ `init-async`
++ `prepare-arguments(name, args-json) -> string | "ok:<json>" | "block:<msg>" | "patch:<json>"`
++ `on-tool-call(name, call-id, input-json) -> tool-call-decision`
++ `on-tool-result(name, call-id, input-json, content, details, is-error) -> tool-result-patch`
++ `on-user-bash(command, cwd) -> string`
++ `on-set-session-name(name) -> bool`
++ `on-session-before-compact(reason) -> string`
++ `on-session-compacted(reason, summary) -> ()`
++ `on-context(messages-json) -> string`
++ `on-before-agent-start(prompt) -> string`
++ `on-input(text, source) -> string`
++ `on-message-update(message-json) -> ()`
++ `on-event(name, payload-json) -> ()` (cross-extension events)
 
 ### Host imports (extension → host)
 
 | Interface | Surface |
-|-----------|--------|
+| ----------- | -------- |
 | `tool-registry` | `register-tool`, `unregister-tool` (ToolDefinition with `execution-mode`, `deferred`, `prompt-snippet`, `prompt-guidelines`) |
 | `command-registry` | `register-command`, `unregister-command` |
 | `extension-context` | `get-context` (`{cwd, session-id, model-name, project-trusted, has-ui}`) |
@@ -94,7 +94,7 @@ rig::ToolDyn::call(args)
 ## Capability gating
 
 | Capability | Manifest | WIT imports allowed |
-|---|---|---|
+| --- | --- | --- |
 | `tools` | `[capabilities] tools = true` | `tool-registry` |
 | `commands` | … | `command-registry` |
 | `provider` | … | `provider-registry` |
@@ -165,30 +165,9 @@ loop can read it and end.
 
 `ExtensionManager.diagnostics()` exposes:
 
-- `tool_conflicts[(name, extensions)]` — bare-name collisions across extensions.
-- `command_conflicts[(name, extensions)]` — bare-name collisions.
-- `warnings`, `unsupported_events`
++ `tool_conflicts[(name, extensions)]` — bare-name collisions across extensions.
++ `command_conflicts[(name, extensions)]` — bare-name collisions.
++ `warnings`, `unsupported_events`
 
 These are logged at load time and surfaced in the picker (`/foo:1`, `/foo:2`
 suffix on conflict).
-
-## Backward compatibility (v0.4.0)
-
-The host registers TWO worlds in the linker:
-
-1. `zerostack:extension@0.5.0` — the current world, generated from
-   `crates/extension-api/wit/extension-v0.5.0.wit`.
-2. `zerostack:extension@0.4.0` — the legacy world, generated from
-   `crates/extension-api/wit/v0.4.0/extension.wit`.
-
-A `.wasm` file already on disk that was compiled against the v0.4.0 WIT
-package (the original pre-refactor contract) satisfies its imports through
-the v0.4.0 world. Tools and slash commands registered by such components
-are namespaced under `v4__<name>` to keep them out of the v0.5.0
-namespace. The picker surfaces them with the same bare-name resolution
-rules as v0.5.0 extensions.
-
-When the user is ready to migrate, recompile the extension against
-`crates/extension-api/wit/extension-v0.5.0.wit` and the new registry
-takes over (the legacy world will still link but the bare-name will
-resolve to the v0.5.0 one if both exist).

@@ -750,7 +750,7 @@ pub fn build_http_client(
 }
 
 fn is_localhost(url: Option<&str>) -> bool {
-    url.map_or(false, |u| {
+    url.is_some_and(|u| {
         u.starts_with("http://localhost")
             || u.starts_with("http://127.")
             || u.starts_with("http://[::1]")
