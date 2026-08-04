@@ -100,6 +100,9 @@ pub struct ToolMeta {
     /// Whether the user has clicked the card to reveal the result body.
     /// Defaults to `false`; toggled on click in `render_tool_card`.
     pub expanded: bool,
+    /// Instant at which the tool was dispatched (for elapsed-time display).
+    /// `None` for tool cards loaded from session history (pre-existing).
+    pub pending_since: Option<std::time::Instant>,
 }
 
 impl ChatMessage {
@@ -160,6 +163,7 @@ impl ChatMessage {
                 status: ToolStatus::Pending,
                 result: SharedString::new(""),
                 expanded: false,
+                pending_since: Some(std::time::Instant::now()),
             }),
         }
     }
@@ -1345,11 +1349,11 @@ impl ShellState {
         // action. Plain text is wrapped in `UserAction::SendMessage`.
         let action = if trimmed.starts_with('/') {
             UserAction::RunSlashCommand {
-                command: CompactString::new(trimmed.to_string()),
+                command: CompactString::new(trimmed),
             }
         } else {
             UserAction::SendMessage {
-                text: CompactString::new(trimmed.to_string()),
+                text: CompactString::new(trimmed),
             }
         };
 
@@ -1522,7 +1526,7 @@ impl ShellState {
             .char_indices()
             .filter(|(_, c)| *c == '\n')
             .map(|(byte_idx, _)| self.input_text[..byte_idx].chars().count())
-            .last();
+            .next_back();
         match last_newline {
             None => true,
             Some(last_line_start) => self.input_cursor >= last_line_start,
@@ -1546,9 +1550,7 @@ impl ShellState {
         // Column on the *current* line: chars since the last newline.
         let mut col = caret_chars;
         if let Some(last) = buf[..byte_index_for_char(&buf, caret_chars)]
-            .char_indices()
-            .filter(|(_, c)| *c == '\n')
-            .last()
+            .char_indices().rfind(|(_, c)| *c == '\n')
         {
             col -= buf[..last.0].chars().count() + 1;
         }
@@ -1765,7 +1767,7 @@ impl ShellState {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(700))
                 .await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 view_entity.update(cx, |state, cx| {
                     state.sidebar_refreshing = false;
                     cx.notify();
@@ -1784,7 +1786,7 @@ impl ShellState {
         let (rows, groups) = self.build_sidebar_rows();
         let total_sessions_on_disk = self.sidebar.len();
         let total_visible = rows.len();
-        let group_count = groups.len();
+        let _group_count = groups.len();
         let sidebar_scroll = self.sidebar_scroll.clone();
         let view_entity = cx.entity().clone();
         let rows_for_render = rows.clone();
@@ -1827,7 +1829,7 @@ impl ShellState {
                         .background_executor()
                         .timer(std::time::Duration::from_millis(16))
                         .await;
-                    let _ = async_cx.update(|cx| {
+                    async_cx.update(|cx| {
                         view_for_async_scroll.update(cx, |state, _cx| {
                             state.last_scrolled_session_id = id_for_async_scroll;
                         });
@@ -2208,9 +2210,16 @@ impl ShellState {
         // the property `maybe_follow_tail` keys off when new content arrives.
         self.chat_follow_tail = self.is_chat_at_bottom();
 
+        let streaming_idx = self.streaming_assistant_idx;
+        let is_active_stream = self.is_thinking;
         let message_children: Vec<gpui::AnyElement> = messages
             .iter()
-            .map(|msg| render_message(msg, view_entity.clone()))
+            .enumerate()
+            .map(|(idx, msg)| {
+                let is_streaming =
+                    is_active_stream && Some(idx) == streaming_idx && msg.role == Role::Assistant;
+                render_message(msg, view_entity.clone(), is_streaming)
+            })
             .collect();
 
         // The outer wrapper here is a flex *column* so the inner
@@ -2602,7 +2611,7 @@ impl ShellState {
                                             // arg-needing command. The popup
                                             // will refresh into its argument
                                             // list on the next call.
-                                            let mut buf = String::from(name_str);
+                                            let mut buf = name_str;
                                             buf.push(' ');
                                             this.input_text = SharedString::new(buf);
                                             this.input_cursor = this.input_text.chars().count();
@@ -3672,12 +3681,12 @@ impl Element for ImeInputElement {
     }
 }
 
-fn render_message(msg: &ChatMessage, view_entity: gpui::Entity<ShellState>) -> gpui::AnyElement {
+fn render_message(msg: &ChatMessage, view_entity: gpui::Entity<ShellState>, is_streaming: bool) -> gpui::AnyElement {
     match msg.role {
         Role::Reasoning => render_reasoning_card(msg),
         Role::Permission => render_permission_card(msg, view_entity),
         Role::Tool if msg.tool_meta().is_some() => render_tool_card(msg, view_entity.clone()),
-        _ => render_message_text(msg),
+        _ => render_message_text(msg, is_streaming),
     }
 }
 
@@ -3906,12 +3915,11 @@ fn group_runs(spans: Vec<MarkdownSpan>) -> Vec<(MarkdownFlags, String)> {
             code: span.code,
             link: span.link.clone(),
         };
-        if let Some((existing_flags, text)) = out.last_mut() {
-            if existing_flags == &flags {
+        if let Some((existing_flags, text)) = out.last_mut()
+            && existing_flags == &flags {
                 text.push_str(span.text.as_str());
                 continue;
             }
-        }
         out.push((flags, span.text.to_string()));
     }
     out
@@ -3970,20 +3978,31 @@ fn render_styled_span_run(flags: MarkdownFlags, text: String) -> gpui::AnyElemen
 fn render_tool_card(msg: &ChatMessage, view_entity: gpui::Entity<ShellState>) -> gpui::AnyElement {
     // We can't keep a borrow across non-blocking updates on `msg`, so we
     // copy out the fields we need to render before any callback closure.
-    let (name_str, args_str, result_str, status, is_expanded) = match msg.tool_meta() {
+    let (name_str, args_str, result_str, status, is_expanded, pending_since) = match msg.tool_meta() {
         Some(m) => (
             m.name.to_string(),
             m.args_summary.to_string(),
             m.result.to_string(),
             m.status.clone(),
             m.expanded,
+            m.pending_since,
         ),
-        None => return render_message_text(msg),
+        None => return render_message_text(msg, false),
     };
 
-    let (status_label, status_fg) = match status {
-        ToolStatus::Pending => ("running", rgb(dark::WARNING)),
-        ToolStatus::Ok => ("done", rgb(dark::SUCCESS)),
+    let (status_label, status_fg) = match &status {
+        ToolStatus::Pending => {
+            let elapsed = pending_since.map(|t| t.elapsed()).unwrap_or_default();
+            let label = if elapsed.as_secs() >= 60 {
+                format!("running ({}m{}s)", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
+            } else if elapsed.as_secs() > 0 {
+                format!("running ({}s)", elapsed.as_secs())
+            } else {
+                "running".to_string()
+            };
+            (label, rgb(dark::WARNING))
+        }
+        ToolStatus::Ok => ("done".to_string(), rgb(dark::SUCCESS)),
     };
 
     let preview = tool_utils::preview_tool_result(result_str.as_str(), 240);
@@ -4106,7 +4125,7 @@ fn render_tool_card(msg: &ChatMessage, view_entity: gpui::Entity<ShellState>) ->
         .into_any_element()
 }
 
-fn render_message_text(msg: &ChatMessage) -> gpui::AnyElement {
+fn render_message_text(msg: &ChatMessage, is_streaming: bool) -> gpui::AnyElement {
     let (bg, label) = match msg.role {
         Role::User => (rgb(dark::USER_BUBBLE_BG), "you"),
         Role::Assistant => (rgb(dark::ASST_BUBBLE_BG), "zerostack"),
@@ -4114,6 +4133,7 @@ fn render_message_text(msg: &ChatMessage) -> gpui::AnyElement {
         Role::System => (rgba(0x00000000), "system"),
         _ => unreachable!("render_message_text handles non-special roles"),
     };
+    let content_for_copy = msg.content.to_string();
 
     div()
         .flex()
@@ -4127,13 +4147,55 @@ fn render_message_text(msg: &ChatMessage) -> gpui::AnyElement {
         .rounded_md()
         .border_1()
         .border_color(rgb(dark::BORDER))
+        .group("msg-row")
         .child(
             div()
-                .text_xs()
-                .text_color(rgb(dark::TEXT_MUTED))
-                .child(label),
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(dark::TEXT_MUTED))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .id(ElementId::Name(
+                            format!("msg-copy-{}", &content_for_copy[..content_for_copy.len().min(32)]).into(),
+                        ))
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded_sm()
+                        .text_xs()
+                        .text_color(rgba(0x00000000))
+                        .cursor_pointer()
+                        .hover(|this| {
+                            this.bg(rgb(dark::BUTTON_BG)).text_color(rgb(dark::TEXT_MUTED))
+                        })
+                        .child("⧉")
+                        .on_click({
+                            let text = content_for_copy.clone();
+                            move |_ev, _window, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    text.clone(),
+                                ));
+                            }
+                        }),
+                ),
         )
         .child(render_markdown_body(msg.content.as_str()))
+        .when(is_streaming, |d| {
+            d.child(
+                div()
+                    .w(px(8.))
+                    .h(px(16.))
+                    .bg(rgb(dark::ACCENT))
+                    .rounded_sm()
+                    .mt_1(),
+            )
+        })
         .into_any_element()
 }
 
@@ -4418,13 +4480,11 @@ fn render_sidebar_header(
                                         state.append_sidebar_filter_char(ch);
                                     }
                                 }
-                            } else if key.chars().count() == 1 {
-                                if let Some(first) = key.chars().next() {
-                                    if !first.is_control() {
+                            } else if key.chars().count() == 1
+                                && let Some(first) = key.chars().next()
+                                    && !first.is_control() {
                                         state.append_sidebar_filter_char(first);
                                     }
-                                }
-                            }
                             cx.notify();
                         });
                         // Don't let the handler leak into the chat input.
@@ -4592,6 +4652,7 @@ fn render_session_row(
 ) -> gpui::AnyElement {
     let view_entity = view_entity.clone();
     let id_owned = session.id.clone();
+    let name_owned = session.name.clone();
 
     let name: SharedString = if session.name.is_empty() {
         SharedString::new("(untitled)")
@@ -4616,6 +4677,12 @@ fn render_session_row(
     } else {
         rgb(dark::TEXT_MUTED)
     };
+
+    let view_for_delete = view_entity.clone();
+    let id_for_delete = id_owned.clone();
+    let view_for_rename = view_entity.clone();
+    let id_for_rename = id_owned.clone();
+    let name_for_rename = name_owned.clone();
 
     div()
         .id(ElementId::Name(
@@ -4661,9 +4728,6 @@ fn render_session_row(
                         .child(name.clone()),
                 )
                 .when(is_active && is_thinking, |d| {
-                    // Subtle "thinking" pill next to the active row.
-                    // Pairs with the chat column's footer indicator so the
-                    // user can see engine status from either pane.
                     d.child(
                         div()
                             .flex_shrink_0()
@@ -4674,6 +4738,79 @@ fn render_session_row(
                             .text_xs()
                             .text_color(rgb(dark::APP_BG))
                             .child("thinking"),
+                    )
+                })
+                // Hover actions: delete and rename for non-active rows
+                .when(!is_active, |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_0p5()
+                            .flex_shrink_0()
+                            .child(
+                                div()
+                                    .id(ElementId::Name(
+                                        format!("session-rename:{}", id_for_rename.as_str()).into(),
+                                    ))
+                                    .px_1()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .text_color(rgb(dark::ICON_MUTED))
+                                    .cursor_pointer()
+                                    .hover(|this| {
+                                        this.bg(rgb(dark::BUTTON_HOVER))
+                                            .text_color(rgb(dark::ACCENT))
+                                    })
+                                    .child("✎")
+                                    .on_click({
+                                        let view = view_for_rename.clone();
+                                        let sid = id_for_rename.clone();
+                                        move |_ev, _window, cx| {
+                                            view.update(cx, |state, cx| {
+                                                // Simple rename: prompt the user via a
+                                                // synthetic input prefilled with the old name.
+                                                let old_name = name_for_rename.as_str();
+                                                if old_name.is_empty() {
+                                                    return;
+                                                }
+                                                let _ = state.bridge.send(UserAction::RenameSession {
+                                                    session_id: sid.clone(),
+                                                    name: CompactString::new(old_name),
+                                                });
+                                                cx.notify();
+                                            });
+                                        }
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id(ElementId::Name(
+                                        format!("session-delete:{}", id_for_delete.as_str()).into(),
+                                    ))
+                                    .px_1()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .text_color(rgb(dark::ICON_MUTED))
+                                    .cursor_pointer()
+                                    .hover(|this| {
+                                        this.bg(rgb(dark::BUTTON_HOVER))
+                                            .text_color(rgb(dark::ERROR))
+                                    })
+                                    .child("✕")
+                                    .on_click({
+                                        let view = view_for_delete.clone();
+                                        let sid = id_for_delete.clone();
+                                        move |_ev, _window, cx| {
+                                            view.update(cx, |state, _cx| {
+                                                let _ = state.bridge.send(UserAction::DeleteSession {
+                                                    session_id: sid.clone(),
+                                                });
+                                            });
+                                        }
+                                    }),
+                            ),
                     )
                 }),
         )
@@ -4923,7 +5060,7 @@ fn spawn_cursor_blink(view: gpui::Entity<ShellState>, cx: &mut App) {
                 .await;
             // Entity may have been dropped between notifications; we ignore the
             // result since the timer is best-effort and self-recovering.
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 view.update(cx, |state, cx| {
                     state.cursor_visible = !state.cursor_visible;
                     cx.notify();
@@ -4945,7 +5082,7 @@ fn start_poll_loop(view: gpui::Entity<ShellState>, cx: &mut App) {
             // `update` on AsyncApp takes `&mut self` and returns the closure's
             // result directly. We ignore it; if the entity has been torn down we
             // likely can't do anything useful from a poll loop anyway.
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 view.update(cx, |state, cx| {
                     state.poll_bridge(cx);
                     cx.notify();
@@ -5056,6 +5193,22 @@ impl Render for ShellState {
 /// Program entry: build the engine on a background thread, drain its events into the
 /// root view from a 30Hz tick, quit cleanly when the last window closes.
 pub fn run() {
+    let (model, provider) = resolve_provider_model();
+    run_inner(
+        &model,
+        &provider,
+        zerostack_core::permission::SecurityMode::Yolo,
+    );
+}
+
+/// Program entry with explicit model / provider / security-mode overrides.
+/// Called from the main zerostack binary when `--gui` is passed alongside
+/// `--model`, `--provider`, `--yolo`, `--restrictive`, etc.
+pub fn run_with_args(model: &str, provider: &str, mode: zerostack_core::permission::SecurityMode) {
+    run_inner(model, provider, mode);
+}
+
+fn run_inner(model: &str, provider: &str, mode: zerostack_core::permission::SecurityMode) {
     // Initialise the tracing subscriber so the engine thread's logs land on
     // stderr. The GUI owns stdout (it's the drawing surface on macOS), so
     // investigating "why didn't my extension load?" requires
@@ -5069,12 +5222,7 @@ pub fn run() {
     );
     tracing::info!("zerostack-gui starting up");
 
-    let (model, provider) = resolve_provider_model();
-    let bridge = GuiBridge::launch(
-        &model,
-        &provider,
-        zerostack_core::permission::SecurityMode::Yolo,
-    );
+    let bridge = GuiBridge::launch(model, provider, mode);
 
     // Initialise the Wasm extension registry before any UI state is built.
     // We pass an empty path list so `init_from_paths` only picks up
@@ -5180,7 +5328,7 @@ pub fn run() {
                     // released entity leaves us with the `true` default,
                     // which equals "let the close go through".
                     let mut allow_close = true;
-                    let _ = view_for_close.update(cx, |state, cx| {
+                    view_for_close.update(cx, |state, cx| {
                         allow_close = state.handle_window_should_close(window, cx);
                     });
                     allow_close
@@ -5193,8 +5341,7 @@ pub fn run() {
     });
 }
 
-/// Program entry: build the engine on a background thread, drain its events into the
-/// root view from a 30Hz tick, quit cleanly when the last window closes.
+/// Resolve model and provider from config, matching the TUI's defaults.
 pub fn resolve_provider_model() -> (String, String) {
     let (cfg, _is_first) = zerostack_core::config::load();
     let cli = zerostack_core::cli::Cli::default();

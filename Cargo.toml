@@ -67,6 +67,7 @@ extensions = ["dep:wasmtime", "dep:wasmtime-wasi", "zerostack-extension-api"]
 hooks = []
 lsp = ["dep:lsp-types"]
 rtk = []
+gui = ["dep:zerostack-gui"]
 
 [dependencies]
 rig = { version = "0.40", features = ["rmcp"] }
@@ -119,6 +120,7 @@ wasmtime-wasi = { version = "46", optional = true, default-features = false, fea
   "p2",
 ] }
 zerostack-extension-api = { path = "crates/extension-api", optional = true }
+zerostack-gui = { path = "crates/gui", optional = true }
 
 [dev-dependencies]
 # Adds rig-core's `test_utils` module (scripted `CompletionModel` test

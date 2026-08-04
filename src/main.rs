@@ -47,6 +47,32 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
+
+    // ── GUI mode: short-circuit before tokio runtime takes over ──
+    // The GUI crate ships its own smol-based event loop (gpui), so we can't
+    // share the tokio runtime. We launch this early, before logging init,
+    // because gpui on macOS owns stdout for its drawing surface.
+    #[cfg(feature = "gui")]
+    if cli.gui {
+        // Resolve model / provider from CLI args + config before entering
+        // the gpui event loop (which blocks the main thread).
+        let model = cli.resolve_model(&config::load().0);
+        let provider = cli.resolve_provider(&config::load().0);
+        let mode = if cli.yolo || cli.dangerously_skip_permissions {
+            zerostack_gui::SecurityMode::Yolo
+        } else if cli.restrictive {
+            zerostack_gui::SecurityMode::Restrictive
+        } else if cli.read_only {
+            zerostack_gui::SecurityMode::ReadOnly
+        } else if cli.guarded {
+            zerostack_gui::SecurityMode::Guarded
+        } else {
+            zerostack_gui::SecurityMode::Standard
+        };
+        zerostack_gui::run_with_args(&model, &provider, mode);
+        return Ok(());
+    }
+
     logging::install_panic_hook();
     logging::init(&cli);
 

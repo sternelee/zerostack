@@ -13630,6 +13630,7 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
  "zerostack-extension-api",
+ "zerostack-gui",
 ]
 
 [[package]]

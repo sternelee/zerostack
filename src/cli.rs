@@ -289,6 +289,10 @@ pub struct Cli {
     )]
     pub status_socket: Option<String>,
 
+    #[cfg(feature = "gui")]
+    #[arg(long = "gui", help = "Launch the GPUI desktop frontend instead of the TUI")]
+    pub gui: bool,
+
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::SetTrue,
           help = "Enable full logging (trace level) to a timestamped log file under the data directory")]
     pub verbose: bool,
