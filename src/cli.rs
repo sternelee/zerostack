@@ -154,6 +154,28 @@ pub struct Cli {
     pub sandbox_backend: Option<String>,
 
     #[arg(
+        long = "sandbox-required",
+        help = "Refuse to run bash commands when the sandbox backend is unavailable (implies --sandbox)"
+    )]
+    pub sandbox_required: bool,
+
+    #[arg(
+        long = "sandbox-expose",
+        action = clap::ArgAction::Append,
+        help = "Restore read-only access to a masked credential path or subpath (repeatable)"
+    )]
+    pub sandbox_expose: Vec<String>,
+
+    #[arg(
+        long = "sandbox-network",
+        help = "Allow sandboxed bash commands to use the network. Bare flag or `=true` enables it (the default); use --sandbox-network=false to disable",
+        default_missing_value = "true",
+        num_args = 0..=1,
+        require_equals = true
+    )]
+    pub sandbox_network: Option<bool>,
+
+    #[arg(
         long = "shell",
         help = "Shell binary to use for bash tool (default: bash)"
     )]
@@ -380,7 +402,19 @@ impl Cli {
     }
 
     pub fn resolve_sandbox(&self, cfg: &config::Config) -> bool {
-        self.sandbox || cfg.sandbox.unwrap_or(false)
+        // sandbox-required implies the sandbox, even when sandbox was turned
+        // off explicitly: the guarantee wins over the contradicting setting.
+        self.sandbox || cfg.sandbox.unwrap_or(false) || self.resolve_sandbox_required(cfg)
+    }
+
+    pub fn resolve_sandbox_required(&self, cfg: &config::Config) -> bool {
+        self.sandbox_required || cfg.sandbox_required.unwrap_or(false)
+    }
+
+    /// True when `sandbox = false` is combined with `sandbox-required`. Callers
+    /// warn about it once per session; the sandbox stays enabled either way.
+    pub fn sandbox_setting_conflict(&self, cfg: &config::Config) -> bool {
+        !self.sandbox && cfg.sandbox == Some(false) && self.resolve_sandbox_required(cfg)
     }
 
     pub fn resolve_sandbox_backend(&self, cfg: &config::Config) -> String {
@@ -388,6 +422,27 @@ impl Cli {
             .clone()
             .or_else(|| cfg.sandbox_backend.clone())
             .unwrap_or_else(|| "bwrap".to_string())
+    }
+
+    /// Raw `sandbox-expose` values, unexpanded and unvalidated: a non-empty
+    /// CLI list replaces the config list wholesale, following the existing
+    /// CLI-over-config resolution convention. `~` expansion and validation
+    /// against the mask list happen in `sandbox::partition_expose`.
+    pub fn resolve_sandbox_expose(&self, cfg: &config::Config) -> Vec<String> {
+        if !self.sandbox_expose.is_empty() {
+            self.sandbox_expose.clone()
+        } else {
+            cfg.sandbox_expose.clone().unwrap_or_default()
+        }
+    }
+
+    /// Whether sandboxed bash commands keep the host network. Unlike the other
+    /// sandbox flags this one takes a value: it defaults to true, so a bare
+    /// switch could only ever say "true" again and never turn the network off
+    /// from the command line. `Option<bool>` lets the CLI win in both
+    /// directions over the config key.
+    pub fn resolve_sandbox_network(&self, cfg: &config::Config) -> bool {
+        self.sandbox_network.or(cfg.sandbox_network).unwrap_or(true)
     }
 
     pub fn resolve_shell(&self, cfg: &config::Config) -> String {

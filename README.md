@@ -126,8 +126,9 @@ If you want to orchestrate multiple zerostack agents from the terminal, also ins
 ### Optional: sandbox mode
 
 Install [bubblewrap](https://github.com/containers/bubblewrap) for `--sandbox`,
-which runs every bash command inside an isolated environment to protect your
-system from accidental or malicious damage:
+which runs every bash command inside an isolated environment to contain the
+damage a mistaken command can do to your system (a seatbelt, not a boundary
+against untrusted code):
 
 ```bash
 # Debian/Ubuntu
@@ -140,7 +141,36 @@ dnf install bubblewrap
 pacman -S bubblewrap
 ```
 
-There is also support for zerobox as an alternative sandbox backend.
+There is also support for [zerobox](https://github.com/afshinm/zerobox) as an
+alternative sandbox backend. bubblewrap is Linux only, so on macOS install
+zerobox (`cargo install zerobox`) and set `sandbox-backend = "zerobox"`.
+
+`--sandbox` is best effort: when the selected backend binary is missing, bash
+commands still run, but unsandboxed, with a warning in the logs. Add
+`--sandbox-required` (or `sandbox-required = true` in the config) to turn that
+into a guarantee: bash commands are refused whenever the backend is unavailable,
+and the rest of the session keeps working. See [SECURITY.md](SECURITY.md) for
+what the sandbox does and does not protect against.
+
+With the `bwrap` backend, well-known credential directories (`~/.ssh`,
+`~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker`, and the `gh`, `gcloud`, `op` and
+`sops/age` directories under the config base) are masked by default, so
+sandboxed commands read them as empty rather than as your keys and tokens,
+and the advertised ssh-agent is unreachable. `sandbox-expose` (config key or
+repeatable `--sandbox-expose <path>` flag) restores read-only access to one
+entry or a subpath of one. See [docs/CONFIG.md](docs/CONFIG.md) for the key
+and [SECURITY.md](SECURITY.md) for the full threat model.
+
+Sandboxed commands keep the host network by default. `sandbox-network = false`
+(or `--sandbox-network=false`) takes it away, which is what stops a command
+that read something sensitive from sending it anywhere. Each bash call then
+gets a fresh network namespace with only its own private loopback: a server the
+command starts and uses within that same command still works, but the internet,
+the LAN, and anything already listening on your machine (a dev server, a local
+registry) are unreachable, and the namespace itself is gone by the next bash
+call, taking anything bound to it (like a backgrounded server) with it; the
+working directory, by contrast, is shared with the host and persists across
+calls. That tradeoff is why the network stays open unless you ask.
 
 ## Quick start
 

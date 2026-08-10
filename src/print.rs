@@ -1,6 +1,38 @@
 use crate::cli;
 use crate::config;
+use crate::sandbox::NetworkEffect;
 use crate::session;
+
+/// Renders the resolved `sandbox-expose` values for the `--print-config`
+/// table: `(none)` when nothing is exposed, otherwise a comma-joined list.
+pub(crate) fn format_sandbox_expose_display(sandbox_expose: &[String]) -> String {
+    if sandbox_expose.is_empty() {
+        "(none)".to_string()
+    } else {
+        sandbox_expose.join(", ")
+    }
+}
+
+/// Renders the resolved `sandbox-network` value for the `--print-config`
+/// table. Like the `sandbox-expose` row, this reports what is actually in
+/// effect rather than the raw resolved value: turning the network off only
+/// does something when the sandbox is on, the backend is bwrap, and bwrap is
+/// installed, and a bare `false` in a table the user is reading to check
+/// their configuration would otherwise look like a promise the session is not
+/// keeping. The decision is not made here: the caller hands over a
+/// `NetworkEffect` computed by the sandbox itself, so this function has no
+/// copy of the conditions to drift from, and no pair of same-typed arguments
+/// a call site could silently transpose.
+pub(crate) fn format_sandbox_network_display(effect: NetworkEffect) -> String {
+    match effect {
+        NetworkEffect::Open => "true",
+        NetworkEffect::Unshared => "false",
+        NetworkEffect::SandboxOff => "false (no effect: sandbox is off)",
+        NetworkEffect::OtherBackend => "false (no effect: bwrap backend only)",
+        NetworkEffect::BackendMissing => "false (no effect: bwrap is not installed)",
+    }
+    .to_string()
+}
 
 pub(crate) fn print_section(title: &str, entries: &[(&str, String)]) {
     println!("{}:", title);
@@ -74,6 +106,33 @@ pub(crate) fn print_config(cli: &cli::Cli, cfg: &config::Config) {
     };
     let no_context_files = cli.resolve_no_context_files(cfg);
     let sandbox = cli.resolve_sandbox(cfg);
+    let sandbox_required = cli.resolve_sandbox_required(cfg);
+    let sandbox_backend = cli.resolve_sandbox_backend(cfg);
+    let sandbox_expose_raw = cli.resolve_sandbox_expose(cfg);
+    // The network row has to answer "is the backend actually there", which is
+    // a probe rather than a resolved setting, so the row is rendered from a
+    // sandbox instead of from booleans. Only the fields the network question
+    // reads are set: this is a throwaway used for the readout, never the
+    // session sandbox, which both entry points still build via
+    // `build_sandbox`.
+    let sandbox_network_display = format_sandbox_network_display(
+        crate::sandbox::Sandbox::new(sandbox, &sandbox_backend)
+            .with_required(sandbox_required)
+            .with_network(cli.resolve_sandbox_network(cfg))
+            .network_effect(),
+    );
+    let home = dirs::home_dir().unwrap_or_default();
+    let (sandbox_expose, _rejected) = crate::sandbox::partition_expose(
+        &sandbox_expose_raw,
+        &crate::sandbox::builtin_mask_roots(),
+        Some(&home),
+    );
+    let sandbox_expose_display = format_sandbox_expose_display(
+        &sandbox_expose
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>(),
+    );
     let shell = cli.resolve_shell(cfg);
     let edit_system = cli.resolve_edit_system(cfg);
     let compact = cfg.resolve_compact_enabled();
@@ -175,6 +234,10 @@ pub(crate) fn print_config(cli: &cli::Cli, cfg: &config::Config) {
             ("shell", shell.to_string()),
             ("edit-system", edit_system.to_string()),
             ("sandbox", sandbox.to_string()),
+            ("sandbox-backend", sandbox_backend),
+            ("sandbox-required", sandbox_required.to_string()),
+            ("sandbox-expose", sandbox_expose_display),
+            ("sandbox-network", sandbox_network_display),
             ("no-tools", no_tools.to_string()),
             ("tools", tools_allowlist),
             ("no-context-files", no_context_files.to_string()),

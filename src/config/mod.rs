@@ -115,6 +115,12 @@ pub struct Config {
     pub sandbox: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "sandbox-backend")]
     pub sandbox_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "sandbox-required")]
+    pub sandbox_required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "sandbox-expose")]
+    pub sandbox_expose: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "sandbox-network")]
+    pub sandbox_network: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_all_mcp_calls: Option<bool>,
     #[cfg(feature = "mcp")]
@@ -144,6 +150,12 @@ pub struct Config {
     /// Left padding (columns) for the chat area. Default: 0.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_left_margin: Option<u16>,
+    /// Whether the TUI should enable crossterm mouse capture. Disabling this
+    /// returns mouse selection/copy/paste to the terminal emulator, but mouse
+    /// scrolling and in-app click-to-place-cursor will no longer work.
+    /// Default: true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mouse_capture: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_prompt: Option<CompactString>,
     #[cfg(feature = "git-worktree")]
@@ -314,6 +326,10 @@ impl Config {
 
     pub fn resolve_chat_left_margin(&self) -> u16 {
         self.chat_left_margin.unwrap_or(0)
+    }
+
+    pub fn resolve_mouse_capture(&self) -> bool {
+        self.mouse_capture.unwrap_or(true)
     }
 
     /// Resolves temperature: CLI `--temperature` > quick-model `temperature` >
@@ -630,5 +646,36 @@ code = "deepseek-v4-pro"
     fn default_config_has_no_prompt_to_model() {
         let cfg = Config::default();
         assert_eq!(cfg.resolve_prompt_model("plan"), None);
+    }
+
+    #[test]
+    fn resolve_mouse_capture_defaults_to_true() {
+        let cfg = Config::default();
+        assert!(cfg.resolve_mouse_capture());
+    }
+
+    #[test]
+    fn resolve_mouse_capture_reads_config_value() {
+        let cfg = Config {
+            mouse_capture: Some(false),
+            ..Default::default()
+        };
+        assert!(!cfg.resolve_mouse_capture());
+
+        let cfg = Config {
+            mouse_capture: Some(true),
+            ..Default::default()
+        };
+        assert!(cfg.resolve_mouse_capture());
+    }
+
+    #[test]
+    fn toml_deserializes_mouse_capture() {
+        let toml_str = r#"
+mouse_capture = false
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.mouse_capture, Some(false));
+        assert!(!cfg.resolve_mouse_capture());
     }
 }

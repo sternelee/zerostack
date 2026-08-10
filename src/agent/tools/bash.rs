@@ -5,7 +5,7 @@ use crate::agent::tools::{AskSender, BashArgs, PermCheck, ToolError, check_perm}
 #[cfg(feature = "rtk")]
 use crate::extras::rtk::Rtk;
 use crate::extras::truncate::head_lines;
-use crate::sandbox::Sandbox;
+use crate::sandbox::{Sandbox, mask_hint, network_hint};
 
 pub(crate) fn split_bash_commands(input: &str) -> Vec<String> {
     let mut result = Vec::new();
@@ -78,6 +78,60 @@ pub(crate) fn split_bash_commands(input: &str) -> Vec<String> {
     result
 }
 
+/// The masked-path hint for a finished command, or `None`. A hint belongs in a
+/// tool result only when the command actually failed, and this is the only
+/// place that gate exists: the caller invokes this unconditionally, so there
+/// is no second copy of the predicate to disagree with, and the branch under
+/// test here is the branch production takes.
+///
+/// The mask list is taken as a `&Sandbox` rather than resolved by the caller
+/// so the work behind it stays on the failing side of the gate: a successful
+/// command pays for neither `dirs::home_dir()` nor the up-to-nine `exists()`
+/// stat calls in `Sandbox::masked_roots`.
+pub(crate) fn mask_hint_for_exit(
+    exit_code: i32,
+    command: &str,
+    stderr: &str,
+    sandbox: &Sandbox,
+) -> Option<String> {
+    if exit_code == 0 {
+        return None;
+    }
+    let home = dirs::home_dir()?;
+    mask_hint(command, stderr, &sandbox.masked_roots(), &home)
+}
+
+/// The no-network hint for a finished command, or `None`. Same shape as
+/// `mask_hint_for_exit`: the caller invokes it unconditionally and every gate
+/// lives here, so the branch under test is the branch production takes. The
+/// sandbox check comes before the string matching because it is the cheap one
+/// and because it is the one that keeps the hint honest: a session that runs
+/// with the network on, or unsandboxed, must never be told the sandbox cut it.
+pub(crate) fn network_hint_for_exit(
+    exit_code: i32,
+    stderr: &str,
+    sandbox: &Sandbox,
+) -> Option<String> {
+    if exit_code == 0 || !sandbox.network_unshared() {
+        return None;
+    }
+    network_hint(stderr)
+}
+
+/// The description every bash tool carries, whatever the session's sandbox
+/// settings are.
+const BASH_DESCRIPTION: &str =
+    "Execute a bash command in the current working directory. Returns stdout and stderr.";
+
+/// Appended to the description when this session's sandbox really will unshare
+/// the network, so the model reads it in the tool definition instead of
+/// discovering it by burning a turn on a command that cannot succeed and then
+/// guessing at the cause. Fixed text and one sentence: a tool description is
+/// prompt-cached context, not a place to render session state. The gate is
+/// `network_unshared`, the same one the failure hint uses, so the two can
+/// never tell the model different stories about the same session.
+const NO_NETWORK_NOTICE: &str = " This session's sandbox runs commands without network access, so the internet, the local network, and services listening on the host are unreachable; a server started and used within a single command still works on 127.0.0.1.";
+
 pub struct BashTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
@@ -118,8 +172,11 @@ impl Tool for BashTool {
     type Output = String;
 
     fn description(&self) -> String {
-        "Execute a bash command in the current working directory. Returns stdout and stderr."
-            .to_string()
+        let mut description = BASH_DESCRIPTION.to_string();
+        if self.sandbox.network_unshared() {
+            description.push_str(NO_NETWORK_NOTICE);
+        }
+        description
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -141,6 +198,13 @@ impl Tool for BashTool {
             args.timeout,
             commands.len(),
         );
+        // Refuse before asking: a required sandbox with no backend fails every
+        // command, so prompting the user for approval first is wasted.
+        if let Some(reason) = self.sandbox.refusal_reason() {
+            tracing::warn!("tool bash refused: {reason}");
+            return Err(ToolError::Msg(reason));
+        }
+
         let mut coaching: Option<String> = None;
         for cmd in &commands {
             if let Some(msg) = check_perm(&self.permission, &self.ask_tx, "bash", cmd).await? {
@@ -222,10 +286,26 @@ impl Tool for BashTool {
             result
         };
 
-        let result = match coaching {
+        let mut result = match coaching {
             Some(msg) => format!("{}\n\n{}", msg, result),
             None => result,
         };
+        // Sandbox hints are appended last, after truncation and coaching, so
+        // they always survive at the end of the tool result the model sees, and
+        // in one pass so the result is not copied once per hint. The exit-code
+        // gates live inside the two `*_for_exit` functions, which is also what
+        // keeps a successful command from paying for the mask list or the
+        // stderr scan.
+        for hint in [
+            mask_hint_for_exit(exit_code, &command, &stderr, &self.sandbox),
+            network_hint_for_exit(exit_code, &stderr, &self.sandbox),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            result.push('\n');
+            result.push_str(&hint);
+        }
         tracing::debug!(
             "tool bash done: exit_code={}, output_len={}",
             exit_code,
