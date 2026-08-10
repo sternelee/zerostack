@@ -2,16 +2,16 @@ use std::io::{self, Write};
 use std::sync::LazyLock;
 
 use compact_str::CompactString;
-use crossterm::QueueableCommand;
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::style::{
     Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
 use crossterm::terminal::{Clear, ClearType};
+use crossterm::QueueableCommand;
 use regex::Regex;
 use smallvec::SmallVec;
 
-use super::feed::{BlockStyle, Feed, style_from_color};
+use super::feed::{style_from_color, BlockStyle, Feed};
 use super::markdown::word_wrap;
 use super::statusline::StatusSpan;
 use super::utils::{char_display_width, display_width, resolve_color};
@@ -424,6 +424,21 @@ impl Renderer {
     #[cfg(test)]
     pub(crate) fn captured_output(&self) -> String {
         self.backend.captured().unwrap_or_default()
+    }
+
+    /// Test helper: snapshot of everything the last successful `draw_bottom`
+    /// painted (input area + statusline), or `None` before the first draw.
+    ///
+    /// This is the renderer's recorded *draw intent*, not the raw byte log, so
+    /// it reflects the bottom row regardless of later chat writes that bury the
+    /// bottom's bytes under newer ones in the append-only `FakeBackend`. That
+    /// makes it the right thing to assert against when checking whether the
+    /// bottom is left idle (or a spinner frozen) after a run ends: a byte-scan
+    /// helper cannot observe a frozen spinner the chat later overwrote in the
+    /// tail, but `last_bottom_snapshot().is_running` records the truth.
+    #[cfg(test)]
+    pub(crate) fn last_bottom_snapshot(&self) -> Option<&BottomSnapshot> {
+        self.last_bottom_snapshot.as_ref()
     }
 
     /// Whether the renderer drives a headless test backend instead of a real

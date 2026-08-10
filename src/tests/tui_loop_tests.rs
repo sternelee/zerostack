@@ -14,6 +14,13 @@
 //! runtime used by `#[tokio::test]`, injected user events are always drained
 //! before the freshly spawned agent task is first polled.
 
+// Every test holds `acquire()`'s guard across its awaits on purpose: the lock
+// serializes tests that mutate process-global state, so it has to cover the
+// whole test body. The lint guards against deadlock from contending tasks,
+// which cannot happen here (single-threaded `#[tokio::test]`, and the guard is
+// the only thing keeping these tests from racing each other).
+#![allow(clippy::await_holding_lock)]
+
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -161,6 +168,43 @@ async fn submit_prompt_streams_response_and_updates_session() {
     assert!(
         feed.contains("hi there"),
         "feed should show the response: {feed}"
+    );
+
+    app.teardown().await;
+}
+
+#[tokio::test]
+async fn spinner_cleared_when_run_finishes() {
+    let _guard = acquire();
+    let (mut app, _model) = headless_app(vec![vec!["done"]]).await;
+
+    type_and_submit(&app, "hi").await;
+    step_until(&mut app, |a| a.is_running()).await;
+
+    // Positive control: confirm a spinner was actually painted mid-run, so the
+    // idle check below is a real "spinner then cleared" regression rather than
+    // a test that never saw a spinner at all.
+    let mid = app.backend_output();
+    assert!(
+        mid.chars()
+            .any(|c| ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'].contains(&c)),
+        "a spinner frame should be painted while running"
+    );
+
+    // Regression: Done/Error set is_running false without repainting the bottom
+    // row, and the 100ms refresh is gated on is_running, so the spinner froze on
+    // screen until the next keypress. The last bottom draw must now be idle.
+    step_until(&mut app, |a| !a.is_running()).await;
+    let snap = app
+        .last_bottom_snapshot()
+        .expect("bottom should have been drawn at least once");
+    assert!(
+        !snap.is_running,
+        "last bottom draw should be idle after the run finishes"
+    );
+    assert!(
+        snap.prompt == crate::ui::renderer::PromptSnapshot::Input,
+        "last bottom draw should show the input prompt after the run finishes"
     );
 
     app.teardown().await;
