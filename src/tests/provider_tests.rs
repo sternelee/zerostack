@@ -315,10 +315,10 @@ fn merge_extra_body_combines_routing_and_user_keys() {
     let routing = serde_json::json!({
         "provider": { "order": ["Anthropic"], "allow_fallbacks": true }
     });
-    let user = serde_json::json!({ "plugins": { "preset": "general-budget" } });
+    let user = serde_json::json!({ "extensions": { "preset": "general-budget" } });
     let merged = merge_extra_body(Some(routing), Some(user)).unwrap();
     assert_eq!(merged["provider"]["order"][0], "Anthropic");
-    assert_eq!(merged["plugins"]["preset"], "general-budget");
+    assert_eq!(merged["extensions"]["preset"], "general-budget");
 }
 
 #[test]
@@ -331,7 +331,7 @@ fn merge_extra_body_user_key_overrides_base() {
 
 #[test]
 fn merge_extra_body_handles_absent_sides() {
-    let val = serde_json::json!({ "plugins": { "preset": "quality" } });
+    let val = serde_json::json!({ "extensions": { "preset": "quality" } });
     assert_eq!(merge_extra_body(None, Some(val.clone())), Some(val.clone()));
     assert_eq!(merge_extra_body(Some(val.clone()), None), Some(val));
     assert_eq!(merge_extra_body(None, None), None);

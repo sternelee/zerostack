@@ -115,10 +115,34 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
         preamble.push_str("\n\n---\n\n");
         preamble.push_str(context_prompt);
     }
+
+    // Skills XML block (available skills listed for the model).
+    {
+        let skills_xml = crate::context::skills::format_skills_xml(&context.skills);
+        if !skills_xml.is_empty() {
+            preamble.push_str("\n\n");
+            preamble.push_str(&skills_xml);
+        }
+    }
+
     if !cwd.is_empty() {
         preamble.push_str("\n\nCurrent working directory: ");
         preamble.push_str(&cwd);
     }
+
+    // Append `prompt_snippet` / `prompt_guidelines` for extension tools so
+    // the model is aware of available extension-side tools and any usage
+    // constraints. Tool names are passed through verbatim (already
+    // namespaced by `host`).
+    #[cfg(feature = "extensions")]
+    {
+        let block = crate::extension::registry::extension_preamble_block();
+        if !block.is_empty() {
+            preamble.push_str("\n\n---\n\n");
+            preamble.push_str(&block);
+        }
+    }
+
     for content in &extra_files_content {
         preamble.push_str("\n\n---\n\n");
         preamble.push_str(content);
@@ -340,6 +364,13 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
             all_tools.push(Box::new(AdvisorTool::new()));
         }
 
+        #[cfg(feature = "extensions")]
+        {
+            let extension_tools = crate::extension::registry::collect_tools();
+            for t in extension_tools {
+                all_tools.push(t);
+            }
+        }
         #[cfg(feature = "lsp")]
         if let Some(lsp) = &lsp_manager {
             all_tools.push(Box::new(tools::lsp::LspTool::new(lsp.clone())));

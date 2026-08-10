@@ -7,6 +7,7 @@ use smallvec::SmallVec;
 use crate::session::storage;
 
 pub mod prompts;
+pub mod skills;
 pub mod themes;
 
 pub(crate) fn load_embedded_files(embedded: &Dir, ext: &str) -> Vec<(String, String)> {
@@ -104,6 +105,8 @@ pub struct ContextFiles {
     pub memory: Option<String>,
     #[cfg(feature = "archmd")]
     pub architecture: Option<String>,
+    /// Loaded skills (name → Skill).
+    pub skills: HashMap<String, skills::Skill>,
 }
 
 impl ContextFiles {
@@ -124,6 +127,7 @@ impl ContextFiles {
         {
             self.memory = crate::extras::memory::Mem::open().context_block();
         }
+        self.skills = skills::load_all();
     }
 }
 
@@ -148,6 +152,7 @@ pub fn load(no_context_files: bool) -> ContextFiles {
     let theme_name = crate::session::storage::load_theme_name();
     #[cfg(feature = "memory")]
     let memory = crate::extras::memory::Mem::open().context_block();
+    let skills = skills::load_all();
     ContextFiles {
         agents,
         prompts: prompt_map,
@@ -162,6 +167,7 @@ pub fn load(no_context_files: bool) -> ContextFiles {
         memory,
         #[cfg(feature = "archmd")]
         architecture,
+        skills,
     }
 }
 

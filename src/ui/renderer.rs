@@ -2,16 +2,16 @@ use std::io::{self, Write};
 use std::sync::LazyLock;
 
 use compact_str::CompactString;
-use crossterm::QueueableCommand;
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::style::{
     Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
 use crossterm::terminal::{Clear, ClearType};
+use crossterm::QueueableCommand;
 use regex::Regex;
 use smallvec::SmallVec;
 
-use super::feed::{BlockStyle, Feed, style_from_color};
+use super::feed::{style_from_color, BlockStyle, Feed};
 use super::markdown::word_wrap;
 use super::statusline::StatusSpan;
 use super::utils::{char_display_width, display_width, resolve_color};

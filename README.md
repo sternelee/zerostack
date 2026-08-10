@@ -3,6 +3,7 @@
 ---
 
 # zerostack
+
 Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/latest/usage) and [opencode](https://opencode.ai/).
 
 *blogposts:* [what we built in 2 weeks](https://rocketup.pages.dev/posts/what_we_built_in_2_weeks/) [memory design](https://rocketup.pages.dev/posts/how-zerostack-memory-works/) [subagents design](https://rocketup.pages.dev/posts/how-zerostack-subagents-work/) [xavier's memory analysis](https://xavierforge.dev/en/posts/zerostack-memory-design/)
@@ -35,7 +36,7 @@ Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/lates
 
 ## Performance
 
-_zerostack_ is one of the smallest and most performant coding agents on the market.
+*zerostack* is one of the smallest and most performant coding agents on the market.
 
 - Lines of code: ~30k LoC (core, excluding tests)
 - Binary size: 26MB
@@ -93,13 +94,13 @@ brew install zerostack
 Run directly with [`nix-run`](https://tangled.org/weethet.eurosky.social/nix-run/):
 
 ```console
-$ nix-run https://github.com/gi-dellav/zerostack/archive/refs/heads/main.tar.gz
+nix-run https://github.com/gi-dellav/zerostack/archive/refs/heads/main.tar.gz
 ```
 
 Add to profile:
 
 ```console
-$ nix profile add --file https://github.com/gi-dellav/zerostack/archive/refs/heads/main.tar.gz
+nix profile add --file https://github.com/gi-dellav/zerostack/archive/refs/heads/main.tar.gz
 ```
 
 Add as an overlay to your system/project:
@@ -116,10 +117,9 @@ in
 pkgs.zerostack
 ```
 
-
 Once installed, run `/prompt autoconfig` inside zerostack to explore the documentation and configure the tool interactively.
 
-_note:_ If you have questions or you want to collaborate on the project, please join the [dedicated Matrix chatroom](https://app.element.io/#/room/#zerostack-general:matrix.org).
+*note:* If you have questions or you want to collaborate on the project, please join the [dedicated Matrix chatroom](https://app.element.io/#/room/#zerostack-general:matrix.org).
 
 If you want to orchestrate multiple zerostack agents from the terminal, also install [multistack](https://github.com/gi-dellav/multistack).
 
@@ -203,7 +203,7 @@ You can run `/prompt autoconfig` in order to use a specialized agent that allows
 
 ## Prompts system
 
-_zerostack_ includes a set of built-in system prompts that change the agent's behavior and tone.
+*zerostack* includes a set of built-in system prompts that change the agent's behavior and tone.
 The idea is to build a complete suite of prompts that can fully substitute skills like [superpower](https://github.com/obra/superpowers) or the [Claude's official skills](https://github.com/anthropics/claude-plugins-official/tree/main).
 You can switch between different prompts or list all registered prompts using `/prompt`.
 
@@ -243,12 +243,141 @@ to the next phase (`brainstorm` → `plan` → `code` → `/review`), asking
 and `B` ("but ...") advances with an extra instruction appended. Each
 transition is enabled independently in config.
 
+## Extension system (Wasm plugins)
+
+**NOTE:** Extensions are gated behind the `extensions` feature, which is **included in the default build**.
+
+zerostack has a Wasm-based plugin system powered by [wasmtime](https://wasmtime.dev/) (component model, WASI preview 2).
+Extensions let you add custom tools and slash commands written in Rust, compiled to WebAssembly, and loaded at runtime
+in a sandboxed environment.
+
+### How it works
+
+Extensions are compiled to `wasm32-wasip2` targets and loaded via `extension.toml` manifests:
+
+```toml
+# extension.toml
+id = "my-namespace/my-extension"
+name = "My Extension"
+version = "0.1.0"
+schema_version = 2
+description = "Does something useful"
+
+[extension]
+entrypoint = "target/wasm32-wasip2/debug/my_extension.wasm"
+
+[capabilities]
+tools = true       # Register custom tools for the LLM
+commands = true    # Register slash commands (/my-command)
+```
+
+Extensions are discovered automatically from two locations:
+
+- **Global**: `~/.local/share/zerostack/extensions/`
+- **Project-local**: `.zerostack/extensions/` (relative to the working directory)
+
+You can also load extensions explicitly with the CLI flag:
+
+```bash
+zerostack -E ./path/to/my_extension.wasm
+```
+
+### What extensions can do
+
+| Capability | Description |
+| ------------ | ------------- |
+| **Tools** (`tools`) | Register custom tools that the LLM can call. Tool names are namespaced as `ext_id__tool_name`, with bare-name resolution when unambiguous. |
+| **Commands** (`commands`) | Register slash commands (`/my-command`) that appear in the TUI's command picker. |
+| **Lifecycle** (`lifecycle`) | React to session start/shutdown, agent start/end, turn start/end events. |
+| **Provider** (`provider`) | Register custom LLM providers (future). |
+| **UI** (`ui`) | Show notifications, request user confirmations, prompt for input. |
+| **Exec** (`exec`) | Run shell commands (subject to the permission system). |
+| **HTTP** (`http`) | Make HTTP GET/POST requests. |
+| **Session** (`session`) | Read and append to the conversation history. |
+
+Defaults: `tools: true`, `commands: true`. All other capabilities default to `false`
+and must be explicitly enabled in `extension.toml`.
+
+### Built-in example extensions
+
+zerostack ships with three example extensions under `tests/extensions/`:
+
+| Extension | Capabilities | Description |
+| ----------- | ------------- | ------------- |
+| `test-echo` | `tools` | Echoes a message back via a tool — a minimal reference implementation |
+| `pi-simplify` | `commands` | Reviews recently changed files for clarity and maintainability (`/simplify`) |
+| `session-name` | `tools`, `commands` | Auto-generates concise session titles (`/name`, sets session name) |
+
+### Building an extension
+
+Extensions are Rust projects compiled to `wasm32-wasip2`. Use the `zerostack-extension-api` crate:
+
+```rust
+use zerostack_extension_api::*;
+
+struct MyExtension;
+
+impl Extension for MyExtension {
+    fn init(&mut self, ctx: ExtensionContext) -> Result<(), String> {
+        ctx.register_tool(ToolDefinition {
+            name: "hello".into(),
+            label: "Hello".into(),
+            description: "Greets the user".into(),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                }
+            }).to_string(),
+            prompt_snippet: None,
+            prompt_guidelines: vec![],
+        })?;
+        Ok(())
+    }
+
+    fn on_tool_execute(
+        &mut self,
+        tool_name: String,
+        _tool_call_id: String,
+        params_json: String,
+    ) -> Result<ToolOutput, String> {
+        let params: serde_json::Value = serde_json::from_str(&params_json)
+            .map_err(|e| e.to_string())?;
+        let name = params["name"].as_str().unwrap_or("world");
+        Ok(ToolOutput {
+            content: format!("Hello, {name}!"),
+            details: "{}".into(),
+            is_error: false,
+        })
+    }
+}
+
+export_extension!(MyExtension);
+```
+
+Build with:
+
+```bash
+cargo build --release --target wasm32-wasip2
+```
+
+### Extension tools and commands
+
+- **Tools** registered by extensions are namespaced as `ext_id__tool_name` (double underscore separator). When a bare tool name is unambiguous, it resolves automatically without the namespace prefix.
+- **Commands** registered by extensions appear in the TUI's `/` command picker alongside built-in commands. They are also namespaced internally but available via bare name when unique.
+- Extensions can also use the `trigger-prompt` export to inject a prompt directly into the agent's input.
+
+### WIT interface
+
+The full WIT contract lives at [`crates/extension-api/wit/extension-v0.5.0.wit`](crates/extension-api/wit/extension-v0.5.0.wit).
+Detailed design documentation is in [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md).
+
 ## Permission system
 
 zerostack has five permission modes:
 
 | Mode | CLI flag | Behavior |
-|------|----------|----------|
+| ------ | ---------- | ---------- |
 | **restrictive** | `-R` / `--restrictive` | Ask for every operation. Config rules are ignored by default (can be enabled via `permission-modes`). |
 | **readonly** | `--read-only` | Allow read/grep/find_files/list_dir. Deny writes, edits, bash, and everything else. Config rules ignored by default. |
 | **guarded** | `--guarded` | Allow read tools. Ask for writes, edits, bash, and everything else. Config rules apply. |
@@ -403,9 +532,9 @@ be merged and removed before exiting the agent.
 
 ## Loop system
 
-_zerostack_ includes an iterative coding loop for long-horizon tasks. The agent repeatedly reads the task, picks an item from the plan, works on it, runs tests, updates the plan, and loops until the task is complete or the iteration limit is reached.
+*zerostack* includes an iterative coding loop for long-horizon tasks. The agent repeatedly reads the task, picks an item from the plan, works on it, runs tests, updates the plan, and loops until the task is complete or the iteration limit is reached.
 
-**NOTE** The loop system is an _experimental_ feature.
+**NOTE** The loop system is an *experimental* feature.
 
 ### Loop usage
 
@@ -437,9 +566,9 @@ zerostack --loop --loop-prompt "Refactor the API" --loop-max 10 --loop-run "carg
 
 ## Git worktrees integration
 
-_zerostack_ provides a branch-per-task workflow using git worktrees. You can create, work in, merge, and exit worktrees entirely from the chat UI.
+*zerostack* provides a branch-per-task workflow using git worktrees. You can create, work in, merge, and exit worktrees entirely from the chat UI.
 
-**NOTE** The git worktrees integration is an _experimental_ feature.
+**NOTE** The git worktrees integration is an *experimental* feature.
 
 ### Git worktree usage
 
@@ -466,20 +595,22 @@ worktree branch before exiting.
 
 - **Clean merge**: completes silently (merge, push, remove worktree, delete branch).
 - **Merge conflicts**: zerostack lists conflicting files and prompts:
+
   ```
   [a]bort  [l]eave for manual resolution  [h]elp (agent resolves)
   ```
+
   - `a` – abort the merge, restore clean state, do not delete the worktree.
   - `l` – leave the conflict state in the main repo for manual `git mergetool`.
   - `h` – abort the merge, then spawn the agent to redo the merge with
     interactive conflict-resolution guidance (same as `/wt-merge`).
 
 | Flag | Description |
-|------|-------------|
+| ------ | ------------- |
 | `--worktree <name>` | Create a worktree on branch `<name>` and `cd` into it. |
-| `--wt-auto-merge`   | Auto-merge worktree branch on exit. |
-| `--parallel`        | Create a timestamped worktree with auto-merge on exit. |
-| `--wt-force`        | Force worktree remove and branch delete (`-D`) even if dirty. |
+| `--wt-auto-merge` | Auto-merge worktree branch on exit. |
+| `--parallel` | Create a timestamped worktree with auto-merge on exit. |
+| `--wt-force` | Force worktree remove and branch delete (`-D`) even if dirty. |
 | `--wt-base-dir <dir>` | Base directory for worktrees (default: parent of repo). |
 
 ## ACP (Agent Communication Protocol) support

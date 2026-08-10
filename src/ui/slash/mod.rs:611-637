@@ -1,0 +1,29 @@
+        _ => {
+            // Try extension commands first.
+            #[cfg(feature = "extensions")]
+            {
+                let cmd_name = parts[0].strip_prefix('/').unwrap_or(parts[0]);
+                let full_args = if parts.len() > 1 {
+                    text[parts[0].len()..].trim().to_string()
+                } else {
+                    String::new()
+                };
+                let (output, queued_prompts) =
+                    crate::extension::registry::dispatch_with_prompts(cmd_name, &full_args);
+                // Inject queued prompts into the input editor (e.g. from trigger-prompt).
+                for prompt in queued_prompts {
+                    ctx.input.load_text(&prompt);
+                }
+                if let Some(output) = output {
+                    let mut out = output;
+                    out.push('\n');
+                    ctx.renderer.write(&out, crate::ui::C_TOOL)?;
+                    return Ok(());
+                }
+            }
+            write_error(
+                ctx.renderer,
+                format!("unknown command: {} (try /help)", parts[0]),
+            );
+            Ok(())
+        }

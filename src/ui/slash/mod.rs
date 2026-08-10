@@ -13,6 +13,7 @@ pub(crate) mod settings;
 
 pub(crate) use providers::warm_model_cache;
 
+use compact_str::CompactString;
 use smallvec::SmallVec;
 
 use crate::cli::Cli;
@@ -457,12 +458,127 @@ pub async fn handle_slash(
         "/init" => init::handle(&parts, &mut ctx).await,
         "/review" => review::handle(&parts, &mut ctx).await,
         "/memory" => memory::handle(&parts, &mut ctx).await,
+        "/regen-skills" => {
+            match crate::context::skills::regen() {
+                Ok(()) => {
+                    ctx.context.skills = crate::context::skills::reload_skills();
+                    write_ok(ctx.renderer, "Skills regenerated. Use /skills to see them.");
+                }
+                Err(e) => {
+                    write_error(ctx.renderer, format!("failed to regenerate skills: {e}"));
+                }
+            }
+            Ok(())
+        }
+        "/skills" => {
+            let skills = &ctx.context.skills;
+            if skills.is_empty() {
+                write_result(
+                    ctx.renderer,
+                    "No skills loaded. Add skills to ~/.local/share/zerostack/skills/ or .zerostack/skills/",
+                );
+            } else {
+                write_ok(ctx.renderer, "Available skills:");
+                let mut names: Vec<&str> = skills.keys().map(|s| s.as_str()).collect();
+                names.sort();
+                for name in names {
+                    if let Some(s) = skills.get(name) {
+                        write_result(
+                            ctx.renderer,
+                            format!("  /skill:{name: <30} — {}", s.meta.description),
+                        );
+                    }
+                }
+                write_result(ctx.renderer, "");
+                write_result(ctx.renderer, "Use /skill:<name> to load full instructions.");
+            }
+            Ok(())
+        }
         "/compress" | "/compact" | "/loop" | "/worktree" | "/wt-merge" | "/wt-exit" => {
             features::handle(&parts, &mut ctx).await
+        }
+        cmd if cmd.starts_with("/skill:") => {
+            // /skill:name — activate a skill as the system prompt.
+            // Per pi's progressive disclosure: full instructions load on-demand.
+            let skill_name = cmd.strip_prefix("/skill:").unwrap();
+            let args = if parts.len() > 1 {
+                text[parts[0].len()..].trim().to_string()
+            } else {
+                String::new()
+            };
+            if let Some(skill) = ctx.context.skills.get(skill_name) {
+                // Build prompt: skill content + optional user args.
+                let mut prompt = skill.content.clone();
+                if !args.is_empty() {
+                    prompt.push_str(&format!("\n\nUser: {args}"));
+                }
+                ctx.context.current_prompt = Some(prompt);
+                ctx.context.current_prompt_name = Some(format!("skill:{skill_name}"));
+                write_ok(
+                    ctx.renderer,
+                    format!(
+                        "Skill activated: {skill_name} — {} (use /prompt default to clear)",
+                        skill.meta.description
+                    ),
+                );
+            } else {
+                write_error(
+                    ctx.renderer,
+                    format!(
+                        "unknown skill: '{}'. Use /skills to see available skills.",
+                        skill_name
+                    ),
+                );
+            }
+            Ok(())
         }
         #[cfg(feature = "hooks")]
         "/hooks" => hooks::handle(&parts, &mut ctx).await,
         _ => {
+            // Try extension commands first.
+            #[cfg(feature = "extensions")]
+            {
+                let cmd_name = parts[0].strip_prefix('/').unwrap_or(parts[0]);
+                let full_args = if parts.len() > 1 {
+                    text[parts[0].len()..].trim().to_string()
+                } else {
+                    String::new()
+                };
+                let (output, queued_prompts) =
+                    crate::extension::registry::dispatch_with_prompts(cmd_name, &full_args);
+                if let Some(out) = output {
+                    let mut out = out;
+                    out.push('\n');
+                    ctx.renderer.write(&out, crate::ui::C_TOOL)?;
+                    // Route queued prompts into the agent input queue based
+                    // on deliverAs. We only handle `follow-up` and `next-turn`
+                    // here — `steer` requires mid-run injection handled by
+                    // the runner, which is wired in `event_handler.rs`.
+                    for (prompt_text, deliver_as) in queued_prompts {
+                        use crate::extension::host::types::DeliverAs as D;
+                        match deliver_as {
+                            D::FollowUp | D::NextTurn => {
+                                ctx.input.load_text(&prompt_text);
+                                let _ = ctx
+                                    .renderer
+                                    .write("[queued agent prompt]\n", crate::ui::C_RESULT);
+                            }
+                            D::Steer => {
+                                // Surface the steer prompt for the next turn;
+                                // mid-run steering lives in the runner.
+                                ctx.input.load_text(&prompt_text);
+                            }
+                        }
+                    }
+                    // Sync session name from extension to session object.
+                    let ext_name = crate::extension::registry::get_session_name();
+                    if !ext_name.is_empty() && ext_name != ctx.session.name.as_str() {
+                        ctx.session.name = CompactString::new(&ext_name);
+                        crate::session::storage::save_session(ctx.session)?;
+                    }
+                    return Ok(());
+                }
+            }
             write_error(
                 ctx.renderer,
                 format!("unknown command: {} (try /help)", parts[0]),

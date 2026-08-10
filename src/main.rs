@@ -7,6 +7,8 @@ mod config;
 mod context;
 mod docs;
 mod event;
+#[cfg(feature = "extensions")]
+mod extension;
 mod extras;
 mod fs;
 mod logging;
@@ -24,6 +26,7 @@ mod ui;
 
 #[cfg(test)]
 mod tests;
+mod version;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

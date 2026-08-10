@@ -11,7 +11,9 @@ pub(crate) mod read;
 pub(crate) mod todo;
 pub(crate) mod write;
 
-pub(crate) use normalize::{levenshtein_similarity, normalize_whitespace};
+pub(crate) use normalize::{
+    levenshtein_similarity, normalize_unicode, normalize_whitespace, strip_comment_prefixes,
+};
 
 use std::sync::Mutex;
 

@@ -96,6 +96,21 @@ fn available_commands() -> Vec<&'static str> {
     cmds
 }
 
+/// Get dynamic extension-registered command names.
+#[cfg(feature = "extensions")]
+fn extension_commands() -> Vec<String> {
+    let cmds = crate::extension::registry::extension_command_names_with_conflicts();
+    if !cmds.is_empty() {
+        tracing::debug!(?cmds, "extension commands added to picker");
+    }
+    cmds
+}
+
+#[cfg(not(feature = "extensions"))]
+fn extension_commands() -> Vec<String> {
+    Vec::new()
+}
+
 pub struct ListPicker {
     pub active: bool,
     pub query: String,
@@ -121,7 +136,11 @@ impl ListPicker {
 
     pub fn with_static_commands() -> Self {
         let mut picker = ListPicker::new();
-        picker.items = available_commands().iter().map(|s| s.to_string()).collect();
+        let mut items: Vec<String> = available_commands().iter().map(|s| s.to_string()).collect();
+        items.extend(extension_commands());
+        items.sort();
+        items.dedup();
+        picker.items = items;
         picker
     }
 

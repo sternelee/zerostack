@@ -29,6 +29,7 @@ fn make_context(prompts: &[(&str, &str)]) -> ContextFiles {
         memory: None,
         #[cfg(feature = "archmd")]
         architecture: None,
+        skills: HashMap::new(),
     }
 }
 

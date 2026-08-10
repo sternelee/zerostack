@@ -1,0 +1,20 @@
+[package]
+name = "test-echo"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zerostack-extension-api = { path = "../../../crates/extension-api" }
+wit-bindgen = "0.58"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
