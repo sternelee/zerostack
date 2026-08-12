@@ -28,10 +28,12 @@ extensions = []
 default = ["extensions"]
 
 [dependencies]
-zerostack-core = { path = "../core", default-features = false, features = ["extensions"] }
-gpui = { path = "../../../../../Downloads/zed-main/crates/gpui" }
-gpui_platform = { path = "../../../../../Downloads/zed-main/crates/gpui_platform" }
-gpui_macros = { path = "../../../../../Downloads/zed-main/crates/gpui_macros" }
+zerostack-core = { path = "../core", default-features = false, features = [
+  "extensions",
+] }
+gpui = { git = "https://github.com/egoist/zed" }
+gpui_platform = { git = "https://github.com/egoist/zed" }
+gpui_macros = { git = "https://github.com/egoist/zed" }
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
 compact_str = { version = "0.9", features = ["serde"] }
 pulldown-cmark = { version = "0.13", default-features = false }
@@ -40,10 +42,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-gpui_macos = { path = "../../../../../Downloads/zed-main/crates/gpui_macos", features = ["font-kit"] }
+gpui_macos = { git = "https://github.com/egoist/zed", features = ["font-kit"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-gpui_windows = { path = "../../../../../Downloads/zed-main/crates/gpui_windows" }
+gpui_windows = { git = "https://github.com/egoist/zed" }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
-gpui_linux = { path = "../../../../../Downloads/zed-main/crates/gpui_linux" }
+gpui_linux = { git = "https://github.com/egoist/zed" }
