@@ -723,6 +723,10 @@ pub struct ShellState {
     /// Which settings panel section is scrolled into view context (0=general,
     /// 1=limits, 2=permissions) — used to keep the list stable.
     settings_section: usize,
+    /// Open rename-session dialog: target session id + its old name. The
+    /// input buffer is edited in the dialog and committed with Enter.
+    rename_target: Option<(String, String)>,
+    rename_buffer: SharedString,
     /// Last reported MCP server statuses, from `CoreEvent::McpStatus`. Empty
     /// until the first `QueryMcp` round-trips.
     mcp_servers: Vec<zerostack_core::events::McpServerStatus>,
@@ -838,6 +842,8 @@ impl ShellState {
             settings_feedback: SharedString::new(""),
             settings_cfg: None,
             settings_section: 0,
+            rename_target: None,
+            rename_buffer: SharedString::new(""),
         }
     }
 
@@ -1033,6 +1039,191 @@ impl ShellState {
         self.close_confirm_armed = true;
         self.bridge.shutdown();
         cx.quit();
+    }
+
+    /// Rename-session dialog: an overlay with a text field prefilled with the
+    /// current name. Enter commits `RenameSession`; Esc or outside-click
+    /// cancels. Uses plain key_char capture (the dialog is modal, so the
+    /// IME-aware composer handler isn't in play here).
+    fn render_rename_dialog(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let _view_entity = cx.entity().clone();
+        let rename_buffer = self.rename_buffer.clone();
+        let old_name = self
+            .rename_target
+            .as_ref()
+            .map(|(_, old)| old.clone())
+            .unwrap_or_default();
+
+        let input_field = div()
+            .id("rename-input")
+            .h(px(32.0))
+            .px(px(10.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(rgba(dark::BORDER_STRONG))
+            .bg(rgb(dark::COMPOSER))
+            .flex()
+            .items_center()
+            .cursor_text()
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(13.0))
+                    .text_color(if rename_buffer.is_empty() {
+                        rgb(dark::TEXT_GHOST)
+                    } else {
+                        rgb(dark::TEXT)
+                    })
+                    .child(if rename_buffer.is_empty() {
+                        SharedString::from("session name")
+                    } else {
+                        rename_buffer.clone()
+                    }),
+            )
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+                let key = ev.keystroke.key.as_str();
+                let mods = &ev.keystroke.modifiers;
+                if key == "enter" {
+                    let name = this.rename_buffer.trim().to_string();
+                    if !name.is_empty()
+                        && let Some((sid, _)) = this.rename_target.clone()
+                    {
+                        let _ = this.bridge.send(UserAction::RenameSession {
+                            session_id: CompactString::new(sid.as_str()),
+                            name: CompactString::new(name.as_str()),
+                        });
+                    }
+                    this.rename_target = None;
+                    this.rename_buffer = SharedString::new("");
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if key == "escape" {
+                    this.rename_target = None;
+                    this.rename_buffer = SharedString::new("");
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if key == "backspace" {
+                    let mut s = this.rename_buffer.to_string();
+                    if mods.platform || mods.control {
+                        s.clear();
+                    } else {
+                        s.pop();
+                    }
+                    this.rename_buffer = SharedString::new(s);
+                } else if let Some(chars) = ev.keystroke.key_char.as_ref() {
+                    let mut s = this.rename_buffer.to_string();
+                    s.push_str(chars);
+                    this.rename_buffer = SharedString::new(s);
+                }
+                cx.notify();
+                cx.stop_propagation();
+            }));
+
+        div()
+            .absolute()
+            .inset_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000099))
+            .occlude()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _ev, _window, cx| {
+                    this.rename_target = None;
+                    this.rename_buffer = SharedString::new("");
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .bg(rgb(dark::RAISED))
+                    .border_1()
+                    .border_color(rgba(dark::BORDER_STRONG))
+                    .rounded(px(13.0))
+                    .shadow_lg()
+                    .p_6()
+                    .w(px(360.))
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(dark::TEXT))
+                            .child("Rename session"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(dark::TEXT_SECONDARY))
+                            .child(SharedString::from(format!("Current name: {old_name}"))),
+                    )
+                    .child(input_field)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .id("rename-cancel")
+                                    .px_3()
+                                    .py_1p5()
+                                    .rounded(px(6.0))
+                                    .border_1()
+                                    .border_color(rgba(dark::BORDER))
+                                    .text_color(rgb(dark::TEXT))
+                                    .text_sm()
+                                    .cursor_pointer()
+                                    .hover(|element| element.bg(rgba(dark::OVERLAY)))
+                                    .child("Cancel")
+                                    .on_click(cx.listener(|this, _, _w, cx| {
+                                        this.rename_target = None;
+                                        this.rename_buffer = SharedString::new("");
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("rename-commit")
+                                    .px_3()
+                                    .py_1p5()
+                                    .rounded(px(6.0))
+                                    .bg(rgb(dark::INVERSE))
+                                    .text_color(rgb(dark::ON_INVERSE))
+                                    .text_sm()
+                                    .cursor_pointer()
+                                    .hover(|element| element.opacity(0.9))
+                                    .child("Save")
+                                    .on_click(cx.listener(|this, _, _w, cx| {
+                                        let name = this.rename_buffer.trim().to_string();
+                                        if !name.is_empty()
+                                            && let Some((sid, _)) = this.rename_target.clone()
+                                        {
+                                            let _ = this.bridge.send(UserAction::RenameSession {
+                                                session_id: CompactString::new(sid.as_str()),
+                                                name: CompactString::new(name.as_str()),
+                                            });
+                                        }
+                                        this.rename_target = None;
+                                        this.rename_buffer = SharedString::new("");
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// Insert a single character at the current cursor position and advance the cursor
@@ -3894,8 +4085,11 @@ impl ShellState {
                     })
                     .on_click(move |_ev, _window, cx| {
                         view_for_click.update(cx, |state, cx| {
-                            let _ = state.bridge.send(UserAction::RunSlashCommand {
-                                command: CompactString::new(format!("/mode {}", name_owned)),
+                            // Use the dedicated SetMode action instead of the
+                            // /mode slash command — the engine updates the
+                            // permission checker and status directly.
+                            let _ = state.bridge.send(UserAction::SetMode {
+                                mode: CompactString::new(name_owned.as_str()),
                             });
                             state.mode_picker_visible = false;
                             cx.notify();
@@ -8229,19 +8423,17 @@ fn render_session_row(
                                     .on_click({
                                         let view = view_for_rename.clone();
                                         let sid = id_for_rename.clone();
+                                        let name_to_edit = name_for_rename.clone();
                                         move |_ev, _window, cx| {
                                             view.update(cx, |state, cx| {
-                                                // Simple rename: prompt the user via a
-                                                // synthetic input prefilled with the old name.
-                                                let old_name = name_for_rename.as_str();
-                                                if old_name.is_empty() {
-                                                    return;
-                                                }
-                                                let _ =
-                                                    state.bridge.send(UserAction::RenameSession {
-                                                        session_id: sid.clone(),
-                                                        name: CompactString::new(old_name),
-                                                    });
+                                                // Open a real rename dialog prefilled
+                                                // with the current name.
+                                                state.rename_target = Some((
+                                                    sid.to_string(),
+                                                    name_to_edit.to_string(),
+                                                ));
+                                                state.rename_buffer =
+                                                    SharedString::new(name_to_edit.as_str());
                                                 cx.notify();
                                             });
                                         }
@@ -8666,6 +8858,9 @@ impl Render for ShellState {
             // visually on top of the chat and sidebar when shown.
             .when(self.close_confirm_visible, |d| {
                 d.child(self.render_close_confirm_overlay(cx))
+            })
+            .when(self.rename_target.is_some(), |d| {
+                d.child(self.render_rename_dialog(cx))
             })
     }
 }
