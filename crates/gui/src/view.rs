@@ -2650,6 +2650,46 @@ impl ShellState {
                         )
                     })
                     .child(crate::scrollbar::vertical(&self.chat_list, &chat_scrollbar))
+                    .when(!self.chat_follow_tail, |d| {
+                        // Waku-style scroll-to-bottom FAB: shows whenever the
+                        // reader has scrolled away from the tail, re-pins on
+                        // click.
+                        let view_entity_for_fab = view_entity.clone();
+                        d.child(
+                            div()
+                                .id("chat-scroll-to-bottom")
+                                .absolute()
+                                .bottom(px(8.0))
+                                .left(px(0.0))
+                                .right(px(0.0))
+                                .flex()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .id("chat-scroll-to-bottom-btn")
+                                        .size(px(32.0))
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(rgba(dark::BORDER_STRONG))
+                                        .bg(rgb(dark::COMPOSER))
+                                        .shadow_md()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|element| element.bg(rgb(dark::RAISED)))
+                                        .child(div().text_color(rgb(dark::TEXT)).child("↓"))
+                                        .on_click(move |_ev, _window, cx| {
+                                            view_entity_for_fab.update(cx, |state, cx| {
+                                                state.chat_list.scroll_to_end();
+                                                state.chat_follow_tail = true;
+                                                state.maybe_follow_tail();
+                                                cx.notify();
+                                            });
+                                        }),
+                                ),
+                        )
+                    })
                     .when(self.msg_menu.is_some(), |d| {
                         d.child(self.render_msg_menu(cx))
                     }),
