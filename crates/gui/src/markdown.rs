@@ -9,12 +9,13 @@
 //! rendered as its own `div`; inline spans within a block are laid out as a
 //! horizontal flex row with `flex_wrap` so long paragraphs wrap normally.
 //!
-//! Supported: ATX headings (h1-h6), paragraphs, fenced / indented code blocks,
-//! bullet + ordered lists, block quotes, horizontal rules, inline code, bold,
-//! italic, strikethrough, and links (rendered as accent + underline).
+//! Supported: ATX headings (h1-h6), paragraphs, fenced / indented code blocks
+//! (with language tag preserved), bullet + ordered lists, task lists, block
+//! quotes, tables, horizontal rules, inline code, bold, italic, strikethrough,
+//! and links (rendered as accent + underline).
 
 use compact_str::CompactString;
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 #[derive(Debug, Clone)]
 pub enum BlockKind {
@@ -23,6 +24,9 @@ pub enum BlockKind {
     CodeBlock(Option<CompactString>),
     ListItem(Option<u64>),
     BlockQuote,
+    /// (header row, body rows). Header cells are `Vec<MarkdownSpan>` too so
+    /// inline styling works inside table cells.
+    Table(Vec<Vec<MarkdownSpan>>, Vec<Vec<Vec<MarkdownSpan>>>),
     Hr,
 }
 
@@ -34,6 +38,8 @@ pub struct MarkdownSpan {
     pub strikethrough: bool,
     pub code: bool,
     pub link: Option<CompactString>,
+    /// `Some(checked)` when this span is a task-list marker (`[x]` / `[ ]`).
+    pub task: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,8 +53,8 @@ pub struct MarkdownBlock {
 /// The parser state uses a small inline stack to remember which formatting
 /// tags (bold / italic / inline code / link) are active when a text event
 /// arrives. Tags that don't carry inline state — paragraph, heading,
-/// list item, code block, block quote — mark the start / end of a new
-/// block.
+/// list item, code block, block quote, table cells — mark the start / end
+/// of a new block.
 pub fn parse_markdown(input: &str) -> Vec<MarkdownBlock> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -73,6 +79,18 @@ pub fn parse_markdown(input: &str) -> Vec<MarkdownBlock> {
     let mut list_item_index: Option<u64> = None;
     let mut ordered_next: u64 = 1;
     let mut list_is_ordered: bool = false;
+
+    // Table building state. Cells accumulate into `current_row`; a finished
+    // row lands in either the header or the body list.
+    let mut in_table: bool = false;
+    let mut in_table_head: bool = false;
+    let mut table_header: Vec<Vec<MarkdownSpan>> = Vec::new();
+    let mut table_body: Vec<Vec<Vec<MarkdownSpan>>> = Vec::new();
+    let mut current_row: Vec<Vec<MarkdownSpan>> = Vec::new();
+    // Ignored but kept for type-awareness: column alignments from the table
+    // tag. Rendering uses them via BlockKind::Table (alignment not carried
+    // into spans; kept simple).
+    let mut _alignments: Vec<Alignment> = Vec::new();
 
     let mut push_block = |kind: BlockKind, spans: Vec<MarkdownSpan>| {
         blocks.push(MarkdownBlock { kind, spans });
@@ -122,6 +140,24 @@ pub fn parse_markdown(input: &str) -> Vec<MarkdownBlock> {
                 Tag::BlockQuote(_) => {
                     current_spans.clear();
                 }
+                Tag::Table(aligns) => {
+                    _alignments = aligns;
+                    in_table = true;
+                    in_table_head = false;
+                    table_header.clear();
+                    table_body.clear();
+                    current_row.clear();
+                }
+                Tag::TableHead => {
+                    in_table_head = true;
+                    current_row.clear();
+                }
+                Tag::TableRow => {
+                    current_row.clear();
+                }
+                Tag::TableCell => {
+                    current_spans.clear();
+                }
                 Tag::Emphasis => {
                     let mut s = inline_stack.last().cloned().unwrap_or_default();
                     s.italic = !s.italic;
@@ -167,9 +203,9 @@ pub fn parse_markdown(input: &str) -> Vec<MarkdownBlock> {
                     push_block(BlockKind::Heading(n), std::mem::take(&mut current_spans));
                 }
                 TagEnd::CodeBlock => {
-                    in_code_block = None;
+                    let lang = in_code_block.take().flatten();
                     push_block(
-                        BlockKind::CodeBlock(None),
+                        BlockKind::CodeBlock(lang),
                         std::mem::take(&mut current_spans),
                     );
                 }
@@ -182,6 +218,29 @@ pub fn parse_markdown(input: &str) -> Vec<MarkdownBlock> {
                 }
                 TagEnd::BlockQuote(_) => {
                     push_block(BlockKind::BlockQuote, std::mem::take(&mut current_spans));
+                }
+                TagEnd::TableHead => {
+                    in_table_head = false;
+                    table_header = std::mem::take(&mut current_row);
+                }
+                TagEnd::TableRow => {
+                    if in_table_head {
+                        table_header = std::mem::take(&mut current_row);
+                    } else {
+                        table_body.push(std::mem::take(&mut current_row));
+                    }
+                }
+                TagEnd::TableCell => {
+                    current_row.push(std::mem::take(&mut current_spans));
+                }
+                TagEnd::Table => {
+                    in_table = false;
+                    push_block(
+                        BlockKind::Table(table_header.clone(), table_body.clone()),
+                        Vec::new(),
+                    );
+                    table_header.clear();
+                    table_body.clear();
                 }
                 TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
                     inline_stack.pop();
@@ -207,6 +266,7 @@ pub fn parse_markdown(input: &str) -> Vec<MarkdownBlock> {
                         && !last.bold
                         && !last.italic
                         && !last.strikethrough
+                        && last.task.is_none()
                     {
                         last.text.push_str(&piece);
                         continue;
@@ -224,6 +284,7 @@ pub fn parse_markdown(input: &str) -> Vec<MarkdownBlock> {
                         strikethrough: inl.strike,
                         code: inl.code,
                         link: inl.link,
+                        ..Default::default()
                     });
                 }
             }
@@ -243,6 +304,13 @@ pub fn parse_markdown(input: &str) -> Vec<MarkdownBlock> {
             Event::Rule => {
                 push_block(BlockKind::Hr, Vec::new());
             }
+            Event::TaskListMarker(checked) => {
+                current_spans.push(MarkdownSpan {
+                    text: CompactString::from(" "),
+                    task: Some(checked),
+                    ..Default::default()
+                });
+            }
             _ => {}
         }
     }
@@ -251,6 +319,8 @@ pub fn parse_markdown(input: &str) -> Vec<MarkdownBlock> {
     if !current_spans.is_empty() {
         push_block(BlockKind::Paragraph, std::mem::take(&mut current_spans));
     }
+
+    let _ = in_table; // table always closed by its TagEnd in valid input
 
     blocks
 }
@@ -281,10 +351,10 @@ mod tests {
     }
 
     #[test]
-    fn code_block_is_captured() {
+    fn code_block_is_captured_with_lang() {
         let md = "```rust\nfn main() {}\n```";
         let blocks = parse_markdown(md);
-        assert!(matches!(blocks[0].kind, BlockKind::CodeBlock(_)));
+        assert!(matches!(&blocks[0].kind, BlockKind::CodeBlock(Some(l)) if l == "rust"));
         let joined: String = blocks[0].spans.iter().map(|s| s.text.as_str()).collect();
         assert!(joined.contains("fn main"));
     }
@@ -308,5 +378,39 @@ mod tests {
         let md = "above\n\n---\n\nbelow\n";
         let blocks = parse_markdown(md);
         assert!(blocks.iter().any(|b| matches!(b.kind, BlockKind::Hr)));
+    }
+
+    #[test]
+    fn table_is_captured() {
+        let md = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let blocks = parse_markdown(md);
+        let table = blocks
+            .iter()
+            .find_map(|b| match &b.kind {
+                BlockKind::Table(header, body) => Some((header, body)),
+                _ => None,
+            })
+            .expect("table block");
+        assert_eq!(table.0.len(), 2);
+        assert_eq!(table.1.len(), 1);
+        assert_eq!(table.1[0].len(), 2);
+        let joined: String = table.1[0]
+            .iter()
+            .flat_map(|c| c.iter())
+            .map(|s| s.text.as_str())
+            .collect();
+        assert_eq!(joined, "12");
+    }
+
+    #[test]
+    fn task_list_marker_carries_checked() {
+        let md = "- [x] done\n- [ ] todo\n";
+        let blocks = parse_markdown(md);
+        let checked: Vec<_> = blocks
+            .iter()
+            .flat_map(|b| &b.spans)
+            .filter_map(|s| s.task)
+            .collect();
+        assert_eq!(checked, vec![true, false]);
     }
 }

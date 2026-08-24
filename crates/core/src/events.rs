@@ -109,6 +109,26 @@ pub enum CoreEvent {
         text: CompactString,
     },
 
+    // === MCP ===
+    /// Reply to [`UserAction::QueryMcp`]: every configured MCP server with
+    /// its connection state and tool count (when connected).
+    McpStatus {
+        servers: Vec<McpServerStatus>,
+    },
+    /// An OAuth login for an MCP server has started; `auth_url` is what the
+    /// user must open (GUI opens it in the system browser). Sent once, before
+    /// the background wait begins.
+    McpLoginStarted {
+        server: CompactString,
+        auth_url: CompactString,
+    },
+    /// The login wait finished (or failed). On success the server has been
+    /// reconnected with the fresh token.
+    McpLoginDone {
+        server: CompactString,
+        error: Option<CompactString>,
+    },
+
     // === System ===
     Error {
         message: CompactString,
@@ -184,6 +204,18 @@ pub enum UserAction {
     },
     DropAllFiles,
 
+    // === MCP ===
+    /// Ask the engine to report the status of every configured MCP server
+    /// (connected? how many tools?). The reply arrives as
+    /// [`CoreEvent::McpStatus`].
+    QueryMcp,
+    /// Start an interactive OAuth login for an MCP server. The engine runs
+    /// the browser wait in the background and emits [`CoreEvent::McpLoginStarted`]
+    /// (with the URL) then [`CoreEvent::McpLoginDone`].
+    LoginMcp {
+        server: CompactString,
+    },
+
     // === Lifecycle ===
     Quit,
 }
@@ -217,6 +249,20 @@ pub struct TokenUsage {
     pub output_tokens: u64,
     pub cached_input_tokens: u64,
     pub cache_creation_input_tokens: u64,
+}
+
+/// Status of one configured MCP server, sent in [`CoreEvent::McpStatus`].
+#[derive(Debug, Clone)]
+pub struct McpServerStatus {
+    pub name: CompactString,
+    /// Whether a live connection exists (connected / not connected).
+    pub connected: bool,
+    /// Number of tools the server exposes, when the connection is healthy.
+    /// `None` when not connected or the listing failed.
+    pub tool_count: Option<usize>,
+    /// Whether the server needs interactive OAuth login before it can
+    /// connect (URL servers with OAuth enabled that aren't authenticated).
+    pub needs_oauth: bool,
 }
 
 /// Initial state sent to the frontend on startup.

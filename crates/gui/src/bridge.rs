@@ -238,6 +238,32 @@ fn run_event_loop(
                             if matches!(event, CoreEvent::MessageComplete { .. }) {
                                 engine.save_current_session();
                             }
+                            // A completed MCP OAuth login: reconnect the server
+                            // (persists the new token, re-offers its tools via
+                            // an agent rebuild) before forwarding the event so
+                            // the GUI's status refresh reflects it.
+                            if let CoreEvent::McpLoginDone {
+                                server,
+                                error: None,
+                            } = &event
+                            {
+                                match engine.reconnect_mcp(server.as_str()).await {
+                                    Ok(()) => {
+                                        let _ = event_tx.send(CoreEvent::CommandOutput {
+                                            text: CompactString::new(format!(
+                                                "authorized and connected '{server}'"
+                                            )),
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let _ = event_tx.send(CoreEvent::CommandOutput {
+                                            text: CompactString::new(format!(
+                                                "login succeeded but reconnect failed for '{server}': {e}"
+                                            )),
+                                        });
+                                    }
+                                }
+                            }
                             let _ = event_tx.send(event);
                             // TUI parity: once the main run stops, replay any
                             // queued inputs as new runs so the user doesn't have

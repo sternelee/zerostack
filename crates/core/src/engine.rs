@@ -37,6 +37,11 @@ pub struct CoreEngine {
     /// Abort handle for the currently running agent forwarding task,
     /// so a new message or CancelStream can interrupt it.
     current_task: Option<tokio::task::JoinHandle<()>>,
+    /// Live MCP connections, created once at startup and reused across agent
+    /// rebuilds. Held so the engine can answer [`UserAction::QueryMcp`] and
+    /// re-offer tools after a reconnect.
+    #[cfg(feature = "mcp")]
+    mcp_manager: Option<crate::extras::mcp::McpClientManager>,
     /// Token usage accumulated across all messages in this engine run.
     tokens_used: u64,
     /// Receiver for permission ask requests from the agent's tools.
@@ -136,6 +141,11 @@ impl CoreEngine {
             }
         });
 
+        // Connect MCP servers once and persist the manager so QueryMcp and
+        // agent rebuilds reuse the same live connections.
+        #[cfg(feature = "mcp")]
+        let mcp_manager = connect_mcp(&cfg).await;
+
         let mut engine = Self {
             config: cfg,
             sessions: vec![session],
@@ -162,6 +172,8 @@ impl CoreEngine {
             btw_inflight: 0,
             btw_event_tx,
             btw_abort: Vec::new(),
+            #[cfg(feature = "mcp")]
+            mcp_manager,
         };
 
         // Build the initial agent
@@ -178,8 +190,10 @@ impl CoreEngine {
         let temperature = crate::config::resolve_temperature(&self.cli, &self.config, &self.model);
         let extra_body = crate::config::resolve_extra_body(&self.config, &self.model);
 
+        // Reuse the persisted connections rather than reconnecting every
+        // rebuild; QueryMcp keeps the panel in sync with these handles.
         #[cfg(feature = "mcp")]
-        let mcp_manager = connect_mcp(&self.config).await;
+        let mcp_manager = self.mcp_manager.as_ref();
 
         let completion_model = self.client.completion_model(self.model.to_string());
         let agent = provider::build_agent(
@@ -194,7 +208,7 @@ impl CoreEngine {
             temperature,
             extra_body,
             #[cfg(feature = "mcp")]
-            mcp_manager.as_ref(),
+            mcp_manager,
         )
         .await;
 
@@ -331,9 +345,10 @@ impl CoreEngine {
                             Some(idx)
                         };
                     } else if let Some(ref mut cur) = self.current_session_index
-                        && *cur > idx {
-                            *cur -= 1;
-                        }
+                        && *cur > idx
+                    {
+                        *cur -= 1;
+                    }
                 }
                 let mut events = self.emit_session_list_updated();
                 events.extend(self.emit_session_history());
@@ -489,11 +504,12 @@ impl CoreEngine {
                 let count = self.context.extra_files.len();
                 self.context.extra_files.clear();
                 if count > 0
-                    && let Err(e) = self.rebuild_agent().await {
-                        return vec![CoreEvent::Error {
-                            message: CompactString::new(format!("rebuild failed: {e}")),
-                        }];
-                    }
+                    && let Err(e) = self.rebuild_agent().await
+                {
+                    return vec![CoreEvent::Error {
+                        message: CompactString::new(format!("rebuild failed: {e}")),
+                    }];
+                }
                 vec![
                     CoreEvent::CommandOutput {
                         text: CompactString::from(format!("dropped {} file(s)", count)),
@@ -501,6 +517,10 @@ impl CoreEngine {
                     self.emit_context_files_updated(),
                 ]
             }
+
+            // === MCP ===
+            UserAction::QueryMcp => self.query_mcp().await,
+            UserAction::LoginMcp { server } => self.login_mcp(server).await,
             UserAction::RunSlashCommand { command } => {
                 let t = command.trim_start();
                 if t == "/queue" || t.starts_with("/queue ") {
@@ -1269,6 +1289,190 @@ async fn connect_mcp(cfg: &Config) -> Option<crate::extras::mcp::McpClientManage
     Some(manager)
 }
 
+impl CoreEngine {
+    /// Build a `McpStatus` event describing every configured server. Runs
+    /// inside the engine because the GUI bridge can't reach the live
+    /// `McpClientManager` (it lives in the engine thread).
+    #[cfg(feature = "mcp")]
+    async fn query_mcp(&mut self) -> Vec<CoreEvent> {
+        use crate::events::McpServerStatus;
+
+        let servers = self
+            .config
+            .mcp_servers
+            .as_ref()
+            .map(|m| m.keys().cloned().collect::<Vec<String>>())
+            .unwrap_or_default();
+        let mut names: Vec<String> = servers;
+        names.sort();
+
+        let mut statuses = Vec::with_capacity(names.len());
+        for name in names {
+            let needs_oauth = matches!(
+                self.config
+                    .mcp_servers
+                    .as_ref()
+                    .and_then(|m| m.get(&name)),
+                Some(crate::extras::mcp::config::McpServerConfig::Url { oauth: Some(o), .. })
+                    if o.settings().is_some()
+            );
+            let name = CompactString::from(name.as_str());
+
+            let Some(manager) = self.mcp_manager.as_mut() else {
+                statuses.push(McpServerStatus {
+                    name,
+                    connected: false,
+                    tool_count: None,
+                    needs_oauth,
+                });
+                continue;
+            };
+            // The core crate's manager holds `McpClientHandle`s directly (no
+            // SharedHandle wrapper — that's the TUI's variant).
+            let Some(handle) = manager.handles.iter().find(|h| h.server_name == name) else {
+                statuses.push(McpServerStatus {
+                    name,
+                    connected: false,
+                    tool_count: None,
+                    needs_oauth,
+                });
+                continue;
+            };
+            match handle.list_tools().await {
+                Ok(tools) => statuses.push(McpServerStatus {
+                    name,
+                    connected: true,
+                    tool_count: Some(tools.len()),
+                    needs_oauth: false,
+                }),
+                Err(_) => statuses.push(McpServerStatus {
+                    name,
+                    connected: true,
+                    tool_count: None,
+                    needs_oauth,
+                }),
+            }
+        }
+        vec![CoreEvent::McpStatus { servers: statuses }]
+    }
+
+    #[cfg(not(feature = "mcp"))]
+    async fn query_mcp(&self) -> Vec<CoreEvent> {
+        vec![CoreEvent::McpStatus {
+            servers: Vec::new(),
+        }]
+    }
+
+    /// Start an interactive OAuth login for one MCP server. Mirrors the TUI's
+    /// `/mcp login`: resolve the server config, call `begin_login`, emit
+    /// [`CoreEvent::McpLoginStarted`] with the URL, then wait for the browser
+    /// callback in a background task; on success reconnect the server and emit
+    /// [`CoreEvent::McpLoginDone`]. The GUI opens `auth_url` and refreshes its
+    /// status on `McpLoginDone`.
+    #[cfg(feature = "mcp")]
+    async fn login_mcp(&mut self, server: CompactString) -> Vec<CoreEvent> {
+        use crate::extras::mcp::{config::McpServerConfig, oauth};
+
+        // Resolve the server's URL + OAuth settings from config.
+        let resolved = self
+            .config
+            .mcp_servers
+            .as_ref()
+            .and_then(|m| m.get(server.as_str()))
+            .and_then(|s| match s {
+                McpServerConfig::Url { url, oauth, .. } => oauth
+                    .as_ref()
+                    .and_then(|o| o.settings())
+                    .map(|set| (url.clone(), set)),
+                _ => None,
+            });
+        let Some((url, settings)) = resolved else {
+            return vec![CoreEvent::CommandOutput {
+                text: CompactString::from(format!(
+                    "cannot start login for '{}' (not an OAuth URL server)",
+                    server.as_str()
+                )),
+            }];
+        };
+
+        // Begin the login; surface the URL immediately so the GUI can open it.
+        match oauth::begin_login(server.as_str(), &url, &settings).await {
+            Ok(login) => {
+                let started = CoreEvent::McpLoginStarted {
+                    server: server.clone(),
+                    auth_url: CompactString::new(login.auth_url.clone()),
+                };
+                // Background wait: exchange the code, then reconnect the server
+                // and rebuild the agent so its tools become available.
+                let event_tx = self.event_tx.clone();
+                let server_for_task = server.clone();
+                tokio::spawn(async move {
+                    let result = login
+                        .wait_for_callback(std::time::Duration::from_secs(180))
+                        .await
+                        .map_err(|e| anyhow::anyhow!("OAuth callback failed: {e}"));
+                    // Reconnect is best-effort from inside the task; the engine
+                    // keeps its own handle list, so mutate via a scoped reconnect.
+                    let error = match result {
+                        Ok(()) => None,
+                        Err(e) => Some(CompactString::new(e.to_string())),
+                    };
+                    let _ = event_tx.send(CoreEvent::McpLoginDone {
+                        server: server_for_task,
+                        error,
+                    });
+                });
+                vec![started]
+            }
+            Err(e) => vec![CoreEvent::CommandOutput {
+                text: CompactString::from(format!(
+                    "login setup failed for '{}': {e}",
+                    server.as_str()
+                )),
+            }],
+        }
+    }
+
+    #[cfg(not(feature = "mcp"))]
+    async fn login_mcp(&mut self, server: CompactString) -> Vec<CoreEvent> {
+        vec![CoreEvent::CommandOutput {
+            text: CompactString::from(format!(
+                "MCP support not enabled (build with --features mcp); cannot log in to '{}'",
+                server.as_str()
+            )),
+        }]
+    }
+
+    /// Reconnect one MCP server after a successful OAuth login, then rebuild
+    /// the agent so the server's tools become available. Called by the GUI
+    /// bridge when it receives [`CoreEvent::McpLoginDone`] with no error.
+    #[cfg(feature = "mcp")]
+    pub async fn reconnect_mcp(&mut self, server: &str) -> anyhow::Result<()> {
+        use crate::extras::mcp::config::McpServerConfig;
+
+        let cfg = self
+            .config
+            .mcp_servers
+            .as_ref()
+            .and_then(|m| m.get(server))
+            .cloned();
+        let Some(cfg) = cfg else {
+            anyhow::bail!("unknown MCP server: '{server}'");
+        };
+        // Reconnect is only meaningful for URL servers (command servers
+        // connect at startup and never need interactive auth).
+        if !matches!(cfg, McpServerConfig::Url { .. }) {
+            return Ok(());
+        }
+        let Some(manager) = self.mcp_manager.as_mut() else {
+            anyhow::bail!("MCP manager not initialized");
+        };
+        manager.reconnect(server, &cfg).await?;
+        self.rebuild_agent().await?;
+        Ok(())
+    }
+}
+
 /// Resolve a relative path against the current working directory.
 fn resolve_path(s: &str) -> std::path::PathBuf {
     let p = std::path::PathBuf::from(s);
@@ -1295,10 +1499,11 @@ fn undo_last_exchange(session: &mut Session) -> usize {
     }
     // Remove the trailing user message
     if let Some(last) = session.messages.last()
-        && last.role == MessageRole::User {
-            session.messages.pop();
-            removed += 1;
-        }
+        && last.role == MessageRole::User
+    {
+        session.messages.pop();
+        removed += 1;
+    }
     removed
 }
 

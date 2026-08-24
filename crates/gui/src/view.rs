@@ -10,15 +10,17 @@
 //!
 //! [`GuiBridge`]: crate::GuiBridge
 use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use crate::highlight::{self, TokenClass};
 use compact_str::CompactString;
 use gpui::{
-    App, Bounds, Context, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    GlobalElementId, KeyDownEvent, LayoutId, Pixels, Point, Render, ScrollDelta, ScrollHandle,
-    ScrollStrategy, SharedString, Style, TitlebarOptions, UTF16Selection, UniformListScrollHandle,
-    Window, WindowBounds, WindowOptions, div, prelude::*, px, relative, rgb, rgba, size,
-    uniform_list,
+    AnimationExt, App, Bounds, Context, ElementId, ElementInputHandler, Entity, EntityInputHandler,
+    FocusHandle, FollowMode, GlobalElementId, KeyDownEvent, LayoutId, ListAlignment, ListOffset,
+    ListState, Pixels, Render, ScrollHandle, ScrollStrategy, SharedString, Style, StyledText,
+    TextRun, TitlebarOptions, UTF16Selection, UniformListScrollHandle, Window, WindowBounds,
+    WindowOptions, div, font, list, prelude::*, px, relative, rgb, rgba, size, uniform_list,
 };
 use gpui_platform::application;
 use zerostack_core::events::CoreEvent;
@@ -74,6 +76,9 @@ pub struct ChatMessage {
     /// tool cards with name / args / status / result. When `None` the renderer
     /// falls back to a plain text bubble (legacy / pre-structured events).
     tool_meta: Option<ToolMeta>,
+    /// When the message was created in this process, for hover footers.
+    /// `None` for history replayed from disk.
+    sent_at: Option<std::time::Instant>,
 }
 
 /// Lifecycle state of a tool invocation surfaced by the engine. Driven by
@@ -98,7 +103,7 @@ pub struct ToolMeta {
     /// running or if the result was elided due to its size.
     pub result: SharedString,
     /// Whether the user has clicked the card to reveal the result body.
-    /// Defaults to `false`; toggled on click in `render_tool_card`.
+    /// Defaults to `false`; toggled on click in `render_tool_item`.
     pub expanded: bool,
     /// Instant at which the tool was dispatched (for elapsed-time display).
     /// `None` for tool cards loaded from session history (pre-existing).
@@ -112,6 +117,7 @@ impl ChatMessage {
             content: text.into(),
             permission_id: None,
             tool_meta: None,
+            sent_at: Some(std::time::Instant::now()),
         }
     }
 
@@ -121,6 +127,7 @@ impl ChatMessage {
             content: text.into(),
             permission_id: None,
             tool_meta: None,
+            sent_at: Some(std::time::Instant::now()),
         }
     }
 
@@ -130,6 +137,7 @@ impl ChatMessage {
             content: text.into(),
             permission_id: None,
             tool_meta: None,
+            sent_at: Some(std::time::Instant::now()),
         }
     }
 
@@ -139,6 +147,19 @@ impl ChatMessage {
             content: text.into(),
             permission_id: None,
             tool_meta: None,
+            sent_at: Some(std::time::Instant::now()),
+        }
+    }
+
+    /// Build a reasoning row that accumulates chain-of-thought deltas. The
+    /// renderer folds it behind a "thinking…" header; users can expand it.
+    pub fn reasoning(text: impl Into<SharedString>) -> Self {
+        Self {
+            role: Role::Reasoning,
+            content: text.into(),
+            permission_id: None,
+            tool_meta: None,
+            sent_at: Some(std::time::Instant::now()),
         }
     }
 
@@ -148,6 +169,7 @@ impl ChatMessage {
             content: text.into(),
             permission_id: Some(id),
             tool_meta: None,
+            sent_at: Some(std::time::Instant::now()),
         }
     }
 
@@ -165,6 +187,7 @@ impl ChatMessage {
                 expanded: false,
                 pending_since: Some(std::time::Instant::now()),
             }),
+            sent_at: Some(std::time::Instant::now()),
         }
     }
 
@@ -464,6 +487,19 @@ pub struct ShellState {
     /// chat input focus handle so toggling into the search box doesn't move
     /// selection into the message draft.
     sidebar_search_focus: FocusHandle,
+    /// Focus handle for the model picker's search field. The field grabs
+    /// focus when the panel opens so typing filters immediately; Up/Down/
+    /// Enter/Esc are claimed by the input-box listener (higher priority).
+    model_picker_search_focus: FocusHandle,
+    /// Scroll handle for the model picker's list; keyboard navigation scrolls
+    /// the highlighted row into view.
+    model_picker_scroll: ScrollHandle,
+    /// Overlay-scrollbar state for the model picker's list.
+    model_picker_scrollbar: std::rc::Rc<crate::scrollbar::ScrollbarState>,
+    /// Scroll handle for the file picker's list (same purpose).
+    file_picker_scroll: ScrollHandle,
+    /// Overlay-scrollbar state for the file picker's list.
+    file_picker_scrollbar: std::rc::Rc<crate::scrollbar::ScrollbarState>,
     /// Set whenever the user clicks the "Refresh" button so we can flash a
     /// tiny "syncing…" indicator; the actual fetch happens in the bridge.
     sidebar_refreshing: bool,
@@ -498,9 +534,19 @@ pub struct ShellState {
     /// Scroll handle for the slash-command popup. Bumped whenever the user navigates
     /// the highlight up/down so the selected row stays visible.
     slash_popup_scroll: UniformListScrollHandle,
-    /// Scroll handle for the chat message list. Long chats stay inside the column
-    /// instead of pushing the input box off-screen.
-    chat_scroll: ScrollHandle,
+    /// Virtualized list state for the chat transcript. Bottom-aligned so the
+    /// tail stays in view; rows are measured lazily and only the visible
+    /// window is laid out each frame (long sessions stay cheap).
+    chat_list: ListState,
+    /// Number of rows the virtualized list was last synced to; used to detect
+    /// append-only growth (streaming) vs a full reset (session switch).
+    chat_list_rows: usize,
+    /// Cached flattened rows for the current chat, rebuilt in `render_chat`.
+    /// The `list` render closure is `'static`, so it reads rows through the
+    /// entity rather than borrowing the view.
+    chat_rows: Vec<ChatRow>,
+    /// Overlay-scrollbar state for the chat list (AppKit-style reveal/fade).
+    chat_scrollbar: std::rc::Rc<crate::scrollbar::ScrollbarState>,
     /// Whether new content should auto-scroll the chat to the bottom. Defaults
     /// `true` (follow-tail on first session), flips to `false` whenever the user
     /// actively scrolls away — either via the mouse wheel, PageUp/Shift+Up, or
@@ -553,6 +599,44 @@ pub struct ShellState {
     /// can mutate the same bubble in place as more deltas arrive.
     reasoning_buffer: SharedString,
     reasoning_idx: Option<usize>,
+    /// Whether each reasoning card is expanded (keyed by chat index). While a
+    /// turn is live the card defaults to expanded; once settled it folds to a
+    /// one-line "Thought for Ns" header.
+    reasoning_expanded: std::collections::HashMap<usize, bool>,
+    /// Whether each tool-activity run is expanded (keyed by the first chat
+    /// index of the run). Defaults to expanded while the turn is live.
+    activity_expanded: std::collections::HashMap<usize, bool>,
+    /// Turn fold: when a turn finishes with tool activity, everything before
+    /// the final text answer folds into one "Worked for Ns" divider.
+    /// `turn_fold_after` is the chat index just before the final answer;
+    /// `turn_fold_expanded` maps that index to whether the work is shown.
+    turn_fold_after: Option<usize>,
+    turn_fold_expanded: std::collections::HashMap<usize, bool>,
+    /// Elapsed seconds of the turn that produced `turn_fold_after`, for the
+    /// "Worked for Ns" label.
+    turn_fold_elapsed: f32,
+    /// When the current turn started (for "Working for 9s" elapsed display).
+    turn_started_at: Option<std::time::Instant>,
+    /// Whether the current turn has produced any tool / reasoning activity
+    /// (so a quick answer doesn't get a pointless fold divider).
+    turn_had_activity: bool,
+    /// Cache of parsed markdown blocks per chat index, invalidated when the
+    /// source text changes. `(content_len_at_parse, blocks)`.
+    md_cache: std::collections::HashMap<usize, (usize, std::sync::Arc<Vec<MarkdownBlock>>)>,
+    /// Message whose footer copy button is currently showing the "copied ✓"
+    /// state (message index, when it was pressed).
+    copied_message: Option<(usize, std::time::Instant)>,
+    /// Code block currently showing a "copied ✓" state on its copy button.
+    /// Keyed by the code block's (`message index`, `block index`) so multiple
+    /// blocks in one message can each have their own feedback.
+    copied_code: Option<((usize, usize), std::time::Instant)>,
+    /// Open message context menu (right-click on a message row): the message
+    /// index plus the window position where it should appear.
+    msg_menu: Option<MsgMenuState>,
+    /// Esc two-step stop: first Esc while streaming arms this for 3s (the
+    /// send button shows "Esc"), second Esc cancels. Mirrors Waku's
+    /// `escape_stop_armed` confirmation.
+    escape_stop_armed: bool,
 
     /// Stack of pending permission asks that the engine has handed us. The
     /// keys are the platform-issued IDs the engine gave us via
@@ -605,10 +689,45 @@ pub struct ShellState {
     context_files: Vec<String>,
     model_picker_visible: bool,
     model_picker_selected: usize,
-    model_picker_scroll: UniformListScrollHandle,
+    /// Free-text filter for the model picker. Empty shows every cached
+    /// quick model; otherwise rows are matched case-insensitively against
+    /// name / provider / `provider/model`.
+    model_picker_query: SharedString,
     file_picker_visible: bool,
     file_picker_selected: usize,
-    file_picker_scroll: UniformListScrollHandle,
+    /// Free-text filter for the file picker. Empty shows the full cwd list;
+    /// otherwise rows are matched case-insensitively against the path.
+    file_picker_query: SharedString,
+    /// Focus handle for the file picker's search field (mirrors the model
+    /// picker's search box).
+    file_picker_search_focus: FocusHandle,
+    /// Whether the permission-mode menu (from the composer's mode chip) is
+    /// open. Selecting a row sends `/mode <name>` through the engine.
+    mode_picker_visible: bool,
+    /// Whether the MCP management panel (from the `+ MCP` chip) is open.
+    mcp_picker_visible: bool,
+    /// Whether the settings panel is open (quick-model management).
+    settings_visible: bool,
+    /// Snapshot of configured quick models, reloaded when the panel opens.
+    settings_models: Vec<(String, zerostack_core::config::types::QuickModelConfig)>,
+    /// Add-model form fields.
+    settings_new_name: SharedString,
+    settings_new_provider: SharedString,
+    settings_new_model: SharedString,
+    /// Last settings action feedback line ("saved"/"removed"/error).
+    settings_feedback: SharedString,
+    /// Working copy of the config for the settings panel. Loaded on open,
+    /// mutated by the toggles/inputs, written back with `save_config` +
+    /// `ReloadConfig` on Save.
+    settings_cfg: Option<zerostack_core::config::Config>,
+    /// Which settings panel section is scrolled into view context (0=general,
+    /// 1=limits, 2=permissions) — used to keep the list stable.
+    settings_section: usize,
+    /// Last reported MCP server statuses, from `CoreEvent::McpStatus`. Empty
+    /// until the first `QueryMcp` round-trips.
+    mcp_servers: Vec<zerostack_core::events::McpServerStatus>,
+    /// True while an MCP status refresh is in flight (spinner on the chip).
+    mcp_refreshing: bool,
 }
 
 /// One row in the model picker popup. Each entry corresponds to a single
@@ -630,13 +749,10 @@ struct QuickModelEntry {
 }
 
 /// One permission prompt the engine has handed us but not yet resolved. We
-/// keep the raw inputs in addition to a formatted display string so the user
-/// can see exactly what would be executed.
+/// keep the id → state mapping so repeated asks for the same id are resolved
+/// against the same entry.
 #[derive(Clone, Debug)]
-struct PendingPermission {
-    tool: SharedString,
-    args: SharedString,
-}
+struct PendingPermission {}
 
 impl ShellState {
     fn new(bridge: GuiBridge, cx: &mut Context<Self>) -> Self {
@@ -661,9 +777,17 @@ impl ShellState {
             input_cursor: 0,
             input_focus: cx.focus_handle(),
             sidebar_search_focus: cx.focus_handle(),
+            model_picker_search_focus: cx.focus_handle(),
+            model_picker_scroll: ScrollHandle::new(),
+            model_picker_scrollbar: crate::scrollbar::ScrollbarState::new(),
+            file_picker_scroll: ScrollHandle::new(),
+            file_picker_scrollbar: crate::scrollbar::ScrollbarState::new(),
             sidebar_scroll: UniformListScrollHandle::new(),
             slash_popup_scroll: UniformListScrollHandle::new(),
-            chat_scroll: ScrollHandle::new(),
+            chat_list: ListState::new(0, ListAlignment::Bottom, px(2048.0)),
+            chat_list_rows: 0,
+            chat_rows: Vec::new(),
+            chat_scrollbar: crate::scrollbar::ScrollbarState::new(),
             chat_follow_tail: true,
             last_scrolled_session_id: SharedString::new(""),
             cursor_visible: true,
@@ -674,6 +798,18 @@ impl ShellState {
             ime_mark_utf16: None,
             reasoning_buffer: SharedString::new(""),
             reasoning_idx: None,
+            reasoning_expanded: std::collections::HashMap::new(),
+            activity_expanded: std::collections::HashMap::new(),
+            turn_fold_after: None,
+            turn_fold_expanded: std::collections::HashMap::new(),
+            turn_fold_elapsed: 0.0,
+            turn_started_at: None,
+            turn_had_activity: false,
+            md_cache: std::collections::HashMap::new(),
+            copied_message: None,
+            copied_code: None,
+            msg_menu: None,
+            escape_stop_armed: false,
             pending_permissions: std::collections::HashMap::new(),
             prompt_history: Vec::new(),
             prompt_history_cursor: None,
@@ -685,10 +821,23 @@ impl ShellState {
             context_files: Vec::new(),
             model_picker_visible: false,
             model_picker_selected: 0,
-            model_picker_scroll: UniformListScrollHandle::new(),
+            model_picker_query: SharedString::new(""),
             file_picker_visible: false,
             file_picker_selected: 0,
-            file_picker_scroll: UniformListScrollHandle::new(),
+            file_picker_query: SharedString::new(""),
+            file_picker_search_focus: cx.focus_handle(),
+            mode_picker_visible: false,
+            mcp_picker_visible: false,
+            mcp_servers: Vec::new(),
+            mcp_refreshing: false,
+            settings_visible: false,
+            settings_models: Vec::new(),
+            settings_new_name: SharedString::new(""),
+            settings_new_provider: SharedString::new(""),
+            settings_new_model: SharedString::new(""),
+            settings_feedback: SharedString::new(""),
+            settings_cfg: None,
+            settings_section: 0,
         }
     }
 
@@ -744,10 +893,10 @@ impl ShellState {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .bg(rgb(dark::SIDEBAR_BG))
+                    .bg(rgb(dark::RAISED))
                     .border_1()
-                    .border_color(rgb(dark::BORDER))
-                    .rounded(px(8.))
+                    .border_color(rgba(dark::BORDER_STRONG))
+                    .rounded(px(13.0))
                     .shadow_lg()
                     .p_6()
                     .w(px(440.))
@@ -792,13 +941,14 @@ impl ShellState {
                                     .id("close-confirm-cancel")
                                     .px_4()
                                     .py_2()
-                                    .rounded(px(4.))
+                                    .rounded(px(7.))
                                     .border_1()
-                                    .border_color(rgb(dark::BORDER))
-                                    .bg(rgb(dark::CHAT_BG))
+                                    .border_color(rgba(dark::BORDER))
+                                    .bg(rgba(0x00000000))
                                     .text_color(rgb(dark::TEXT))
                                     .text_sm()
                                     .cursor_pointer()
+                                    .hover(|element| element.bg(rgba(dark::OVERLAY)))
                                     .on_click(cx.listener(|this, _, _w, cx| {
                                         this.cancel_close_confirm(_w, cx);
                                     }))
@@ -816,13 +966,14 @@ impl ShellState {
                                     .id("close-confirm-quit")
                                     .px_4()
                                     .py_2()
-                                    .rounded(px(4.))
+                                    .rounded(px(7.))
                                     .border_1()
-                                    .border_color(rgb(dark::BORDER))
-                                    .bg(rgb(dark::ACCENT))
-                                    .text_color(rgb(0xFFFFFF))
+                                    .border_color(rgba(0x00000000))
+                                    .bg(rgb(dark::INVERSE))
+                                    .text_color(rgb(dark::ON_INVERSE))
                                     .text_sm()
                                     .cursor_pointer()
+                                    .hover(|element| element.opacity(0.9))
                                     .on_click(cx.listener(|this, _, _w, cx| {
                                         this.confirm_close_quit(cx);
                                     }))
@@ -974,6 +1125,7 @@ impl ShellState {
     /// Drain any pending events from the bridge and update our local state. Called
     /// from a recurring `cx.spawn`-based timer in [`ShellState::render`].
     fn poll_bridge(&mut self, cx: &mut Context<Self>) {
+        self.sweep_copied_marker();
         let events = self.bridge.poll();
         for ev in events {
             self.apply_event(ev, cx);
@@ -992,6 +1144,7 @@ impl ShellState {
                 // as a foldable "thinking" card so the user can read what the
                 // model actually wrestled with. No-op on empty deltas — those
                 // are common during streaming toe-holds.
+                self.turn_had_activity = true;
                 if text.is_empty() {
                     self.is_thinking = true;
                 } else {
@@ -999,12 +1152,8 @@ impl ShellState {
                     self.reasoning_buffer = SharedString::new(combined);
                     match self.reasoning_idx {
                         None => {
-                            self.chat.push(ChatMessage {
-                                role: Role::Reasoning,
-                                content: self.reasoning_buffer.clone(),
-                                permission_id: None,
-                                tool_meta: None,
-                            });
+                            self.chat
+                                .push(ChatMessage::reasoning(self.reasoning_buffer.clone()));
                             self.reasoning_idx = Some(self.chat.len() - 1);
                         }
                         Some(idx) => {
@@ -1019,6 +1168,7 @@ impl ShellState {
                 // Push a structured tool card so the renderer can show name +
                 // args summary + status pill; we update it in place when the
                 // matching ToolResult shows up.
+                self.turn_had_activity = true;
                 let summary = tool_utils::format_tool_call_summary(&name, &args);
                 self.chat
                     .push(ChatMessage::tool_card(name.to_string(), summary));
@@ -1049,6 +1199,7 @@ impl ShellState {
                 }
             }
             CoreEvent::SubagentToolCall { name, args } => {
+                self.turn_had_activity = true;
                 let summary = tool_utils::format_tool_call_summary(&name, &args);
                 self.chat
                     .push(ChatMessage::tool_card(name.to_string(), summary));
@@ -1066,13 +1217,7 @@ impl ShellState {
                 // the GUI explicitly *waits* for a human decision.
                 let tool = tool_name.to_string();
                 let display = format!("{tool} wants to run: {args}");
-                self.pending_permissions.insert(
-                    id,
-                    PendingPermission {
-                        tool: SharedString::new(tool),
-                        args: SharedString::new(args.to_string()),
-                    },
-                );
+                self.pending_permissions.insert(id, PendingPermission {});
                 self.chat.push(ChatMessage::permission(id, display));
             }
             CoreEvent::MessageComplete { response, .. } => {
@@ -1086,10 +1231,28 @@ impl ShellState {
                         self.chat.push(ChatMessage::assistant(text));
                     }
                 }
+                // Turn fold: if this turn did real work (tools / reasoning)
+                // and took >= 2s, remember where the work ended so the
+                // renderer can fold it behind a "Worked for Ns" divider.
+                // The fold index must be the *answer's* index: the placeholder
+                // index if we streamed into it, else the freshly-pushed row.
+                if self.turn_had_activity
+                    && let Some(started) = self.turn_started_at
+                    && started.elapsed() >= Duration::from_secs(2)
+                {
+                    self.turn_fold_after = self
+                        .streaming_assistant_idx
+                        .or_else(|| self.chat.len().checked_sub(1));
+                    self.turn_fold_elapsed = started.elapsed().as_secs_f32();
+                }
                 self.streaming_assistant_idx = None;
                 self.reasoning_idx = None;
                 self.reasoning_buffer = SharedString::new("");
                 self.is_thinking = false;
+                self.escape_stop_armed = false;
+                self.turn_started_at = None;
+                self.turn_had_activity = false;
+                self.invalidate_md_cache();
             }
             CoreEvent::Retrying { attempt, max } => {
                 self.chat
@@ -1117,9 +1280,19 @@ impl ShellState {
                         content: SharedString::new(m.content.as_str()),
                         permission_id: None,
                         tool_meta: None,
+                        sent_at: None, // replayed from disk; no hover timestamp
                     })
                     .collect();
                 self.streaming_assistant_idx = None;
+                self.reasoning_idx = None;
+                self.reasoning_buffer = SharedString::new("");
+                self.turn_fold_after = None;
+                self.turn_had_activity = false;
+                self.turn_started_at = None;
+                self.md_cache.clear();
+                self.activity_expanded.clear();
+                self.reasoning_expanded.clear();
+                self.turn_fold_expanded.clear();
             }
             CoreEvent::StatusUpdate {
                 model,
@@ -1135,6 +1308,31 @@ impl ShellState {
             CoreEvent::ContextFilesUpdated { files } => {
                 self.context_files = files.into_iter().map(|path| path.to_string()).collect();
             }
+            CoreEvent::McpStatus { servers } => {
+                self.mcp_servers = servers;
+                self.mcp_refreshing = false;
+            }
+            CoreEvent::McpLoginStarted { server, auth_url } => {
+                // Open the authorization URL in the system browser and keep
+                // the panel open so the user sees the in-flight state.
+                _cx.open_url(auth_url.as_str());
+                self.chat.push(ChatMessage::system(format!(
+                    "OAuth login for '{server}' — open the browser to authorize, then return here"
+                )));
+                self.mcp_refreshing = false;
+            }
+            CoreEvent::McpLoginDone { server, error } => {
+                match error {
+                    Some(err) => self.chat.push(ChatMessage::system(format!(
+                        "OAuth login for '{server}' failed: {err}"
+                    ))),
+                    None => self.chat.push(ChatMessage::system(format!(
+                        "OAuth login for '{server}' complete — server reconnected"
+                    ))),
+                }
+                // Refresh the panel so the row flips to connected.
+                self.refresh_mcp(_cx);
+            }
             CoreEvent::AgentStarted => {
                 // New user turn; reset the streaming placeholder and the
                 // reasoning pipeline so any prior reasoning doesn't leak into
@@ -1143,11 +1341,17 @@ impl ShellState {
                 self.reasoning_buffer = SharedString::new("");
                 self.reasoning_idx = None;
                 self.is_thinking = true;
+                self.turn_started_at = Some(Instant::now());
+                self.turn_had_activity = false;
+                self.turn_fold_after = None;
+                self.turn_fold_elapsed = 0.0;
             }
             CoreEvent::AgentStopped => {
                 self.is_thinking = false;
                 self.reasoning_idx = None;
                 self.reasoning_buffer = SharedString::new("");
+                self.turn_started_at = None;
+                self.turn_had_activity = false;
             }
             CoreEvent::ConfigChanged => {}
             CoreEvent::CommandOutput { text } => {
@@ -1201,41 +1405,45 @@ impl ShellState {
     /// card) so a reply in progress keeps the new text in view.
     fn maybe_follow_tail(&mut self) {
         if self.chat_follow_tail {
-            self.chat_scroll.scroll_to_bottom();
+            self.chat_list.scroll_to_end();
             self.chat_follow_tail = true;
         }
     }
 
-    /// True if the chat viewport is currently parked at the bottom (within a
-    /// 1px tolerance so streaming deltas don't yank us off just because of a
-    /// sub-pixel fractional offset).
+    /// True if the chat viewport is currently parked at the bottom. `None`
+    /// means the list hasn't laid out yet or isn't scrollable.
     fn is_chat_at_bottom(&self) -> bool {
-        let offset = self.chat_scroll.offset();
-        let max = self.chat_scroll.max_offset();
-        offset.y + px(1.0) >= max.height
+        self.chat_list.is_scrolled_to_end().unwrap_or(true)
     }
 
     /// Adjust the chat scroll offset by a pixel delta and re-derive follow-tail
     /// from the new position. Positive `dy` scrolls the viewport down (newer
     /// messages come into view); negative goes back up into history.
     fn scroll_chat_by(&mut self, dy: f32) {
-        let offset = self.chat_scroll.offset();
-        let max = self.chat_scroll.max_offset();
-        let viewport_h = self.chat_scroll.bounds().size.height.as_f32().max(1.0);
-        let current_y = offset.y.as_f32();
-        let max_y = max.height.as_f32();
-        let new_y = if max_y <= viewport_h {
-            // The chat content already fits; ignore the delta so an unused
-            // scroll gesture doesn't blank the view.
-            0.0
-        } else {
-            (current_y + dy).clamp(0.0, max_y)
-        };
-        self.chat_scroll.set_offset(Point {
-            x: offset.x,
-            y: px(new_y),
-        });
+        self.chat_list.scroll_by(px(dy));
         self.chat_follow_tail = self.is_chat_at_bottom();
+    }
+
+    /// True while the copy button for message `idx` should show its "copied ✓"
+    /// state (within the 2s feedback window).
+    fn is_copied(&self, idx: usize) -> bool {
+        self.copied_message
+            .map(|(i, at)| i == idx && at.elapsed() < Duration::from_secs(2))
+            .unwrap_or(false)
+    }
+
+    /// Sweep expired "copied ✓" markers during the poll tick.
+    fn sweep_copied_marker(&mut self) {
+        if let Some((_, at)) = self.copied_message
+            && at.elapsed() >= Duration::from_secs(2)
+        {
+            self.copied_message = None;
+        }
+        if let Some((_, at)) = self.copied_code
+            && at.elapsed() >= Duration::from_secs(2)
+        {
+            self.copied_code = None;
+        }
     }
 
     fn append_to_streaming(&mut self, text: CompactString) {
@@ -1253,12 +1461,42 @@ impl ShellState {
                 let current = &mut self.chat[idx].content;
                 let combined = format!("{current}{text}");
                 *current = SharedString::new(combined);
+                // Streaming content changed; drop the cached parse for this
+                // message so the next render reparses (cheap for one message).
+                self.md_cache.remove(&idx);
             }
         }
         // Token-level follow-tail: a reply unfolding in chunks needs to reveal
         // each new token if (and only if) the user was already parked at the
         // bottom. Without this, watch the bottom-edge tick while streaming.
         self.maybe_follow_tail();
+    }
+
+    /// Drop every cached markdown parse. Called whenever the chat array is
+    /// replaced wholesale (session switch) or a turn finalizes.
+    fn invalidate_md_cache(&mut self) {
+        self.md_cache.clear();
+    }
+
+    /// Parse-or-reuse markdown blocks for the message at `idx`. The cache key
+    /// includes the source length so streaming appends (which invalidate the
+    /// entry) don't serve stale parses. Kept bounded to avoid unbounded growth
+    /// on very long sessions.
+    fn blocks_for(&mut self, idx: usize) -> Arc<Vec<MarkdownBlock>> {
+        let msg = &self.chat[idx];
+        let source = msg.content.as_str();
+        let len = source.len();
+        if let Some((cached_len, blocks)) = self.md_cache.get(&idx)
+            && *cached_len == len
+        {
+            return blocks.clone();
+        }
+        let blocks = Arc::new(parse_markdown(source));
+        if self.md_cache.len() >= 200 {
+            self.md_cache.clear();
+        }
+        self.md_cache.insert(idx, (len, blocks.clone()));
+        blocks
     }
 
     fn submit_input(&mut self, cx: &mut Context<Self>) {
@@ -1286,6 +1524,11 @@ impl ShellState {
         // here to keep the transcript readable. Engine-handled commands
         // emit their own echo via `SessionListUpdated` / event re-render
         // and skip the inline path.
+        //
+        // Start the turn timer here (it's also armed on `AgentStarted`) so a
+        // "Working for 9s" row appears even before the first delta lands.
+        self.turn_started_at.get_or_insert_with(Instant::now);
+        self.turn_had_activity = false;
 
         // Wasm extensions register their own slash commands through
         // `extension::registry`. The engine itself doesn't dispatch those —
@@ -1550,7 +1793,8 @@ impl ShellState {
         // Column on the *current* line: chars since the last newline.
         let mut col = caret_chars;
         if let Some(last) = buf[..byte_index_for_char(&buf, caret_chars)]
-            .char_indices().rfind(|(_, c)| *c == '\n')
+            .char_indices()
+            .rfind(|(_, c)| *c == '\n')
         {
             col -= buf[..last.0].chars().count() + 1;
         }
@@ -1930,7 +2174,16 @@ impl ShellState {
                                 .flex_col()
                                 .gap_2()
                                 .items_center()
-                                .child(div().text_xs().text_color(rgb(dark::TEXT_MUTED)).child(
+                                .child(div().text_xs().text_color(rgb(dark::TEXT_GHOST)).child(
+                                    if filter_active {
+                                        "⌕"
+                                    } else if total_sessions_on_disk == 0 {
+                                        "▧"
+                                    } else {
+                                        "…"
+                                    },
+                                ))
+                                .child(div().text_xs().text_color(rgb(dark::TEXT_TERTIARY)).child(
                                     if filter_active {
                                         "no sessions match the filter"
                                     } else if total_sessions_on_disk == 0 {
@@ -1939,11 +2192,11 @@ impl ShellState {
                                         "no rows to show"
                                     },
                                 ))
-                                .child(div().text_xs().text_color(rgb(dark::TEXT_MUTED)).child(
+                                .child(div().text_xs().text_color(rgb(dark::TEXT_GHOST)).child(
                                     if filter_active {
                                         "press Esc in the search box to clear"
                                     } else {
-                                        "click + New or start a session in another shell"
+                                        "start a chat below to create one"
                                     },
                                 )),
                         ),
@@ -2042,7 +2295,7 @@ impl ShellState {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_color(rgb(dark::TEXT_MUTED))
+                            .text_color(rgb(dark::TEXT_TERTIARY))
                             .text_sm()
                             .whitespace_normal()
                             .child(desc.to_string()),
@@ -2066,14 +2319,14 @@ impl ShellState {
                 .gap_0()
                 .p_3()
                 .my_4()
-                .rounded_md()
-                .bg(rgb(dark::INPUT_BG))
+                .rounded(px(13.0))
+                .bg(rgb(dark::RAISED))
                 .border_1()
-                .border_color(rgb(dark::BORDER))
+                .border_color(rgba(dark::BORDER))
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(dark::TEXT_MUTED))
+                        .text_color(rgb(dark::TEXT_TERTIARY))
                         .pb_2()
                         .child("QUICK KEYBOARD SHORTCUTS"),
                 )
@@ -2091,14 +2344,14 @@ impl ShellState {
                 let view_for_click = view_entity.clone();
                 let id = s.id.to_string();
                 let name: SharedString = if s.name.is_empty() {
-                    SharedString::new(s.id.to_string())
+                    SharedString::new(&s.id)
                 } else {
-                    SharedString::new(s.name.to_string())
+                    SharedString::new(&s.name)
                 };
                 let last: SharedString = if s.last_message.is_empty() {
                     SharedString::new("no messages yet")
                 } else {
-                    SharedString::new(s.last_message.to_string())
+                    SharedString::new(&s.last_message)
                 };
                 let model_line = SharedString::new(format!(
                     "{} · {}",
@@ -2118,12 +2371,12 @@ impl ShellState {
                     .flex_col()
                     .gap_1()
                     .p_3()
-                    .rounded_md()
-                    .bg(rgb(dark::BUTTON_BG))
+                    .rounded(px(11.0))
+                    .bg(rgb(dark::RAISED))
                     .border_1()
-                    .border_color(rgb(dark::BORDER))
+                    .border_color(rgba(dark::BORDER))
                     .cursor_pointer()
-                    .hover(|this| this.bg(rgb(dark::BUTTON_HOVER)))
+                    .hover(|this| this.bg(rgba(dark::OVERLAY)))
                     .on_click(move |_ev, _window, cx| {
                         view_for_click.update(cx, |state, cx| {
                             let _ = state.bridge.send(UserAction::SwitchSession {
@@ -2142,7 +2395,7 @@ impl ShellState {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(dark::TEXT_MUTED))
+                            .text_color(rgb(dark::TEXT_TERTIARY))
                             .child(model_line),
                     )
                     .child(
@@ -2165,13 +2418,13 @@ impl ShellState {
                 .gap_2()
                 .p_3()
                 .my_4()
-                .rounded_md()
+                .rounded(px(13.0))
                 .border_1()
-                .border_color(rgb(dark::BORDER))
+                .border_color(rgba(dark::BORDER))
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(dark::TEXT_MUTED))
+                        .text_color(rgb(dark::TEXT_TERTIARY))
                         .child("RECENT SESSIONS"),
                 )
                 .children(recent_rows)
@@ -2196,9 +2449,8 @@ impl ShellState {
     }
 
     fn render_chat(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let chat_scroll = self.chat_scroll.clone();
-        let messages = self.chat.clone();
         let view_entity = cx.entity().clone();
+        let chat_list = self.chat_list.clone();
 
         // Re-derive follow-tail from the current scroll position before painting.
         // This catches both cases without a gesture (e.g. a session switch that
@@ -2212,15 +2464,140 @@ impl ShellState {
 
         let streaming_idx = self.streaming_assistant_idx;
         let is_active_stream = self.is_thinking;
-        let message_children: Vec<gpui::AnyElement> = messages
-            .iter()
-            .enumerate()
-            .map(|(idx, msg)| {
-                let is_streaming =
-                    is_active_stream && Some(idx) == streaming_idx && msg.role == Role::Assistant;
-                render_message(msg, view_entity.clone(), is_streaming)
-            })
-            .collect();
+        let fold_after = self.turn_fold_after;
+        let fold_expanded = fold_after
+            .and_then(|idx| self.turn_fold_expanded.get(&idx).copied())
+            .unwrap_or(false);
+        let fold_elapsed = self.turn_fold_elapsed;
+
+        // Flatten the message list into render rows. Activity (tool runs +
+        // reasoning) between a user message and the final answer is buffered
+        // and either emitted as rows or swallowed behind a "Worked for Ns"
+        // fold divider, mirroring Waku's turn-fold.
+        let mut rows: Vec<ChatRow> = Vec::new();
+        let mut run_start: Option<usize> = None;
+        let flush_run = |rows: &mut Vec<ChatRow>, start: Option<usize>, end: usize| {
+            if let Some(start) = start {
+                rows.push(ChatRow::ToolRun { start, end });
+            }
+        };
+        let mut pending_activity: Vec<ChatRow> = Vec::new();
+        let emit_pending = |rows: &mut Vec<ChatRow>, pending: &mut Vec<ChatRow>| {
+            rows.append(pending);
+        };
+
+        let n = self.chat.len();
+        let mut i = 0usize;
+        while i < n {
+            let msg = &self.chat[i];
+            match msg.role {
+                Role::User => {
+                    flush_run(&mut pending_activity, run_start.take(), i);
+                    emit_pending(&mut rows, &mut pending_activity);
+                    rows.push(ChatRow::User(i));
+                }
+                Role::Assistant => {
+                    flush_run(&mut pending_activity, run_start.take(), i);
+                    let is_streaming = is_active_stream && Some(i) == streaming_idx && i == n - 1;
+                    if Some(i) == fold_after {
+                        if fold_expanded {
+                            // Expanded fold: show the divider, then the work.
+                            rows.push(ChatRow::TurnFold {
+                                answer_idx: i,
+                                elapsed: fold_elapsed,
+                            });
+                            emit_pending(&mut rows, &mut pending_activity);
+                        } else {
+                            // Collapsed fold: drop the buffered activity, show
+                            // only the divider (the toggle affordance).
+                            pending_activity.clear();
+                            rows.push(ChatRow::TurnFold {
+                                answer_idx: i,
+                                elapsed: fold_elapsed,
+                            });
+                        }
+                    } else {
+                        emit_pending(&mut rows, &mut pending_activity);
+                    }
+                    rows.push(ChatRow::Assistant(i, is_streaming));
+                }
+                Role::Tool => {
+                    if msg.tool_meta.is_some() {
+                        if run_start.is_none() {
+                            run_start = Some(i);
+                        }
+                    } else {
+                        flush_run(&mut pending_activity, run_start.take(), i);
+                        pending_activity.push(ChatRow::ToolText(i));
+                    }
+                }
+                Role::Reasoning => {
+                    flush_run(&mut pending_activity, run_start.take(), i);
+                    pending_activity.push(ChatRow::Reasoning(i));
+                }
+                Role::System | Role::Permission => {
+                    flush_run(&mut pending_activity, run_start.take(), i);
+                    emit_pending(&mut rows, &mut pending_activity);
+                    rows.push(if msg.role == Role::System {
+                        ChatRow::System(i)
+                    } else {
+                        ChatRow::Permission(i)
+                    });
+                }
+            }
+            i += 1;
+        }
+        flush_run(&mut pending_activity, run_start.take(), n);
+        emit_pending(&mut rows, &mut pending_activity);
+
+        // Working indicator: while the agent is busy but nothing has been
+        // emitted yet (no streaming text, no activity rows), show a pinned
+        // "Working for Ns" row after the user's message.
+        let has_live_activity = rows.iter().any(|r| {
+            matches!(
+                r,
+                ChatRow::ToolRun { .. } | ChatRow::Reasoning(_) | ChatRow::Assistant(_, true)
+            )
+        });
+        let last_is_user = matches!(rows.last(), Some(ChatRow::User(_)));
+        if is_active_stream && !has_live_activity && last_is_user {
+            let elapsed = self
+                .turn_started_at
+                .map(|t| t.elapsed().as_secs_f32())
+                .unwrap_or(0.0);
+            rows.push(ChatRow::Working(elapsed));
+        }
+
+        // Sync the virtualized list with the row set. Row order is append-only
+        // while streaming, so splice new rows onto the end; on a wholesale
+        // change (session switch, fold toggle) reset everything.
+        let row_count = rows.len();
+        if row_count != self.chat_list_rows {
+            if row_count > self.chat_list_rows {
+                chat_list.splice(
+                    self.chat_list_rows..self.chat_list_rows,
+                    row_count - self.chat_list_rows,
+                );
+            } else {
+                chat_list.reset(row_count);
+            }
+            self.chat_list_rows = row_count;
+        }
+        // Streaming rows change height as text lands; re-measure the last row
+        // so the tail grows instead of clipping.
+        if self.streaming_assistant_idx.is_some() && row_count > 0 {
+            chat_list.remeasure_items(row_count - 1..row_count);
+        }
+        self.chat_rows = rows;
+        chat_list.set_follow_mode(FollowMode::Tail);
+        if self.chat_follow_tail {
+            chat_list.scroll_to_end();
+        }
+
+        let rows_for_entity = view_entity.downgrade();
+        let empty = self.chat.is_empty();
+        let welcome = self.render_welcome(view_entity.clone());
+        let chat_scrollbar = self.chat_scrollbar.clone();
 
         // The outer wrapper here is a flex *column* so the inner
         // `chat-scroll-area` div can use `flex_1()` to claim the wrapper's
@@ -2238,44 +2615,261 @@ impl ShellState {
                 div()
                     .id("chat-scroll-area")
                     .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&chat_scroll)
-                    .on_scroll_wheel(cx.listener(
-                        |this, ev: &gpui::ScrollWheelEvent, _window, cx| {
-                            // Wheel up means the user dragged the viewport upward into
-                            // history. Disable follow-tail so the streaming reply we are
-                            // about to receive does not snap them back down mid-line.
-                            // Wheel-down gestures don't touch the flag — the next
-                            // render of `render_chat` polls `is_chat_at_bottom` and
-                            // re-engages the tail when the user reaches the bottom.
-                            let dy = match ev.delta {
-                                ScrollDelta::Pixels(p) => p.y.as_f32(),
-                                ScrollDelta::Lines(p) => p.y * 24.0,
-                            };
-                            if dy < 0.0 {
-                                this.chat_follow_tail = false;
-                            }
-                            cx.notify();
-                        },
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .w_full()
-                            .min_w_0()
-                            .px_6()
-                            .py_5()
-                            .children(message_children)
-                            .when(messages.is_empty(), |d| {
-                                d.child(self.render_welcome(view_entity.clone()))
-                            }),
-                    ),
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_x_hidden()
+                    .relative()
+                    .when(empty, |d| {
+                        d.child(
+                            div().flex_1().child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_3()
+                                    .w_full()
+                                    .min_w_0()
+                                    .px_6()
+                                    .py_5()
+                                    .child(welcome),
+                            ),
+                        )
+                    })
+                    .when(!empty, |d| {
+                        d.child(
+                            list(chat_list, move |index, _window, cx| {
+                                rows_for_entity
+                                    .upgrade()
+                                    .map(|entity| {
+                                        entity.update(cx, |this, cx| {
+                                            this.render_chat_row_index(index, cx)
+                                        })
+                                    })
+                                    .unwrap_or_else(|| div().into_any_element())
+                            })
+                            .size_full(),
+                        )
+                    })
+                    .child(crate::scrollbar::vertical(&self.chat_list, &chat_scrollbar))
+                    .when(self.msg_menu.is_some(), |d| {
+                        d.child(self.render_msg_menu(cx))
+                    }),
             )
     }
 
-    fn render_input(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Render the row at virtual index `index` (used by the `list` closure,
+    /// which is `'static` and cannot borrow the view).
+    fn render_chat_row_index(&mut self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        // Clone the row out of the cache so we can take `&mut self` for
+        // markdown-block caching below without fighting the borrow.
+        let Some(row) = self.chat_rows.get(index).cloned() else {
+            return div().into_any_element();
+        };
+        let view_entity = cx.entity().clone();
+        self.render_chat_row(&row, view_entity)
+    }
+
+    /// Render the open message context menu (right-click), positioned
+    /// absolutely at the recorded click point. Closes on outside click or Esc.
+    fn render_msg_menu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(menu) = &self.msg_menu else {
+            return div().into_any_element();
+        };
+        let msg = &self.chat[menu.msg_idx];
+        let view_entity = cx.entity().clone();
+        let msg_idx = menu.msg_idx;
+        let content = msg.content.to_string();
+
+        let mut items: Vec<gpui::AnyElement> = Vec::new();
+        // Copy message.
+        items.push(menu_item(
+            "⧉",
+            "Copy message",
+            view_entity.clone(),
+            move |state, cx| {
+                state.copied_message = Some((msg_idx, Instant::now()));
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(content.clone()));
+                state.msg_menu = None;
+                cx.notify();
+            },
+        ));
+        // Copy to composer: pull the message text back into the input box.
+        // Most useful for user messages (reuse a past prompt), so we offer it
+        // for user + system rows.
+        let msg_role = msg.role.clone();
+        if matches!(msg_role, Role::User | Role::System) {
+            let content_for_composer = msg.content.to_string();
+            items.push(menu_item(
+                "✎",
+                "Copy to composer",
+                view_entity.clone(),
+                move |state, cx| {
+                    state.input_text = SharedString::new(content_for_composer.clone());
+                    state.input_cursor = state.input_text.chars().count();
+                    state.msg_menu = None;
+                    cx.notify();
+                },
+            ));
+        }
+        // Revert to here: undo every exchange after this user message (the
+        // engine's `/undo` walks back one user+assistant pair; we replay it
+        // until the transcript ends at this message).
+        if msg.role == Role::User {
+            items.push(menu_item(
+                "↩",
+                "Revert to here",
+                view_entity.clone(),
+                move |state, cx| {
+                    // Count exchanges strictly after this message, then undo
+                    // that many times via the engine.
+                    let target = msg_idx;
+                    let mut count = 0usize;
+                    for (i, m) in state.chat.iter().enumerate() {
+                        if i > target && m.role == Role::User {
+                            count += 1;
+                        }
+                    }
+                    for _ in 0..count {
+                        let _ = state.bridge.send(UserAction::UndoLastExchange);
+                    }
+                    if count == 0 {
+                        let _ = state.bridge.send(UserAction::UndoLastExchange);
+                    }
+                    state.msg_menu = None;
+                    cx.notify();
+                },
+            ));
+        }
+        // Copy code (assistant messages that contain fenced code).
+        let code: String = extract_fenced_code(msg.content.as_str());
+        if !code.is_empty() {
+            items.push(menu_item(
+                "⎙",
+                "Copy code",
+                view_entity.clone(),
+                move |state, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()));
+                    state.msg_menu = None;
+                    cx.notify();
+                },
+            ));
+        }
+
+        div()
+            .absolute()
+            .left(px(menu.x))
+            .top(px(menu.y))
+            .flex()
+            .flex_col()
+            .min_w(px(180.0))
+            .py(px(4.0))
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(rgba(dark::BORDER_STRONG))
+            .bg(rgb(dark::RAISED))
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down_out({
+                let view_entity = view_entity.clone();
+                move |_ev, _window, cx| {
+                    view_entity.update(cx, |state, cx| {
+                        state.msg_menu = None;
+                        cx.notify();
+                    });
+                }
+            })
+            .children(items)
+            .into_any_element()
+    }
+
+    /// Render one flattened chat row. Activity runs / reasoning / turn folds
+    /// carry their expansion state from the corresponding maps; user and
+    /// assistant rows get hover footers with timestamp + copy.
+    fn render_chat_row(
+        &mut self,
+        row: &ChatRow,
+        view_entity: gpui::Entity<ShellState>,
+    ) -> gpui::AnyElement {
+        match row {
+            ChatRow::User(idx) => {
+                let copied = self.is_copied(*idx);
+                wrap_msg_menu(
+                    render_user_msg(&self.chat[*idx], *idx, view_entity.clone(), copied),
+                    *idx,
+                    view_entity,
+                )
+            }
+            ChatRow::Assistant(idx, is_streaming) => {
+                let copied = self.is_copied(*idx);
+                // Parse via the cache (blocks_for) so long sessions don't
+                // reparse every message on every frame; only the streaming
+                // message is invalidated as it grows.
+                let blocks = self.blocks_for(*idx);
+                // Which code block in this message is showing "copied ✓"
+                // right now (if any).
+                let copied_code = self
+                    .copied_code
+                    .and_then(|((msg_idx, block_idx), _)| (msg_idx == *idx).then_some(block_idx))
+                    .map(|block_idx| (*idx, block_idx));
+                wrap_msg_menu(
+                    render_assistant_msg(
+                        &self.chat[*idx],
+                        *idx,
+                        *is_streaming,
+                        view_entity.clone(),
+                        copied,
+                        blocks,
+                        copied_code,
+                    ),
+                    *idx,
+                    view_entity,
+                )
+            }
+            ChatRow::System(idx) => render_system_msg(&self.chat[*idx]),
+            ChatRow::Permission(idx) => render_permission_card(&self.chat[*idx], view_entity),
+            ChatRow::ToolText(idx) => render_tool_text(&self.chat[*idx]),
+            ChatRow::Reasoning(idx) => {
+                let is_live = self.is_thinking && Some(*idx) == self.reasoning_idx;
+                let expanded = self.reasoning_expanded.get(idx).copied().unwrap_or(is_live);
+                render_reasoning_row(&self.chat[*idx], *idx, expanded, is_live, view_entity)
+            }
+            ChatRow::ToolRun { start, end } => {
+                let any_pending = (*start..*end).any(|i| {
+                    matches!(
+                        self.chat[i].tool_meta().map(|m| &m.status),
+                        Some(ToolStatus::Pending)
+                    )
+                });
+                let is_live = self.is_thinking && any_pending;
+                let expanded = self
+                    .activity_expanded
+                    .get(start)
+                    .copied()
+                    .unwrap_or(is_live);
+                render_tool_run(
+                    &self.chat[*start..*end],
+                    *start,
+                    *end,
+                    expanded,
+                    is_live,
+                    view_entity,
+                )
+            }
+            ChatRow::TurnFold {
+                answer_idx,
+                elapsed,
+            } => {
+                let expanded = self
+                    .turn_fold_expanded
+                    .get(answer_idx)
+                    .copied()
+                    .unwrap_or(false);
+                render_turn_fold(*answer_idx, *elapsed, expanded, view_entity)
+            }
+            ChatRow::Working(elapsed) => render_working_row(*elapsed),
+        }
+    }
+
+    fn render_input(&mut self, cx: &mut Context<Self>, window: &mut Window) -> impl IntoElement {
         let view_entity = cx.entity().clone();
         let input_focus_clone = self.input_focus.clone();
         // Wrap the visual input box and an `ImeInputElement` together: the IME
@@ -2287,7 +2881,7 @@ impl ShellState {
             .flex()
             .flex_col()
             .border_t_1()
-            .border_color(rgb(dark::BORDER))
+            .border_color(rgba(dark::BORDER))
             .bg(rgb(dark::APP_BG))
             .when(self.slash_popup_visible, |d| {
                 d.child(self.render_slash_popup(cx))
@@ -2295,460 +2889,449 @@ impl ShellState {
             .when(self.model_picker_visible, |d| {
                 d.child(self.render_model_picker(cx))
             })
+            .when(self.mode_picker_visible, |d| {
+                d.child(self.render_mode_picker(cx))
+            })
+            .when(self.mcp_picker_visible, |d| {
+                d.child(self.render_mcp_picker(cx))
+            })
+            .when(self.settings_visible, |d| d.child(self.render_settings(cx)))
             .when(self.file_picker_visible, |d| {
                 d.child(self.render_file_picker(cx))
             })
             .when(!self.context_files.is_empty(), |d| {
                 d.child(self.render_context_files(cx))
             })
+            // Composer card: rounded surface holding the text input and the
+            // controls row (model chip, status, send). Mirrors Waku's
+            // composer — the card owns the rounded/raised look, the inner
+            // input is chrome-less so focus shows as the caret only.
             .child(
                 div()
-                    .id("input-box")
-                    .track_focus(&self.input_focus)
-                    .focus_visible(|d| d.border_color(rgb(dark::ACCENT)))
-                    .bg(rgb(dark::INPUT_BG))
+                    .flex()
+                    .flex_col()
                     .mx_5()
                     .mb_4()
                     .mt_1()
-                    .px_4()
-                    .py_3()
-                    .rounded_md()
+                    .px_2()
+                    .py_2()
+                    .rounded(px(13.0))
                     .border_1()
-                    .border_color(rgb(dark::BORDER))
-                    .text_color(rgb(dark::TEXT))
-                    .text_sm()
-                    .min_h(px(28.0))
-                    .child({
-                        let (before_cursor, after_cursor) =
-                            split_at_char(&self.input_text, self.input_cursor);
-                        render_input_text(
-                            before_cursor,
-                            after_cursor,
-                            self.input_text.is_empty(),
-                            self.cursor_visible,
-                        )
-                    })
-                    .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                        let key = ev.keystroke.key.as_str();
-                        let mods = &ev.keystroke.modifiers;
+                    .border_color(rgba(dark::BORDER))
+                    .bg(rgb(dark::COMPOSER))
+                    .child(
+                        div()
+                            .id("input-box")
+                            .track_focus(&self.input_focus)
+                            .focus_visible(|d| d.border_color(rgb(dark::ACCENT)))
+                            .px_4()
+                            .pt_2()
+                            .pb_1()
+                            .text_color(rgb(dark::TEXT))
+                            .text_size(px(13.5))
+                            .line_height(px(22.0))
+                            .min_h(px(24.0))
+                            .child({
+                                let (before_cursor, after_cursor) =
+                                    split_at_char(&self.input_text, self.input_cursor);
+                                render_input_text(
+                                    before_cursor,
+                                    after_cursor,
+                                    self.input_text.is_empty(),
+                                    // Caret only while the composer is focused;
+                                    // a blinking block on a defocused window is
+                                    // noise (and users report it as a bug).
+                                    self.cursor_visible && self.input_focus.is_focused(window),
+                                )
+                            })
+                            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                                let key = ev.keystroke.key.as_str();
+                                let mods = &ev.keystroke.modifiers;
 
-                        // Global modifier-combo shortcuts fire regardless of
-                        // what's in the buffer. We only intercept when the
-                        // platform modifier (Cmd on macOS, Ctrl elsewhere) is
-                        // held, so plain text typing still works as before.
-                        if (mods.platform || mods.control) && !mods.alt {
-                            match key.to_ascii_lowercase().as_str() {
-                                "l" => {
-                                    // Ctrl/Cmd+L — start a fresh session
-                                    // (mirrors the TUI's `/clear`). Send
-                                    // through the bridge so the engine owns
-                                    // the lifecycle.
-                                    let _ = this.bridge.send(UserAction::ClearSession);
-                                    this.input_text = SharedString::new("");
-                                    this.input_cursor = 0;
-                                    this.refresh_slash_popup();
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                "r" => {
-                                    // Ctrl/Cmd+R — focus the sidebar search
-                                    // box so the user can immediately start
-                                    // filtering by name or path.
-                                    this.sidebar_search_focus.focus(window, cx);
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                "j" => {
-                                    // Ctrl/Cmd+J — toggle focus between the
-                                    // chat input and the sidebar search so
-                                    // the user can jump between the two
-                                    // without taking their hand off the
-                                    // keyboard.
-                                    if this.sidebar_search_focus.is_focused(window) {
-                                        this.input_focus.focus(window, cx);
-                                    } else {
-                                        this.sidebar_search_focus.focus(window, cx);
-                                    }
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                "k" => {
-                                    // Ctrl/Cmd+K — focus the input and
-                                    // prefill "/" so the slash picker pops
-                                    // up without an extra keystroke. Same
-                                    // idea as the TUI's command palette.
-                                    this.input_text = SharedString::new("/");
-                                    this.input_cursor = 1;
-                                    this.refresh_slash_popup();
-                                    this.input_focus.focus(window, cx);
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        // While the IME is composing preedit text (e.g. mid-pinyin),
-                        // macOS routes printable keystrokes through the IME's
-                        // `NSTextInputClient` rather than `NSResponder::keyDown:`.
-                        // But our muted `marked_text_range` previously told macOS
-                        // we have no composition, so keys also landed here and got
-                        // double-inserted on top of the IME's eventual commit. We
-                        // now flag `ime_composing` from `replace_and_mark_text_in_range`
-                        // and bail out of this listener while it is set, surrendering
-                        // all navigation/print keys to the IME until it commits.
-                        if this.ime_composing {
-                            return;
-                        }
-
-                        // Global shortcuts handled regardless of slash-popup state.
-                        // Ctrl-C cancels the running stream (TUI parity), Ctrl-K
-                        // wipes the input box (matches TUI's `\x15` line-kill),
-                        // and Ctrl-A jumps to the start of the buffer.
-                        if mods.control || mods.platform {
-                            match key {
-                                "c" => {
-                                    if this.is_thinking {
-                                        let _ = this.bridge.send(UserAction::CancelStream);
-                                        cx.notify();
-                                    }
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                "k" => {
-                                    this.input_text = SharedString::new("");
-                                    this.input_cursor = 0;
-                                    this.slash_popup_visible = false;
-                                    this.prompt_history_cursor = None;
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                    return;
-                                }
-                                "a" => {
-                                    this.input_cursor = 0;
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        // Model picker has higher priority than the input box and the slash
-                        // popup: when it's open we want Up/Down/Enter to navigate
-                        // the model list, and Esc to dismiss. We always
-                        // `stop_propagation` so the underlying input text
-                        // doesn't see the keystroke once a selection is made.
-                        if this.model_picker_visible {
-                            match key {
-                                "up" => {
-                                    let len = this.quick_models.len();
-                                    if len > 0 {
-                                        let cur = this.model_picker_selected as isize - 1;
-                                        this.model_picker_selected =
-                                            cur.rem_euclid(len as isize) as usize;
-                                        this.model_picker_scroll.scroll_to_item(
-                                            this.model_picker_selected,
-                                            ScrollStrategy::Nearest,
-                                        );
-                                    }
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                "down" => {
-                                    let len = this.quick_models.len();
-                                    if len > 0 {
-                                        let cur = this.model_picker_selected as isize + 1;
-                                        this.model_picker_selected =
-                                            cur.rem_euclid(len as isize) as usize;
-                                        this.model_picker_scroll.scroll_to_item(
-                                            this.model_picker_selected,
-                                            ScrollStrategy::Nearest,
-                                        );
-                                    }
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                "enter" => {
-                                    if let Some(entry) =
-                                        this.quick_models.get(this.model_picker_selected).cloned()
-                                    {
-                                        let _ = this.bridge.send(UserAction::SetModel {
-                                            model: CompactString::new(entry.model_arg.as_str()),
-                                        });
-                                        this.model_picker_visible = false;
-                                    }
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                "escape" => {
-                                    this.model_picker_visible = false;
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        // File picker mirrors the model picker: same keymap.
-                        if this.file_picker_visible {
-                            match key {
-                                "up" => {
-                                    let len = this.cwd_files.len();
-                                    if len > 0 {
-                                        let cur = this.file_picker_selected as isize - 1;
-                                        this.file_picker_selected =
-                                            cur.rem_euclid(len as isize) as usize;
-                                        this.file_picker_scroll.scroll_to_item(
-                                            this.file_picker_selected,
-                                            ScrollStrategy::Nearest,
-                                        );
-                                    }
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                "down" => {
-                                    let len = this.cwd_files.len();
-                                    if len > 0 {
-                                        let cur = this.file_picker_selected as isize + 1;
-                                        this.file_picker_selected =
-                                            cur.rem_euclid(len as isize) as usize;
-                                        this.file_picker_scroll.scroll_to_item(
-                                            this.file_picker_selected,
-                                            ScrollStrategy::Nearest,
-                                        );
-                                    }
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                "enter" => {
-                                    if let Some(path) =
-                                        this.cwd_files.get(this.file_picker_selected).cloned()
-                                    {
-                                        let _ = this.bridge.send(UserAction::AddFile {
-                                            path: CompactString::new(path.as_str()),
-                                        });
-                                        this.file_picker_visible = false;
-                                    }
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                "escape" => {
-                                    this.file_picker_visible = false;
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        if this.slash_popup_visible {
-                            let matches = slash_matches(this.input_text.as_str());
-                            match key {
-                                "escape" => {
-                                    this.slash_popup_visible = false;
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                "up" => {
-                                    if !matches.is_empty() {
-                                        let cur = this.slash_popup_selected as isize - 1;
-                                        this.slash_popup_selected =
-                                            cur.rem_euclid(matches.len() as isize) as usize;
-                                        this.slash_popup_scroll.scroll_to_item(
-                                            this.slash_popup_selected,
-                                            ScrollStrategy::Nearest,
-                                        );
-                                        cx.notify();
-                                    }
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                "down" => {
-                                    if !matches.is_empty() {
-                                        let cur = this.slash_popup_selected as isize + 1;
-                                        this.slash_popup_selected =
-                                            cur.rem_euclid(matches.len() as isize) as usize;
-                                        this.slash_popup_scroll.scroll_to_item(
-                                            this.slash_popup_selected,
-                                            ScrollStrategy::Nearest,
-                                        );
-                                        cx.notify();
-                                    }
-                                    cx.stop_propagation();
-                                    return;
-                                }
-                                "tab" => {
-                                    if let Some((name, _, _)) =
-                                        matches.get(this.slash_popup_selected)
-                                    {
-                                        let name_str = name.clone();
-                                        if let Some(arg_prefix) =
-                                            strip_command_arg_prefix(this.input_text.as_str())
-                                        {
-                                            // We're already inside an arg
-                                            // chooser (e.g. `/provider<space>`).
-                                            // Build the full slash command from
-                                            // the picked value and submit it.
-                                            let full = format!("{arg_prefix} {name_str}");
-                                            this.input_text = SharedString::new(full);
-                                            this.input_cursor = this.input_text.chars().count();
-                                            this.slash_popup_visible = false;
-                                            this.submit_input(cx);
-                                        } else {
-                                            // Step into the chooser for the
-                                            // arg-needing command. The popup
-                                            // will refresh into its argument
-                                            // list on the next call.
-                                            let mut buf = name_str;
-                                            buf.push(' ');
-                                            this.input_text = SharedString::new(buf);
-                                            this.input_cursor = this.input_text.chars().count();
+                                // Global modifier-combo shortcuts fire regardless of
+                                // what's in the buffer. We only intercept when the
+                                // platform modifier (Cmd on macOS, Ctrl elsewhere) is
+                                // held, so plain text typing still works as before.
+                                if (mods.platform || mods.control) && !mods.alt {
+                                    match key.to_ascii_lowercase().as_str() {
+                                        "," => {
+                                            // Cmd/Ctrl+, — open the settings panel
+                                            // (macOS convention).
+                                            this.open_settings(cx);
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        "l" => {
+                                            // Ctrl/Cmd+L — start a fresh session
+                                            // (mirrors the TUI's `/clear`). Send
+                                            // through the bridge so the engine owns
+                                            // the lifecycle.
+                                            let _ = this.bridge.send(UserAction::ClearSession);
+                                            this.input_text = SharedString::new("");
+                                            this.input_cursor = 0;
                                             this.refresh_slash_popup();
+                                            cx.notify();
+                                            cx.stop_propagation();
+                                            return;
                                         }
+                                        "r" => {
+                                            // Ctrl/Cmd+R — focus the sidebar search
+                                            // box so the user can immediately start
+                                            // filtering by name or path.
+                                            this.sidebar_search_focus.focus(window, cx);
+                                            cx.notify();
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        "j" => {
+                                            // Ctrl/Cmd+J — toggle focus between the
+                                            // chat input and the sidebar search so
+                                            // the user can jump between the two
+                                            // without taking their hand off the
+                                            // keyboard.
+                                            if this.sidebar_search_focus.is_focused(window) {
+                                                this.input_focus.focus(window, cx);
+                                            } else {
+                                                this.sidebar_search_focus.focus(window, cx);
+                                            }
+                                            cx.notify();
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        "k" => {
+                                            // Ctrl/Cmd+K — focus the input and
+                                            // prefill "/" so the slash picker pops
+                                            // up without an extra keystroke. Same
+                                            // idea as the TUI's command palette.
+                                            this.input_text = SharedString::new("/");
+                                            this.input_cursor = 1;
+                                            this.refresh_slash_popup();
+                                            this.input_focus.focus(window, cx);
+                                            cx.notify();
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        _ => {}
                                     }
-                                    cx.stop_propagation();
+                                }
+
+                                // While the IME is composing preedit text (e.g. mid-pinyin),
+                                // macOS routes printable keystrokes through the IME's
+                                // `NSTextInputClient` rather than `NSResponder::keyDown:`.
+                                // But our muted `marked_text_range` previously told macOS
+                                // we have no composition, so keys also landed here and got
+                                // double-inserted on top of the IME's eventual commit. We
+                                // now flag `ime_composing` from `replace_and_mark_text_in_range`
+                                // and bail out of this listener while it is set, surrendering
+                                // all navigation/print keys to the IME until it commits.
+                                if this.ime_composing {
                                     return;
                                 }
-                                "enter" => {
-                                    if let Some((name, _, _)) =
-                                        matches.get(this.slash_popup_selected)
-                                    {
-                                        let name_str = name.clone();
-                                        if let Some(arg_prefix) =
-                                            strip_command_arg_prefix(this.input_text.as_str())
-                                        {
-                                            let full = format!("{arg_prefix} {name_str}");
-                                            this.input_text = SharedString::new(full);
-                                            this.input_cursor = this.input_text.chars().count();
+
+                                // Global shortcuts handled regardless of slash-popup state.
+                                // Ctrl-C cancels the running stream (TUI parity), Ctrl-K
+                                // wipes the input box (matches TUI's `\x15` line-kill),
+                                // and Ctrl-A jumps to the start of the buffer.
+                                if mods.control || mods.platform {
+                                    match key {
+                                        "c" => {
+                                            if this.is_thinking {
+                                                let _ = this.bridge.send(UserAction::CancelStream);
+                                                cx.notify();
+                                            }
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        "k" => {
+                                            this.input_text = SharedString::new("");
+                                            this.input_cursor = 0;
                                             this.slash_popup_visible = false;
-                                            this.submit_input(cx);
+                                            this.prompt_history_cursor = None;
+                                            cx.stop_propagation();
+                                            cx.notify();
+                                            return;
+                                        }
+                                        "a" => {
+                                            this.input_cursor = 0;
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+
+                                // Model picker has higher priority than the input box and the slash
+                                // popup: when it's open we want Up/Down/Enter to navigate
+                                // the model list, and Esc to dismiss. We always
+                                // `stop_propagation` so the underlying input text
+                                // doesn't see the keystroke once a selection is made.
+                                if this.model_picker_visible {
+                                    if this.handle_model_picker_key(key, mods) {
+                                        cx.notify();
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                    // Backspace with an empty filter closes nothing; it
+                                    // just stays (the search field edits the query).
+                                    if key == "backspace" {
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                }
+
+                                // File picker mirrors the model picker: same keymap.
+                                if this.file_picker_visible {
+                                    if this.handle_file_picker_key(key, mods) {
+                                        cx.notify();
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                    if key == "backspace" {
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                }
+
+                                if this.slash_popup_visible {
+                                    let matches = slash_matches(this.input_text.as_str());
+                                    match key {
+                                        "escape" => {
+                                            this.slash_popup_visible = false;
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        "up" => {
+                                            if !matches.is_empty() {
+                                                let cur = this.slash_popup_selected as isize - 1;
+                                                this.slash_popup_selected =
+                                                    cur.rem_euclid(matches.len() as isize) as usize;
+                                                this.slash_popup_scroll.scroll_to_item(
+                                                    this.slash_popup_selected,
+                                                    ScrollStrategy::Nearest,
+                                                );
+                                                cx.notify();
+                                            }
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        "down" => {
+                                            if !matches.is_empty() {
+                                                let cur = this.slash_popup_selected as isize + 1;
+                                                this.slash_popup_selected =
+                                                    cur.rem_euclid(matches.len() as isize) as usize;
+                                                this.slash_popup_scroll.scroll_to_item(
+                                                    this.slash_popup_selected,
+                                                    ScrollStrategy::Nearest,
+                                                );
+                                                cx.notify();
+                                            }
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        "tab" => {
+                                            if let Some((name, _, _)) =
+                                                matches.get(this.slash_popup_selected)
+                                            {
+                                                let name_str = name.clone();
+                                                if let Some(arg_prefix) = strip_command_arg_prefix(
+                                                    this.input_text.as_str(),
+                                                ) {
+                                                    // We're already inside an arg
+                                                    // chooser (e.g. `/provider<space>`).
+                                                    // Build the full slash command from
+                                                    // the picked value and submit it.
+                                                    let full = format!("{arg_prefix} {name_str}");
+                                                    this.input_text = SharedString::new(full);
+                                                    this.input_cursor =
+                                                        this.input_text.chars().count();
+                                                    this.slash_popup_visible = false;
+                                                    this.submit_input(cx);
+                                                } else {
+                                                    // Step into the chooser for the
+                                                    // arg-needing command. The popup
+                                                    // will refresh into its argument
+                                                    // list on the next call.
+                                                    let mut buf = name_str;
+                                                    buf.push(' ');
+                                                    this.input_text = SharedString::new(buf);
+                                                    this.input_cursor =
+                                                        this.input_text.chars().count();
+                                                    this.refresh_slash_popup();
+                                                }
+                                            }
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        "enter" => {
+                                            if let Some((name, _, _)) =
+                                                matches.get(this.slash_popup_selected)
+                                            {
+                                                let name_str = name.clone();
+                                                if let Some(arg_prefix) = strip_command_arg_prefix(
+                                                    this.input_text.as_str(),
+                                                ) {
+                                                    let full = format!("{arg_prefix} {name_str}");
+                                                    this.input_text = SharedString::new(full);
+                                                    this.input_cursor =
+                                                        this.input_text.chars().count();
+                                                    this.slash_popup_visible = false;
+                                                    this.submit_input(cx);
+                                                } else {
+                                                    this.input_text = SharedString::new(name_str);
+                                                    this.input_cursor =
+                                                        this.input_text.chars().count();
+                                                    this.slash_popup_visible = false;
+                                                    this.submit_input(cx);
+                                                }
+                                                cx.stop_propagation();
+                                            } else {
+                                                this.submit_input(cx);
+                                                cx.stop_propagation();
+                                            }
+                                            return;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                match key {
+                                    "enter" => {
+                                        // Plain Enter submits; Shift+Enter inserts a
+                                        // newline so the user can compose multi-line
+                                        // prompts (matching the TUI's bracketed-paste
+                                        // preview). Either way we consume the keystroke
+                                        // so macOS doesn't also fire
+                                        // `[inputContext handleEvent:] -> insertText:"\n"]`.
+                                        if mods.shift {
+                                            this.insert_text_at_cursor("\n");
+                                            cx.notify();
                                         } else {
-                                            this.input_text = SharedString::new(name_str);
-                                            this.input_cursor = this.input_text.chars().count();
-                                            this.slash_popup_visible = false;
                                             this.submit_input(cx);
                                         }
                                         cx.stop_propagation();
-                                    } else {
-                                        this.submit_input(cx);
+                                    }
+                                    "backspace" => {
+                                        if mods.platform
+                                            || (mods.control && !this.input_text.is_empty())
+                                        {
+                                            // Ctrl/Cmd-Backspace wipes the whole buffer
+                                            // (matches TUI's `\x15` line-kill semantics).
+                                            this.input_text = SharedString::new("");
+                                            this.input_cursor = 0;
+                                            this.refresh_slash_popup();
+                                        } else {
+                                            this.backspace_at_cursor();
+                                        }
                                         cx.stop_propagation();
                                     }
-                                    return;
+                                    "left" => {
+                                        if mods.platform || (mods.alt && !mods.shift) {
+                                            this.input_cursor = 0;
+                                        } else {
+                                            this.move_cursor(-1);
+                                        }
+                                        cx.stop_propagation();
+                                    }
+                                    "right" => {
+                                        if mods.platform || (mods.alt && !mods.shift) {
+                                            this.input_cursor =
+                                                this_char_count(this.input_text.as_str());
+                                        } else {
+                                            this.move_cursor(1);
+                                        }
+                                        cx.stop_propagation();
+                                    }
+                                    "home" => {
+                                        this.input_cursor = 0;
+                                        cx.stop_propagation();
+                                    }
+                                    "end" => {
+                                        this.input_cursor =
+                                            this_char_count(this.input_text.as_str());
+                                        cx.stop_propagation();
+                                    }
+                                    "up" => {
+                                        // TUI parity: when the caret sits on the first
+                                        // row, Up recalls the previous prompt. Inside a
+                                        // multi-line draft we use it for line navigation.
+                                        if this.input_cursor_at_first_line() {
+                                            this.recall_prev_prompt();
+                                        } else {
+                                            this.move_to_prev_line();
+                                        }
+                                        cx.stop_propagation();
+                                    }
+                                    "down" => {
+                                        if this.input_cursor_at_last_line() {
+                                            this.recall_next_prompt();
+                                        } else {
+                                            this.move_to_next_line();
+                                        }
+                                        cx.stop_propagation();
+                                    }
+                                    "escape" => {
+                                        // Esc while streaming: first press
+                                        // arms a 3s confirmation (send button
+                                        // shows "Esc"), second press cancels.
+                                        // When idle, Esc just clears the draft
+                                        // like the TUI.
+                                        if this.is_thinking {
+                                            if this.escape_stop_armed {
+                                                let _ = this.bridge.send(UserAction::CancelStream);
+                                                this.escape_stop_armed = false;
+                                            } else {
+                                                this.escape_stop_armed = true;
+                                                // Resolve the entity from the
+                                                // listener's own `cx` (the closure
+                                                // must not capture outer locals).
+                                                let view = cx.entity().clone();
+                                                cx.spawn(async move |_weak, async_cx| {
+                                                    async_cx
+                                                        .background_executor()
+                                                        .timer(Duration::from_secs(3))
+                                                        .await;
+                                                    async_cx.update(|cx| {
+                                                        view.update(cx, |state, cx| {
+                                                            state.escape_stop_armed = false;
+                                                            cx.notify();
+                                                        });
+                                                    });
+                                                })
+                                                .detach();
+                                            }
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        // Esc cancels the current draft (and any open
+                                        // popup). Match the TUI's behavior of treating
+                                        // Esc as a no-op when the buffer is empty so we
+                                        // don't swallow focus moves system-wide.
+                                        this.input_text = SharedString::new("");
+                                        this.input_cursor = 0;
+                                        this.slash_popup_visible = false;
+                                        this.msg_menu = None;
+                                        this.prompt_history_cursor = None;
+                                        cx.stop_propagation();
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
-                            }
-                        }
-                        match key {
-                            "enter" => {
-                                // Plain Enter submits; Shift+Enter inserts a
-                                // newline so the user can compose multi-line
-                                // prompts (matching the TUI's bracketed-paste
-                                // preview). Either way we consume the keystroke
-                                // so macOS doesn't also fire
-                                // `[inputContext handleEvent:] -> insertText:"\n"]`.
-                                if mods.shift {
-                                    this.insert_text_at_cursor("\n");
-                                    cx.notify();
-                                } else {
-                                    this.submit_input(cx);
-                                }
-                                cx.stop_propagation();
-                            }
-                            "backspace" => {
-                                if mods.platform || (mods.control && !this.input_text.is_empty()) {
-                                    // Ctrl/Cmd-Backspace wipes the whole buffer
-                                    // (matches TUI's `\x15` line-kill semantics).
-                                    this.input_text = SharedString::new("");
-                                    this.input_cursor = 0;
-                                    this.refresh_slash_popup();
-                                } else {
-                                    this.backspace_at_cursor();
-                                }
-                                cx.stop_propagation();
-                            }
-                            "left" => {
-                                if mods.platform || (mods.alt && !mods.shift) {
-                                    this.input_cursor = 0;
-                                } else {
-                                    this.move_cursor(-1);
-                                }
-                                cx.stop_propagation();
-                            }
-                            "right" => {
-                                if mods.platform || (mods.alt && !mods.shift) {
-                                    this.input_cursor = this_char_count(this.input_text.as_str());
-                                } else {
-                                    this.move_cursor(1);
-                                }
-                                cx.stop_propagation();
-                            }
-                            "home" => {
-                                this.input_cursor = 0;
-                                cx.stop_propagation();
-                            }
-                            "end" => {
-                                this.input_cursor = this_char_count(this.input_text.as_str());
-                                cx.stop_propagation();
-                            }
-                            "up" => {
-                                // TUI parity: when the caret sits on the first
-                                // row, Up recalls the previous prompt. Inside a
-                                // multi-line draft we use it for line navigation.
-                                if this.input_cursor_at_first_line() {
-                                    this.recall_prev_prompt();
-                                } else {
-                                    this.move_to_prev_line();
-                                }
-                                cx.stop_propagation();
-                            }
-                            "down" => {
-                                if this.input_cursor_at_last_line() {
-                                    this.recall_next_prompt();
-                                } else {
-                                    this.move_to_next_line();
-                                }
-                                cx.stop_propagation();
-                            }
-                            "escape" => {
-                                // Esc cancels the current draft (and any open
-                                // popup). Match the TUI's behavior of treating
-                                // Esc as a no-op when the buffer is empty so we
-                                // don't swallow focus moves system-wide.
-                                this.input_text = SharedString::new("");
-                                this.input_cursor = 0;
-                                this.slash_popup_visible = false;
-                                this.prompt_history_cursor = None;
-                                cx.stop_propagation();
-                            }
-                            _ => {}
-                        }
-                        // We deliberately do NOT insert printable characters
-                        // here. zed's editor pattern is to leave printable key
-                        // dispatch to macOS — when the listener doesn't claim
-                        // the key, the macOS shim falls through to
-                        // `[inputContext handleEvent:]` which in turn calls
-                        // `insertText:` on our registered `ElementInputHandler`,
-                        // routing the same char through `replace_text_in_range`.
-                        // That keeps the IME-aware path as the single source of
-                        // truth: ASCII letters and IME-marked CJK both flow
-                        // through the same handler, eliminating the previous
-                        // duplication where our listener inserted ahead of the
-                        // IME's commit.
-                    })),
+                                // We deliberately do NOT insert printable characters
+                                // here. zed's editor pattern is to leave printable key
+                                // dispatch to macOS — when the listener doesn't claim
+                                // the key, the macOS shim falls through to
+                                // `[inputContext handleEvent:]` which in turn calls
+                                // `insertText:` on our registered `ElementInputHandler`,
+                                // routing the same char through `replace_text_in_range`.
+                                // That keeps the IME-aware path as the single source of
+                                // truth: ASCII letters and IME-marked CJK both flow
+                                // through the same handler, eliminating the previous
+                                // duplication where our listener inserted ahead of the
+                                // IME's commit.
+                            })),
+                    )
+                    // Controls row (model chip / mode / status / send) inside the
+                    // composer card.
+                    .child(self.render_input_chip_row(cx)),
             )
-            .child(self.render_input_chip_row(cx))
             .child(ImeInputElement {
                 view: view_entity,
                 focus: input_focus_clone,
@@ -2775,18 +3358,19 @@ impl ShellState {
                 .gap_1()
                 .px_2()
                 .py_1()
-                .rounded_md()
+                .rounded(px(6.0))
                 .border_1()
-                .border_color(rgb(dark::CHIP_BORDER))
+                .border_color(rgba(dark::BORDER))
                 .bg(rgb(dark::CHIP_BG))
                 .text_xs()
                 .text_color(rgb(dark::TEXT_SECONDARY))
+                .tooltip(crate::tooltip::Tooltip::text(full_path.clone()))
                 .child("▧")
                 .child(label)
-                .child(div().ml_1().text_color(rgb(dark::ICON_MUTED)).child("×"))
+                .child(div().ml_1().text_color(rgb(dark::TEXT_GHOST)).child("×"))
                 .hover(|d| {
-                    d.bg(rgb(dark::CHIP_HOVER))
-                        .border_color(rgb(dark::BORDER_HOVER))
+                    d.bg(rgba(dark::OVERLAY))
+                        .border_color(rgba(dark::BORDER_STRONG))
                 })
                 .on_click(move |_ev, _window, cx| {
                     view_for_remove.update(cx, |state, _cx| {
@@ -2804,6 +3388,27 @@ impl ShellState {
             .mx_5()
             .mt_2()
             .children(chips)
+            .child(
+                div()
+                    .id("context-clear-all")
+                    .px_2()
+                    .py_1()
+                    .rounded(px(6.0))
+                    .text_xs()
+                    .text_color(rgb(dark::TEXT_GHOST))
+                    .cursor_pointer()
+                    .hover(|element| element.bg(rgba(dark::OVERLAY)).text_color(rgb(dark::ERROR)))
+                    .tooltip(crate::tooltip::Tooltip::text("Drop all context files"))
+                    .child("clear all")
+                    .on_click({
+                        let view_entity = view_entity.clone();
+                        move |_ev, _window, cx| {
+                            view_entity.update(cx, |state, _cx| {
+                                let _ = state.bridge.send(UserAction::DropAllFiles);
+                            });
+                        }
+                    }),
+            )
             .into_any_element()
     }
 
@@ -2848,16 +3453,18 @@ impl ShellState {
         div()
             .flex()
             .items_center()
-            .gap_2()
-            .mx_5()
-            .mb_4()
-            .text_xs()
+            .gap_1p5()
+            .mt_1()
+            .px_2()
+            .pb_1()
+            .text_size(px(11.5))
+            .line_height(px(14.0))
             .child(input_chip_trigger(
                 "input-chip-add",
                 "+",
                 file_chip_active,
                 view_entity.clone(),
-                |state, _, cx| {
+                |state, window, cx| {
                     // Toggle the file picker; close the model picker if it
                     // was open so only one dropdown shows at a time.
                     let was_open = state.file_picker_visible;
@@ -2866,6 +3473,10 @@ impl ShellState {
                         state.model_picker_visible = false;
                         state.cwd_files = load_cwd_files();
                         state.file_picker_selected = 0;
+                        state.file_picker_query = SharedString::new("");
+                        // Hand the search field focus so typing filters
+                        // immediately (same as the model picker).
+                        state.file_picker_search_focus.focus(window, cx);
                     }
                     cx.notify();
                 },
@@ -2875,23 +3486,62 @@ impl ShellState {
                 model_label.as_str(),
                 model_chip_active,
                 view_entity.clone(),
-                |state, _, cx| {
+                |state, window, cx| {
                     let was_open = state.model_picker_visible;
                     state.model_picker_visible = !was_open;
                     if state.model_picker_visible {
                         state.file_picker_visible = false;
                         state.model_picker_selected = 0;
+                        state.model_picker_query = SharedString::new("");
+                        // Hand the search field focus so typing filters
+                        // immediately (Waku's picker does the same).
+                        state.model_picker_search_focus.focus(window, cx);
                     }
                     cx.notify();
                 },
             ))
-            .child(input_chip_meta(mode_label.as_str(), Some("▾")))
-            .child(input_chip_meta("+ MCP", None))
+            .child(input_chip_trigger(
+                "input-chip-mode",
+                mode_label.as_str(),
+                self.mode_picker_visible,
+                view_entity.clone(),
+                |state, _, cx| {
+                    // Toggle the mode menu; close the other pickers so only
+                    // one dropdown shows at a time.
+                    let was_open = state.mode_picker_visible;
+                    state.mode_picker_visible = !was_open;
+                    if state.mode_picker_visible {
+                        state.file_picker_visible = false;
+                        state.model_picker_visible = false;
+                    }
+                    cx.notify();
+                },
+            ))
+            .child(input_chip_trigger(
+                "input-chip-mcp",
+                "+ MCP",
+                self.mcp_picker_visible,
+                view_entity.clone(),
+                |state, _, cx| {
+                    // Toggle the MCP panel; close the other pickers so only
+                    // one dropdown shows at a time. Refresh status on open.
+                    let was_open = state.mcp_picker_visible;
+                    state.mcp_picker_visible = !was_open;
+                    if state.mcp_picker_visible {
+                        state.model_picker_visible = false;
+                        state.file_picker_visible = false;
+                        state.mode_picker_visible = false;
+                        state.refresh_mcp(cx);
+                    }
+                    cx.notify();
+                },
+            ))
             .child(input_chip_status(idle_label.as_str(), self.is_thinking))
-            .child(input_chip_meta("?", None))
+            .child(div().flex_1())
             .child(input_chip_send(
                 self.input_text.is_empty(),
                 self.is_thinking,
+                self.escape_stop_armed,
                 view_entity,
             ))
             .into_any_element()
@@ -2904,99 +3554,1575 @@ impl ShellState {
     /// vertically with the input column (same `mx_5()` inset) so the user
     /// sees the trigger chip and its options in the same column.
     fn render_model_picker(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let count = self.quick_models.len();
-        if count == 0 {
-            return div().into_any_element();
-        }
-        let model_picker_scroll = self.model_picker_scroll.clone();
-        let current = self
-            .model_picker_selected
-            .min(self.quick_models.len().saturating_sub(1));
-        let entries: Vec<QuickModelEntry> = self.quick_models.clone();
+        let entries: Vec<QuickModelEntry> = self.filtered_quick_models();
         let view_entity = cx.entity().clone();
+        let query = self.model_picker_query.clone();
+        let highlight = self
+            .model_picker_selected
+            .min(entries.len().saturating_sub(1));
+        let current_model = self.status_model.clone();
+
+        // Search field: a chrome-less box that owns text input while the
+        // panel is open. Typing filters; Up/Down/Enter/Esc are claimed by the
+        // input listener above (they stop_propagation before reaching us).
+        let search_box = div()
+            .id("model-picker-search")
+            .track_focus(&self.model_picker_search_focus)
+            .focus_visible(|d| d.border_color(rgb(dark::ACCENT)))
+            .h(px(34.0))
+            .px(px(10.0))
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(rgba(dark::BORDER))
+            .bg(rgb(dark::RAISED))
+            .flex()
+            .items_center()
+            .gap_2()
+            .cursor_text()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _ev, window, cx| {
+                    this.model_picker_search_focus.focus(window, cx);
+                    cx.notify();
+                }),
+            )
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+                let key = ev.keystroke.key.as_str();
+                let mods = &ev.keystroke.modifiers;
+                // Arrow/enter/esc navigation is shared with the input-box
+                // listener so the picker behaves the same from either focus.
+                if this.handle_model_picker_key(key, mods) {
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if key == "backspace" {
+                    // Remove one char from the filter (or clear it all with
+                    // Cmd/Ctrl+Backspace).
+                    if mods.platform || mods.control {
+                        this.model_picker_query = SharedString::new("");
+                    } else {
+                        let mut updated = this.model_picker_query.to_string();
+                        updated.pop();
+                        this.model_picker_query = SharedString::new(updated);
+                    }
+                    this.model_picker_selected = 0;
+                } else if let Some(chars) = ev.keystroke.key_char.as_ref() {
+                    if !chars.chars().all(|ch| ch.is_control()) {
+                        let mut updated = this.model_picker_query.to_string();
+                        updated.push_str(chars);
+                        this.model_picker_query = SharedString::new(updated);
+                    }
+                    this.model_picker_selected = 0;
+                }
+                cx.notify();
+                cx.stop_propagation();
+            }))
+            .child(div().text_color(rgb(dark::TEXT_SECONDARY)).child("⌕"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_color(if query.is_empty() {
+                        rgb(dark::TEXT_GHOST)
+                    } else {
+                        rgb(dark::TEXT)
+                    })
+                    .child(if query.is_empty() {
+                        SharedString::from("Search models…")
+                    } else {
+                        query.clone()
+                    }),
+            );
+
+        let mut rows: Vec<gpui::AnyElement> = entries
+            .iter()
+            .enumerate()
+            .map(|(idx, entry)| {
+                let is_selected = entry.model_arg == current_model.as_str();
+                let is_highlighted = idx == highlight;
+                let view_for_click = view_entity.clone();
+                let model_arg_for_click = entry.model_arg.clone();
+                let name = entry.name.clone();
+                let provider = entry.provider.clone();
+                let subtitle = entry.model_arg.clone();
+                div()
+                    .id(ElementId::Name(format!("model-row-{idx}").into()))
+                    .h(px(58.0))
+                    .px(px(12.0))
+                    .rounded(px(9.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(if is_highlighted {
+                        rgb(dark::ACCENT)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .bg(if is_selected {
+                        rgba(dark::OVERLAY_STRONG)
+                    } else if is_highlighted {
+                        rgba(dark::OVERLAY)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .hover(|element| element.bg(rgba(dark::OVERLAY)))
+                    .active(|element| element.opacity(0.85))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(13.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgb(dark::TEXT))
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(dark::TEXT_TERTIARY))
+                                    .child(SharedString::from(format!("{provider} · {subtitle}"))),
+                            ),
+                    )
+                    .on_click(move |_ev, _window, cx| {
+                        view_for_click.update(cx, |state, cx| {
+                            let _ = state.bridge.send(UserAction::SetModel {
+                                model: CompactString::new(model_arg_for_click.as_str()),
+                            });
+                            state.model_picker_visible = false;
+                            state.model_picker_query = SharedString::new("");
+                            cx.notify();
+                        });
+                    })
+                    .into_any_element()
+            })
+            .collect();
+
+        if rows.is_empty() {
+            rows.push(
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.5))
+                    .text_color(rgb(dark::TEXT_GHOST))
+                    .child("No models found")
+                    .into_any_element(),
+            );
+        }
+
+        // Panel: 460×390 raised card, border_strong outline, shadow. Anchored
+        // above the composer (it is a flex child of the input column, so it
+        // stacks above the card naturally). Fixed height so the inner list
+        // scrolls instead of stretching the window.
         div()
             .flex()
             .flex_col()
-            .gap_0()
             .mx_5()
             .mb_1()
-            .p_1()
-            .rounded_md()
+            .w(px(460.0))
+            .h(px(390.0))
+            .relative()
+            .occlude()
+            .on_mouse_down_out({
+                let view_entity = view_entity.clone();
+                move |_ev, _window, cx| {
+                    view_entity.update(cx, |state, cx| {
+                        state.model_picker_visible = false;
+                        state.model_picker_query = SharedString::new("");
+                        cx.notify();
+                    });
+                }
+            })
+            .mb_1()
+            .rounded(px(13.0))
+            .overflow_hidden()
             .border_1()
-            .border_color(rgb(dark::CHIP_BORDER))
-            .bg(rgb(dark::BUTTON_BG))
-            .max_h(px(220.0))
-            .text_sm()
-            .child(label_hint("model"))
+            .border_color(rgba(dark::BORDER_STRONG))
+            .bg(rgb(dark::RAISED))
+            .shadow_lg()
             .child(
-                div().h(px(180.)).child(
-                    uniform_list(
-                        "model-picker-list",
-                        count,
-                        cx.processor(move |_this, range: std::ops::Range<usize>, _window, _cx| {
-                            range
-                                .map(|idx| {
-                                    let entry = &entries[idx];
-                                    let view_for_click = view_entity.clone();
-                                    let model_arg_for_click = entry.model_arg.clone();
-                                    div()
-                                        .id(("model-picker-row", idx))
-                                        .flex()
-                                        .gap_3()
-                                        .px_2()
-                                        .py_1p5()
-                                        .rounded_sm()
-                                        .bg(if idx == current {
-                                            rgb(dark::BUTTON_HOVER)
-                                        } else {
-                                            rgba(0x00000000)
-                                        })
-                                        .when(idx == current, |d| {
-                                            d.border_l_2().border_color(rgb(dark::ACCENT))
-                                        })
-                                        .child({
-                                            let name_owned = entry.name.clone();
-                                            div()
-                                                .text_color(rgb(dark::ACCENT))
-                                                .text_xs()
-                                                .min_w(px(96.0))
-                                                .child(name_owned)
-                                        })
-                                        .child({
-                                            let provider_owned = entry.provider.clone();
-                                            div()
-                                                .text_color(rgb(dark::TEXT_MUTED))
-                                                .text_xs()
-                                                .child(provider_owned)
-                                        })
-                                        .child(div().flex_1())
-                                        .child({
-                                            let model_arg_owned = entry.model_arg.clone();
-                                            div()
-                                                .text_color(rgb(dark::TEXT_MUTED))
-                                                .text_xs()
-                                                .overflow_hidden()
-                                                .child(model_arg_owned)
-                                        })
-                                        .on_click(move |_ev, _window, cx| {
-                                            view_for_click.update(cx, |state, cx| {
-                                                let _ = state.bridge.send(UserAction::SetModel {
-                                                    model: CompactString::new(
-                                                        model_arg_for_click.as_str(),
-                                                    ),
-                                                });
-                                                state.model_picker_visible = false;
-                                                cx.notify();
-                                            });
-                                        })
-                                })
-                                .collect()
-                        }),
-                    )
-                    .track_scroll(&model_picker_scroll)
-                    .h_full(),
-                ),
+                div()
+                    .w_full()
+                    .h(px(52.0))
+                    .px(px(12.0))
+                    .pt(px(10.0))
+                    .pb(px(8.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .child(search_box),
             )
+            .child(
+                div()
+                    .id("model-picker-list")
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.model_picker_scroll)
+                    .p(px(9.0))
+                    .flex()
+                    .flex_col()
+                    .children(rows),
+            )
+            .child(crate::scrollbar::vertical(
+                &self.model_picker_scroll,
+                &self.model_picker_scrollbar,
+            ))
+            .into_any_element()
+    }
+
+    /// Permission-mode menu, opened from the composer's mode chip. Rows are
+    /// the engine's `SecurityMode` values; selecting one sends `/mode <name>`
+    /// (the engine owns the switch and reports the new mode back via
+    /// `StatusUpdate`). Small raised card, same visual language as the model
+    /// picker.
+    fn render_mode_picker(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        const MODES: &[(&str, &str)] = &[
+            ("standard", "ask before every action"),
+            ("restrictive", "deny by default, allow explicitly"),
+            ("readonly", "no mutations at all"),
+            ("guarded", "auto-allow safe commands"),
+            ("yolo", "run everything without asking"),
+        ];
+        let current_mode = self.status_mode.clone();
+        let view_entity = cx.entity().clone();
+        let rows: Vec<gpui::AnyElement> = MODES
+            .iter()
+            .map(|(name, desc)| {
+                let is_current = current_mode.eq_ignore_ascii_case(name);
+                let name_owned = name.to_string();
+                let view_for_click = view_entity.clone();
+                div()
+                    .id(ElementId::Name(format!("mode-row-{name}").into()))
+                    .h(px(40.0))
+                    .px(px(12.0))
+                    .rounded(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(rgba(0x00000000))
+                    .bg(if is_current {
+                        rgba(dark::OVERLAY_STRONG)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .hover(|element| element.bg(rgba(dark::OVERLAY)))
+                    .active(|element| element.opacity(0.85))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(12.5))
+                                    .font_weight(if is_current {
+                                        gpui::FontWeight::SEMIBOLD
+                                    } else {
+                                        gpui::FontWeight::NORMAL
+                                    })
+                                    .text_color(rgb(dark::TEXT))
+                                    .child(name_owned.clone()),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(10.5))
+                                    .text_color(rgb(dark::TEXT_TERTIARY))
+                                    .child(desc.to_string()),
+                            ),
+                    )
+                    .when(is_current, |d| {
+                        d.child(div().text_color(rgb(dark::SUCCESS)).child("✓"))
+                    })
+                    .on_click(move |_ev, _window, cx| {
+                        view_for_click.update(cx, |state, cx| {
+                            let _ = state.bridge.send(UserAction::RunSlashCommand {
+                                command: CompactString::new(format!("/mode {}", name_owned)),
+                            });
+                            state.mode_picker_visible = false;
+                            cx.notify();
+                        });
+                    })
+                    .into_any_element()
+            })
+            .collect();
+
+        div()
+            .flex()
+            .flex_col()
+            .mx_5()
+            .mb_1()
+            .rounded(px(13.0))
+            .overflow_hidden()
+            .border_1()
+            .border_color(rgba(dark::BORDER_STRONG))
+            .bg(rgb(dark::RAISED))
+            .shadow_lg()
+            .p(px(6.0))
+            .occlude()
+            .on_mouse_down_out({
+                let view_entity = view_entity.clone();
+                move |_ev, _window, cx| {
+                    view_entity.update(cx, |state, cx| {
+                        state.mode_picker_visible = false;
+                        cx.notify();
+                    });
+                }
+            })
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// MCP management panel, opened from the `+ MCP` composer chip. Lists
+    /// every configured server with its connection state and tool count,
+    /// with a refresh control. Clicking a connected server sends a small
+    /// status update through the engine (via the same `/mcp <server>` path
+    /// the TUI uses, surfaced as a system message).
+    fn render_mcp_picker(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let view_entity = cx.entity().clone();
+        let refreshing = self.mcp_refreshing;
+        let servers = self.mcp_servers.clone();
+
+        let rows: Vec<gpui::AnyElement> = if servers.is_empty() {
+            vec![
+                div()
+                    .h(px(72.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.5))
+                    .text_color(rgb(dark::TEXT_GHOST))
+                    .child(if refreshing {
+                        "Querying MCP servers…"
+                    } else {
+                        "No MCP servers configured"
+                    })
+                    .into_any_element(),
+            ]
+        } else {
+            servers
+                .iter()
+                .map(|server| {
+                    let name_owned = server.name.to_string();
+                    let view_for_click = view_entity.clone();
+                    let needs_login = server.needs_oauth && !server.connected;
+                    let (dot_color, status_label) = if server.connected {
+                        (rgb(dark::SUCCESS), "connected")
+                    } else if server.needs_oauth {
+                        (rgb(dark::WARNING), "needs OAuth login")
+                    } else {
+                        (rgb(dark::ERROR), "not connected")
+                    };
+                    let tool_line = match (server.connected, server.tool_count) {
+                        (true, Some(n)) => format!("{n} tool(s)"),
+                        (true, None) => "connected".to_string(),
+                        _ => String::new(),
+                    };
+                    div()
+                        .id(ElementId::Name(
+                            format!("mcp-row-{}", server.name.as_str()).into(),
+                        ))
+                        .h(px(48.0))
+                        .px(px(12.0))
+                        .rounded(px(8.0))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
+                        .border_1()
+                        .border_color(rgba(0x00000000))
+                        .bg(rgba(0x00000000))
+                        .hover(|element| element.bg(rgba(dark::OVERLAY)))
+                        .active(|element| element.opacity(0.85))
+                        .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(dot_color))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(12.5))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgb(dark::TEXT))
+                                        .child(name_owned.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(10.5))
+                                        .text_color(rgb(dark::TEXT_TERTIARY))
+                                        .child(if tool_line.is_empty() {
+                                            SharedString::from(status_label)
+                                        } else {
+                                            SharedString::from(format!(
+                                                "{status_label} · {tool_line}"
+                                            ))
+                                        }),
+                                ),
+                        )
+                        // OAuth login button: only when the server needs it.
+                        .when(needs_login, |row| {
+                            let view_for_login = view_entity.clone();
+                            let server_for_login = name_owned.clone();
+                            row.child(
+                                div()
+                                    .id(ElementId::Name(
+                                        format!("mcp-login-{}", server_for_login).into(),
+                                    ))
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded(px(6.0))
+                                    .bg(rgb(dark::INVERSE))
+                                    .text_color(rgb(dark::ON_INVERSE))
+                                    .text_size(px(11.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .cursor_pointer()
+                                    .hover(|element| element.opacity(0.9))
+                                    .child("Login")
+                                    .tooltip(crate::tooltip::Tooltip::text(
+                                        "Start OAuth login for this server",
+                                    ))
+                                    .on_click(move |_ev, _window, cx| {
+                                        view_for_login.update(cx, |state, cx| {
+                                            let _ = state.bridge.send(UserAction::LoginMcp {
+                                                server: CompactString::new(
+                                                    server_for_login.as_str(),
+                                                ),
+                                            });
+                                            cx.notify();
+                                        });
+                                    }),
+                            )
+                        })
+                        .on_click(move |_ev, _window, cx| {
+                            view_for_click.update(cx, |state, cx| {
+                                // Surface the server's details in the chat via
+                                // the same path the TUI uses.
+                                let _ = state.bridge.send(UserAction::RunSlashCommand {
+                                    command: CompactString::new(format!("/mcp {}", name_owned)),
+                                });
+                                state.mcp_picker_visible = false;
+                                cx.notify();
+                            });
+                        })
+                        .into_any_element()
+                })
+                .collect()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .mx_5()
+            .mb_1()
+            .rounded(px(13.0))
+            .overflow_hidden()
+            .border_1()
+            .border_color(rgba(dark::BORDER_STRONG))
+            .bg(rgb(dark::RAISED))
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down_out({
+                let view_entity = view_entity.clone();
+                move |_ev, _window, cx| {
+                    view_entity.update(cx, |state, cx| {
+                        state.mcp_picker_visible = false;
+                        cx.notify();
+                    });
+                }
+            })
+            .child(
+                div()
+                    .w_full()
+                    .h(px(44.0))
+                    .px(px(12.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(rgba(dark::BORDER))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(10.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(rgb(dark::TEXT_TERTIARY))
+                            .child("MCP SERVERS"),
+                    )
+                    .child(
+                        div()
+                            .id("mcp-refresh")
+                            .px_2()
+                            .py_1()
+                            .rounded(px(6.0))
+                            .text_size(px(11.0))
+                            .text_color(if refreshing {
+                                rgb(dark::ACCENT)
+                            } else {
+                                rgb(dark::TEXT_SECONDARY)
+                            })
+                            .cursor_pointer()
+                            .hover(|element| element.bg(rgba(dark::OVERLAY)))
+                            .tooltip(crate::tooltip::Tooltip::text("Refresh MCP status"))
+                            .child(if refreshing { "⟳" } else { "↻" })
+                            .on_click({
+                                let view_entity = view_entity.clone();
+                                move |_ev, _window, cx| {
+                                    view_entity.update(cx, |state, cx| {
+                                        state.refresh_mcp(cx);
+                                    });
+                                }
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .id("mcp-picker-list")
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p(px(6.0))
+                    .flex()
+                    .flex_col()
+                    .children(rows),
+            )
+            .into_any_element()
+    }
+
+    /// Settings panel: manage quick models (add / delete), persisted to the
+    /// config file. Opened with Cmd/Ctrl+, or from a future sidebar entry.
+    /// Changes call the engine's `ReloadConfig` so the running session picks
+    /// them up without a restart.
+    fn render_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let view_entity = cx.entity().clone();
+        let models = self.settings_models.clone();
+        let feedback = self.settings_feedback.clone();
+        // Existing quick models, each with a delete affordance.
+        let model_rows: Vec<gpui::AnyElement> = models
+            .iter()
+            .map(|(name, qmc)| {
+                let name_owned = name.clone();
+                let provider = qmc.provider.to_string();
+                let model = qmc.model.to_string();
+                let view_for_delete = view_entity.clone();
+                div()
+                    .id(ElementId::Name(format!("settings-model-{name}").into()))
+                    .h(px(36.0))
+                    .px(px(10.0))
+                    .rounded(px(7.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .hover(|element| element.bg(rgba(dark::OVERLAY)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(dark::TEXT))
+                            .child(name_owned.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(rgb(dark::TEXT_TERTIARY))
+                            .child(format!("{provider} · {model}")),
+                    )
+                    .child(
+                        div()
+                            .id(ElementId::Name(format!("settings-del-{name}").into()))
+                            .px_1p5()
+                            .rounded(px(5.0))
+                            .text_size(px(11.0))
+                            .text_color(rgb(dark::TEXT_GHOST))
+                            .cursor_pointer()
+                            .hover(|element| {
+                                element.bg(rgba(dark::OVERLAY)).text_color(rgb(dark::ERROR))
+                            })
+                            .tooltip(crate::tooltip::Tooltip::text("Delete this quick model"))
+                            .child("✕")
+                            .on_click(move |_ev, _window, cx| {
+                                view_for_delete.update(cx, |state, cx| {
+                                    match zerostack_core::config::load::remove_quick_model(
+                                        &name_owned,
+                                    ) {
+                                        Ok(true) => {
+                                            state.settings_feedback = SharedString::new(format!(
+                                                "removed '{name_owned}'"
+                                            ));
+                                        }
+                                        Ok(false) => {
+                                            state.settings_feedback = SharedString::new(format!(
+                                                "'{name_owned}' not found"
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            state.settings_feedback =
+                                                SharedString::new(format!("remove failed: {e}"));
+                                        }
+                                    }
+                                    state.reload_settings_models();
+                                    state.reload_config_after_settings();
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        div()
+            .flex()
+            .flex_col()
+            .mx_5()
+            .mb_1()
+            .w(px(480.0))
+            .h(px(420.0))
+            .relative()
+            .occlude()
+            .on_mouse_down_out({
+                let view_entity = view_entity.clone();
+                move |_ev, _window, cx| {
+                    view_entity.update(cx, |state, cx| {
+                        state.settings_visible = false;
+                        cx.notify();
+                    });
+                }
+            })
+            .rounded(px(13.0))
+            .overflow_hidden()
+            .border_1()
+            .border_color(rgba(dark::BORDER_STRONG))
+            .bg(rgb(dark::RAISED))
+            .shadow_lg()
+            .child(
+                div()
+                    .w_full()
+                    .h(px(44.0))
+                    .px(px(12.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(rgba(dark::BORDER))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(10.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(rgb(dark::TEXT_TERTIARY))
+                            .child("SETTINGS — QUICK MODELS"),
+                    )
+                    .when(!feedback.is_empty(), |header| {
+                        header.child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(rgb(dark::SUCCESS))
+                                .child(feedback.clone()),
+                        )
+                    })
+                    // Reasoning toggle: flips the engine's chain-of-thought
+                    // flag via the same `/reasoning` slash command the TUI uses.
+                    .child(
+                        div()
+                            .id("settings-reasoning")
+                            .px_2()
+                            .py_1()
+                            .rounded(px(6.0))
+                            .text_size(px(10.5))
+                            .text_color(rgb(dark::TEXT_SECONDARY))
+                            .cursor_pointer()
+                            .hover(|element| element.bg(rgba(dark::OVERLAY)))
+                            .tooltip(crate::tooltip::Tooltip::text(
+                                "Toggle chain-of-thought reasoning",
+                            ))
+                            .child("reasoning: toggle")
+                            .on_click({
+                                let view_entity = view_entity.clone();
+                                move |_ev, _window, cx| {
+                                    view_entity.update(cx, |state, cx| {
+                                        let _ = state.bridge.send(UserAction::RunSlashCommand {
+                                            command: CompactString::new("/reasoning"),
+                                        });
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    ),
+            )
+            // Add-model form.
+            .child(self.render_settings_form(cx))
+            .child(self.render_provider_switch(cx))
+            .child(self.render_config_section(cx))
+            .child(self.render_limits_section(cx))
+            .child(self.render_permission_section(cx))
+            .child(self.render_editor_section(cx))
+            .child(self.render_settings_save(cx))
+            .child(
+                div()
+                    .id("settings-model-list")
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p(px(8.0))
+                    .flex()
+                    .flex_col()
+                    .children(model_rows),
+            )
+            .into_any_element()
+    }
+
+    /// Add-model form inside the settings panel: name / provider / model
+    /// fields with a save button. Writes via `save_quick_model` and reloads.
+    fn render_settings_form(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let view_entity = cx.entity().clone();
+        let new_name = self.settings_new_name.clone();
+        let new_provider = self.settings_new_provider.clone();
+        let new_model = self.settings_new_model.clone();
+
+        // A tiny chrome-less text field: click to focus, key_char appends.
+        fn field(
+            id: &'static str,
+            value: &SharedString,
+            placeholder: &str,
+            view_entity: gpui::Entity<ShellState>,
+            setter: impl Fn(&mut ShellState, String) + 'static,
+        ) -> gpui::AnyElement {
+            div()
+                .id(ElementId::Name(id.into()))
+                .h(px(28.0))
+                .px(px(8.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(rgba(dark::BORDER))
+                .bg(rgb(dark::COMPOSER))
+                .flex()
+                .items_center()
+                .cursor_text()
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(if value.is_empty() {
+                            rgb(dark::TEXT_GHOST)
+                        } else {
+                            rgb(dark::TEXT)
+                        })
+                        .child(if value.is_empty() {
+                            SharedString::from(placeholder)
+                        } else {
+                            value.clone()
+                        }),
+                )
+                .on_key_down(move |ev: &gpui::KeyDownEvent, _window, cx| {
+                    let key = ev.keystroke.key.as_str();
+                    let mods = &ev.keystroke.modifiers;
+                    view_entity.update(cx, |state, cx| {
+                        let current = match id {
+                            "settings-name" => state.settings_new_name.to_string(),
+                            "settings-provider" => state.settings_new_provider.to_string(),
+                            _ => state.settings_new_model.to_string(),
+                        };
+                        let updated = if key == "backspace" {
+                            let mut s = current;
+                            if mods.platform || mods.control {
+                                s.clear();
+                            } else {
+                                s.pop();
+                            }
+                            s
+                        } else if let Some(chars) = ev.keystroke.key_char.as_ref() {
+                            let mut s = current;
+                            s.push_str(chars);
+                            s
+                        } else {
+                            return;
+                        };
+                        setter(state, updated);
+                        cx.notify();
+                    });
+                })
+                .into_any_element()
+        }
+
+        let name_field = field(
+            "settings-name",
+            &new_name,
+            "name",
+            view_entity.clone(),
+            |state, v| state.settings_new_name = SharedString::new(v),
+        );
+        let provider_field = field(
+            "settings-provider",
+            &new_provider,
+            "provider",
+            view_entity.clone(),
+            |state, v| state.settings_new_provider = SharedString::new(v),
+        );
+        let model_field = field(
+            "settings-model",
+            &new_model,
+            "model",
+            view_entity.clone(),
+            |state, v| state.settings_new_model = SharedString::new(v),
+        );
+        let view_for_save = view_entity.clone();
+
+        div()
+            .w_full()
+            .flex_none()
+            .px(px(12.0))
+            .py(px(8.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .border_b_1()
+            .border_color(rgba(dark::BORDER))
+            .child(name_field)
+            .child(provider_field)
+            .child(model_field)
+            .child(
+                div()
+                    .id("settings-save")
+                    .px_2p5()
+                    .py_1()
+                    .rounded(px(6.0))
+                    .bg(rgb(dark::INVERSE))
+                    .text_color(rgb(dark::ON_INVERSE))
+                    .text_size(px(11.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .cursor_pointer()
+                    .hover(|element| element.opacity(0.9))
+                    .tooltip(crate::tooltip::Tooltip::text("Add quick model"))
+                    .child("Add")
+                    .on_click(move |_ev, _window, cx| {
+                        view_for_save.update(cx, |state, cx| {
+                            let name = state.settings_new_name.trim().to_string();
+                            let provider = state.settings_new_provider.trim().to_string();
+                            let model = state.settings_new_model.trim().to_string();
+                            if name.is_empty() || provider.is_empty() || model.is_empty() {
+                                state.settings_feedback =
+                                    SharedString::new("name, provider and model are required");
+                                cx.notify();
+                                return;
+                            }
+                            match zerostack_core::config::load::save_quick_model(
+                                &name, &provider, &model, 0.0, 0.0,
+                            ) {
+                                Ok(()) => {
+                                    state.settings_feedback =
+                                        SharedString::new(format!("added '{name}'"));
+                                    state.settings_new_name = SharedString::new("");
+                                    state.settings_new_provider = SharedString::new("");
+                                    state.settings_new_model = SharedString::new("");
+                                    state.reload_settings_models();
+                                    state.reload_config_after_settings();
+                                }
+                                Err(e) => {
+                                    state.settings_feedback =
+                                        SharedString::new(format!("save failed: {e}"));
+                                }
+                            }
+                            cx.notify();
+                        });
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// Provider quick-switch inside the settings panel: the built-in
+    /// providers plus any custom ones from config. Clicking one sends
+    /// `SetProvider` (the engine rebuilds the agent with that provider).
+    fn render_provider_switch(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let view_entity = cx.entity().clone();
+        let current_provider = self.status_provider.clone();
+        let mut providers: Vec<String> = vec![
+            "anthropic".into(),
+            "openai".into(),
+            "gemini".into(),
+            "openrouter".into(),
+            "ollama".into(),
+        ];
+        let (cfg, _) = zerostack_core::config::load();
+        if let Some(custom) = cfg.custom_providers {
+            let mut names: Vec<String> = custom.keys().cloned().collect();
+            names.sort();
+            providers.extend(names);
+        }
+        providers.sort();
+        providers.dedup();
+
+        let rows: Vec<gpui::AnyElement> = providers
+            .iter()
+            .map(|provider| {
+                let is_current = current_provider.eq_ignore_ascii_case(provider);
+                let provider_owned = provider.clone();
+                let view_for_click = view_entity.clone();
+                div()
+                    .id(ElementId::Name(
+                        format!("settings-provider-{provider}").into(),
+                    ))
+                    .h(px(30.0))
+                    .px(px(10.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .bg(if is_current {
+                        rgba(dark::OVERLAY_STRONG)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .hover(|element| element.bg(rgba(dark::OVERLAY)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(11.5))
+                            .font_weight(if is_current {
+                                gpui::FontWeight::SEMIBOLD
+                            } else {
+                                gpui::FontWeight::NORMAL
+                            })
+                            .text_color(rgb(dark::TEXT))
+                            .child(provider_owned.clone()),
+                    )
+                    .when(is_current, |d| {
+                        d.child(div().text_color(rgb(dark::SUCCESS)).child("✓"))
+                    })
+                    .on_click(move |_ev, _window, cx| {
+                        view_for_click.update(cx, |state, cx| {
+                            let _ = state.bridge.send(UserAction::SetProvider {
+                                provider: CompactString::new(provider_owned.as_str()),
+                            });
+                            cx.notify();
+                        });
+                    })
+                    .into_any_element()
+            })
+            .collect();
+
+        div()
+            .w_full()
+            .flex_none()
+            .px(px(12.0))
+            .py(px(6.0))
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .border_b_1()
+            .border_color(rgba(dark::BORDER))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(rgb(dark::TEXT_TERTIARY))
+                    .child("PROVIDER"),
+            )
+            .child(div().flex().flex_row().flex_wrap().gap_1().children(rows))
+            .into_any_element()
+    }
+
+    /// General config toggles (from `zerostack_core::config::Config`), driven
+    /// by the settings panel's working copy. Every row mutates `settings_cfg`;
+    /// Save writes it back.
+    fn render_config_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let view_entity = cx.entity().clone();
+        let Some(cfg) = &self.settings_cfg else {
+            return div().into_any_element();
+        };
+
+        // (label, current value, setter)
+        let toggles: Vec<(&str, bool, fn(&mut zerostack_core::config::Config, bool))> = vec![
+            (
+                "Show reasoning",
+                cfg.show_reasoning.unwrap_or(true),
+                |c, v| c.show_reasoning = Some(v),
+            ),
+            (
+                "Show tool details",
+                cfg.show_tool_details.is_some(),
+                |c, v| {
+                    c.show_tool_details = if v { Some(Default::default()) } else { None };
+                },
+            ),
+            (
+                "Compact long sessions",
+                cfg.compact_enabled.unwrap_or(true),
+                |c, v| c.compact_enabled = Some(v),
+            ),
+            (
+                "Deny repeated reads",
+                cfg.deny_repeated_reads.unwrap_or(true),
+                |c, v| c.deny_repeated_reads = Some(v),
+            ),
+            (
+                "Show cost always",
+                cfg.show_cost_always.unwrap_or(false),
+                |c, v| c.show_cost_always = Some(v),
+            ),
+            (
+                "Always show welcome",
+                cfg.always_show_welcome.unwrap_or(false),
+                |c, v| c.always_show_welcome = Some(v),
+            ),
+            (
+                "Auto-update prompts",
+                cfg.auto_update_prompts.unwrap_or(false),
+                |c, v| c.auto_update_prompts = Some(v),
+            ),
+        ];
+
+        let rows: Vec<gpui::AnyElement> = toggles
+            .into_iter()
+            .map(|(label, enabled, setter)| {
+                let view = view_entity.clone();
+                Self::settings_toggle_row(label, enabled, view, move |state, v| {
+                    if let Some(cfg) = state.settings_cfg.as_mut() {
+                        setter(cfg, v);
+                    }
+                })
+            })
+            .collect();
+
+        div()
+            .w_full()
+            .flex_none()
+            .px(px(12.0))
+            .py(px(6.0))
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .border_b_1()
+            .border_color(rgba(dark::BORDER))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(rgb(dark::TEXT_TERTIARY))
+                    .child("GENERAL"),
+            )
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// LIMITS section: numeric tool/turn caps, edited via −/+ steppers.
+    fn render_limits_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let view_entity = cx.entity().clone();
+        let Some(cfg) = &self.settings_cfg else {
+            return div().into_any_element();
+        };
+
+        let view = view_entity.clone();
+        let max_tokens = cfg.max_tokens.unwrap_or(0);
+        let turns = cfg.max_agent_turns.unwrap_or(0) as u64;
+        let bash_lines = cfg.max_bash_output_lines.unwrap_or(0);
+        let read_lines = cfg.max_read_lines.unwrap_or(0);
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        rows.push(Self::settings_number_row(
+            "Max tokens per response",
+            max_tokens,
+            0,
+            1_000_000,
+            1000,
+            view.clone(),
+            |state, v| {
+                if let Some(cfg) = state.settings_cfg.as_mut() {
+                    cfg.max_tokens = (v > 0).then_some(v);
+                }
+            },
+        ));
+        rows.push(Self::settings_number_row(
+            "Max agent turns",
+            turns,
+            0,
+            1000,
+            1,
+            view.clone(),
+            |state, v| {
+                if let Some(cfg) = state.settings_cfg.as_mut() {
+                    cfg.max_agent_turns = (v > 0).then_some(v as usize);
+                }
+            },
+        ));
+        rows.push(Self::settings_number_row(
+            "Max bash output lines",
+            bash_lines,
+            0,
+            100_000,
+            100,
+            view.clone(),
+            |state, v| {
+                if let Some(cfg) = state.settings_cfg.as_mut() {
+                    cfg.max_bash_output_lines = (v > 0).then_some(v);
+                }
+            },
+        ));
+        rows.push(Self::settings_number_row(
+            "Max read lines",
+            read_lines,
+            0,
+            1_000_000,
+            100,
+            view,
+            |state, v| {
+                if let Some(cfg) = state.settings_cfg.as_mut() {
+                    cfg.max_read_lines = (v > 0).then_some(v);
+                }
+            },
+        ));
+        div()
+            .w_full()
+            .flex_none()
+            .px(px(12.0))
+            .py(px(6.0))
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .border_b_1()
+            .border_color(rgba(dark::BORDER))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(rgb(dark::TEXT_TERTIARY))
+                    .child("LIMITS"),
+            )
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// PERMISSION section: sandbox, default permission mode, yolo.
+    fn render_permission_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let view_entity = cx.entity().clone();
+        let Some(cfg) = &self.settings_cfg else {
+            return div().into_any_element();
+        };
+
+        let mode = cfg
+            .default_permission_mode
+            .clone()
+            .unwrap_or_else(|| "standard".to_string());
+        let modes: Vec<&str> = vec!["standard", "restrictive", "readonly", "guarded", "yolo"];
+        let sandbox_view = view_entity.clone();
+        let yolo_view = view_entity.clone();
+        let mode_view = view_entity.clone();
+
+        let sandbox_row = Self::settings_toggle_row(
+            "Sandbox commands",
+            cfg.sandbox.unwrap_or(false),
+            sandbox_view,
+            move |state, v| {
+                if let Some(cfg) = state.settings_cfg.as_mut() {
+                    cfg.sandbox = Some(v);
+                }
+            },
+        );
+        let yolo_row = Self::settings_toggle_row(
+            "YOLO (skip all prompts)",
+            cfg.yolo.unwrap_or(false),
+            yolo_view,
+            move |state, v| {
+                if let Some(cfg) = state.settings_cfg.as_mut() {
+                    cfg.yolo = Some(v);
+                }
+            },
+        );
+        let mode_row = Self::settings_choice_row(
+            "Default permission mode",
+            &modes,
+            &mode,
+            mode_view,
+            move |state, v| {
+                if let Some(cfg) = state.settings_cfg.as_mut() {
+                    cfg.default_permission_mode = Some(v);
+                }
+            },
+        );
+
+        div()
+            .w_full()
+            .flex_none()
+            .px(px(12.0))
+            .py(px(6.0))
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .border_b_1()
+            .border_color(rgba(dark::BORDER))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(rgb(dark::TEXT_TERTIARY))
+                    .child("PERMISSIONS"),
+            )
+            .child(sandbox_row)
+            .child(yolo_row)
+            .child(mode_row)
+            .into_any_element()
+    }
+
+    /// EDITOR section: shell / editor / edit system choices.
+    fn render_editor_section(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let view_entity = cx.entity().clone();
+        let Some(cfg) = &self.settings_cfg else {
+            return div().into_any_element();
+        };
+
+        let shell = cfg.shell.clone().unwrap_or_else(|| "default".to_string());
+        let shell_opts: Vec<&str> = vec!["default", "bash", "zsh", "fish"];
+        let edit_system = cfg
+            .edit_system
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "similarity".to_string());
+        let edit_opts: Vec<&str> = vec!["similarity", "hashedit"];
+        let shell_view = view_entity.clone();
+        let edit_view = view_entity.clone();
+
+        let shell_row =
+            Self::settings_choice_row("Shell", &shell_opts, &shell, shell_view, move |state, v| {
+                if let Some(cfg) = state.settings_cfg.as_mut() {
+                    cfg.shell = if v == "default" { None } else { Some(v) };
+                }
+            });
+        let edit_row = Self::settings_choice_row(
+            "Edit system",
+            &edit_opts,
+            &edit_system,
+            edit_view,
+            move |state, v| {
+                if let Some(cfg) = state.settings_cfg.as_mut() {
+                    cfg.edit_system = Some(if v == "hashedit" {
+                        zerostack_core::config::types::EditSystem::Hashedit
+                    } else {
+                        zerostack_core::config::types::EditSystem::Similarity
+                    });
+                }
+            },
+        );
+
+        div()
+            .w_full()
+            .flex_none()
+            .px(px(12.0))
+            .py(px(6.0))
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .border_b_1()
+            .border_color(rgba(dark::BORDER))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(rgb(dark::TEXT_TERTIARY))
+                    .child("EDITOR"),
+            )
+            .child(shell_row)
+            .child(edit_row)
+            .into_any_element()
+    }
+
+    /// Save button + feedback row pinned at the bottom of the settings panel.
+    fn render_settings_save(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let view_entity = cx.entity().clone();
+        let feedback = self.settings_feedback.clone();
+        div()
+            .w_full()
+            .flex_none()
+            .px(px(12.0))
+            .py(px(8.0))
+            .flex()
+            .items_center()
+            .gap_2()
+            .border_b_1()
+            .border_color(rgba(dark::BORDER))
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(10.5))
+                    .text_color(if feedback.is_empty() {
+                        rgb(dark::TEXT_TERTIARY)
+                    } else if feedback.contains("failed") {
+                        rgb(dark::ERROR)
+                    } else {
+                        rgb(dark::SUCCESS)
+                    })
+                    .child(if feedback.is_empty() {
+                        SharedString::from("changes apply after Save")
+                    } else {
+                        feedback.clone()
+                    }),
+            )
+            .child(
+                div()
+                    .id("settings-save-all")
+                    .px_3()
+                    .py_1p5()
+                    .rounded(px(7.0))
+                    .bg(rgb(dark::INVERSE))
+                    .text_color(rgb(dark::ON_INVERSE))
+                    .text_size(px(11.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .cursor_pointer()
+                    .hover(|element| element.opacity(0.9))
+                    .tooltip(crate::tooltip::Tooltip::text("Save all settings"))
+                    .child("Save")
+                    .on_click({
+                        let view_entity = view_entity.clone();
+                        move |_ev, _window, cx| {
+                            view_entity.update(cx, |state, cx| {
+                                state.save_settings();
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// Reload the quick-model snapshot from disk after a settings change.
+    fn reload_settings_models(&mut self) {
+        let (cfg, _) = zerostack_core::config::load();
+        self.settings_models = cfg
+            .quick_models
+            .as_ref()
+            .map(|qm| qm.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        self.settings_models.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
+    /// Tell the engine to reload config so settings changes take effect.
+    fn reload_config_after_settings(&self) {
+        let _ = self.bridge.send(UserAction::ReloadConfig);
+    }
+
+    /// Open the settings panel and load current quick models.
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_visible = true;
+        self.reload_settings_models();
+        let (cfg, _) = zerostack_core::config::load();
+        self.settings_cfg = Some(cfg);
+        self.settings_feedback = SharedString::new("");
+        cx.notify();
+    }
+
+    /// Save the settings panel's working config copy back to disk and ask the
+    /// engine to reload it.
+    fn save_settings(&mut self) {
+        let Some(cfg) = self.settings_cfg.take() else {
+            return;
+        };
+        match zerostack_core::config::load::save_config(&cfg) {
+            Ok(()) => {
+                self.settings_feedback = SharedString::new("saved — reloading…");
+                let _ = self.bridge.send(UserAction::ReloadConfig);
+            }
+            Err(e) => {
+                self.settings_feedback = SharedString::new(format!("save failed: {e}"));
+                self.settings_cfg = Some(cfg);
+            }
+        }
+    }
+
+    /// A numeric-adjust row: `−` / `+` buttons around the current value.
+    /// `min`/`max` clamp the result; the setter stores it in the working copy.
+    fn settings_number_row(
+        label: &str,
+        value: u64,
+        min: u64,
+        max: u64,
+        step: u64,
+        view_entity: gpui::Entity<ShellState>,
+        on_change: impl Fn(&mut ShellState, u64) + 'static,
+    ) -> gpui::AnyElement {
+        let label_owned = label.to_string();
+        let current = value.to_string();
+        let on_change = std::rc::Rc::new(on_change);
+        let minus = std::rc::Rc::clone(&on_change);
+        let plus = std::rc::Rc::clone(&on_change);
+        let minus_next = value.saturating_sub(step).max(min);
+        let plus_next = value.saturating_add(step).min(max);
+        div()
+            .id(ElementId::Name(format!("settings-number-{label}").into()))
+            .h(px(30.0))
+            .px(px(10.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .truncate()
+                    .text_size(px(11.5))
+                    .text_color(rgb(dark::TEXT))
+                    .child(label_owned),
+            )
+            .child(settings_step_btn(
+                "-",
+                minus_next,
+                view_entity.clone(),
+                move |s, v| minus(s, v),
+            ))
+            .child(
+                div()
+                    .min_w(px(40.0))
+                    .text_center()
+                    .text_size(px(11.5))
+                    .text_color(rgb(dark::TEXT_SECONDARY))
+                    .child(current),
+            )
+            .child(settings_step_btn(
+                "+",
+                plus_next,
+                view_entity.clone(),
+                move |s, v| plus(s, v),
+            ))
+            .into_any_element()
+    }
+
+    /// A choice row: clicking cycles through the given options (used for
+    /// permission mode / edit system pickers).
+    fn settings_choice_row(
+        label: &str,
+        options: &[&str],
+        current: &str,
+        view_entity: gpui::Entity<ShellState>,
+        on_change: impl Fn(&mut ShellState, String) + 'static,
+    ) -> gpui::AnyElement {
+        let label_owned = label.to_string();
+        let options_owned: Vec<String> = options.iter().map(|o| o.to_string()).collect();
+        let current_owned = current.to_string();
+        div()
+            .id(ElementId::Name(format!("settings-choice-{label}").into()))
+            .h(px(30.0))
+            .px(px(10.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .hover(|element| element.bg(rgba(dark::OVERLAY)))
+            .tooltip(crate::tooltip::Tooltip::text(format!(
+                "Click to change: {}",
+                options_owned.join(" / ")
+            )))
+            .child(
+                div()
+                    .flex_1()
+                    .truncate()
+                    .text_size(px(11.5))
+                    .text_color(rgb(dark::TEXT))
+                    .child(label_owned),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(rgb(dark::TEXT_SECONDARY))
+                    .child(current_owned.clone()),
+            )
+            .child(div().text_color(rgb(dark::TEXT_GHOST)).child("▸"))
+            .on_click(move |_ev, _window, cx| {
+                view_entity.update(cx, |state, cx| {
+                    let idx = options_owned
+                        .iter()
+                        .position(|o| o == &current_owned)
+                        .unwrap_or(0);
+                    let next = &options_owned[(idx + 1) % options_owned.len()];
+                    on_change(state, next.clone());
+                    cx.notify();
+                });
+            })
+            .into_any_element()
+    }
+
+    /// A boolean toggle row for a config flag: shows the flag name and its
+    /// current on/off, clicking flips it in the working copy.
+    fn settings_toggle_row(
+        label: &str,
+        enabled: bool,
+        view_entity: gpui::Entity<ShellState>,
+        on_toggle: impl Fn(&mut ShellState, bool) + 'static,
+    ) -> gpui::AnyElement {
+        let label_owned = label.to_string();
+        div()
+            .id(ElementId::Name(format!("settings-toggle-{label}").into()))
+            .h(px(30.0))
+            .px(px(10.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .hover(|element| element.bg(rgba(dark::OVERLAY)))
+            .child(
+                div()
+                    .flex_1()
+                    .truncate()
+                    .text_size(px(11.5))
+                    .text_color(rgb(dark::TEXT))
+                    .child(label_owned.clone()),
+            )
+            .child(
+                div()
+                    .w(px(30.0))
+                    .h(px(16.0))
+                    .rounded_full()
+                    .bg(if enabled {
+                        rgb(dark::ACCENT)
+                    } else {
+                        rgba(dark::OVERLAY_STRONG)
+                    })
+                    .flex()
+                    .items_center()
+                    .px(px(2.0))
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(12.0))
+                            .h(px(12.0))
+                            .rounded_full()
+                            .bg(rgb(dark::APP_BG)),
+                    ),
+            )
+            .on_click(move |_ev, _window, cx| {
+                view_entity.update(cx, |state, cx| {
+                    on_toggle(state, !enabled);
+                    cx.notify();
+                });
+            })
             .into_any_element()
     }
 
@@ -3007,84 +5133,204 @@ impl ShellState {
     /// ignored `.git`/`target`/etc. directories keeps the surface short;
     /// users needing the long tail route through `/add <path>`.
     fn render_file_picker(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let count = self.cwd_files.len();
-        if count == 0 {
-            return div().into_any_element();
-        }
-        let file_picker_scroll = self.file_picker_scroll.clone();
-        let current = self
-            .file_picker_selected
-            .min(self.cwd_files.len().saturating_sub(1));
-        let entries: Vec<String> = self.cwd_files.clone();
+        let entries: Vec<String> = self.filtered_cwd_files();
         let view_entity = cx.entity().clone();
+        let query = self.file_picker_query.clone();
+        let highlight = self
+            .file_picker_selected
+            .min(entries.len().saturating_sub(1));
+
+        // Search field, mirroring the model picker's.
+        let search_box = div()
+            .id("file-picker-search")
+            .track_focus(&self.file_picker_search_focus)
+            .focus_visible(|d| d.border_color(rgb(dark::ACCENT)))
+            .h(px(34.0))
+            .px(px(10.0))
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(rgba(dark::BORDER))
+            .bg(rgb(dark::RAISED))
+            .flex()
+            .items_center()
+            .gap_2()
+            .cursor_text()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _ev, window, cx| {
+                    this.file_picker_search_focus.focus(window, cx);
+                    cx.notify();
+                }),
+            )
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+                let key = ev.keystroke.key.as_str();
+                let mods = &ev.keystroke.modifiers;
+                if this.handle_file_picker_key(key, mods) {
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if key == "backspace" {
+                    if mods.platform || mods.control {
+                        this.file_picker_query = SharedString::new("");
+                    } else {
+                        let mut updated = this.file_picker_query.to_string();
+                        updated.pop();
+                        this.file_picker_query = SharedString::new(updated);
+                    }
+                    this.file_picker_selected = 0;
+                } else if let Some(chars) = ev.keystroke.key_char.as_ref() {
+                    if !chars.chars().all(|ch| ch.is_control()) {
+                        let mut updated = this.file_picker_query.to_string();
+                        updated.push_str(chars);
+                        this.file_picker_query = SharedString::new(updated);
+                    }
+                    this.file_picker_selected = 0;
+                }
+                cx.notify();
+                cx.stop_propagation();
+            }))
+            .child(div().text_color(rgb(dark::TEXT_SECONDARY)).child("⌕"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_color(if query.is_empty() {
+                        rgb(dark::TEXT_GHOST)
+                    } else {
+                        rgb(dark::TEXT)
+                    })
+                    .child(if query.is_empty() {
+                        SharedString::from("Search files…")
+                    } else {
+                        query.clone()
+                    }),
+            );
+
+        let mut rows: Vec<gpui::AnyElement> = entries
+            .iter()
+            .enumerate()
+            .map(|(idx, path)| {
+                let is_highlighted = idx == highlight;
+                let view_for_click = view_entity.clone();
+                let path_for_click = path.clone();
+                let display = path_to_display(path);
+                div()
+                    .id(ElementId::Name(format!("file-row-{idx}").into()))
+                    .h(px(48.0))
+                    .px(px(12.0))
+                    .rounded(px(9.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(if is_highlighted {
+                        rgb(dark::ACCENT)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .bg(if is_highlighted {
+                        rgba(dark::OVERLAY)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .hover(|element| element.bg(rgba(dark::OVERLAY)))
+                    .active(|element| element.opacity(0.85))
+                    .child(div().text_color(rgb(dark::TEXT_TERTIARY)).child("▧"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .text_color(rgb(dark::TEXT))
+                            .child(display),
+                    )
+                    .on_click(move |_ev, _window, cx| {
+                        view_for_click.update(cx, |state, cx| {
+                            let _ = state.bridge.send(UserAction::AddFile {
+                                path: CompactString::new(path_for_click.as_str()),
+                            });
+                            state.file_picker_visible = false;
+                            state.file_picker_query = SharedString::new("");
+                            cx.notify();
+                        });
+                    })
+                    .into_any_element()
+            })
+            .collect();
+
+        if rows.is_empty() {
+            rows.push(
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.5))
+                    .text_color(rgb(dark::TEXT_GHOST))
+                    .child("No files found")
+                    .into_any_element(),
+            );
+        }
+
+        // Panel: same raised-card language as the model picker. Fixed height
+        // so the inner list scrolls.
         div()
             .flex()
             .flex_col()
-            .gap_0()
             .mx_5()
             .mb_1()
-            .p_1()
-            .rounded_md()
+            .w(px(360.0))
+            .h(px(340.0))
+            .relative()
+            .rounded(px(13.0))
+            .overflow_hidden()
             .border_1()
-            .border_color(rgb(dark::CHIP_BORDER))
-            .bg(rgb(dark::BUTTON_BG))
-            .max_h(px(220.0))
-            .text_sm()
-            .child(label_hint("file picker"))
+            .border_color(rgba(dark::BORDER_STRONG))
+            .bg(rgb(dark::RAISED))
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down_out({
+                let view_entity = view_entity.clone();
+                move |_ev, _window, cx| {
+                    view_entity.update(cx, |state, cx| {
+                        state.file_picker_visible = false;
+                        state.file_picker_query = SharedString::new("");
+                        cx.notify();
+                    });
+                }
+            })
             .child(
-                div().h(px(180.)).child(
-                    uniform_list(
-                        "file-picker-list",
-                        count,
-                        cx.processor(move |_this, range: std::ops::Range<usize>, _window, _cx| {
-                            range
-                                .map(|idx| {
-                                    let path = &entries[idx];
-                                    let view_for_click = view_entity.clone();
-                                    let path_for_click = path.clone();
-                                    div()
-                                        .id(("file-picker-row", idx))
-                                        .flex()
-                                        .gap_3()
-                                        .px_2()
-                                        .py_1p5()
-                                        .rounded_sm()
-                                        .bg(if idx == current {
-                                            rgb(dark::BUTTON_HOVER)
-                                        } else {
-                                            rgba(0x00000000)
-                                        })
-                                        .when(idx == current, |d| {
-                                            d.border_l_2().border_color(rgb(dark::ACCENT))
-                                        })
-                                        .child({
-                                            let display = path_to_display(path);
-                                            div()
-                                                .text_color(rgb(dark::TEXT))
-                                                .text_xs()
-                                                .min_w(px(96.0))
-                                                .child(display)
-                                        })
-                                        .child(div().flex_1())
-                                        .on_click(move |_ev, _window, cx| {
-                                            view_for_click.update(cx, |state, cx| {
-                                                let _ = state.bridge.send(UserAction::AddFile {
-                                                    path: CompactString::new(
-                                                        path_for_click.as_str(),
-                                                    ),
-                                                });
-                                                state.file_picker_visible = false;
-                                                cx.notify();
-                                            });
-                                        })
-                                })
-                                .collect()
-                        }),
-                    )
-                    .track_scroll(&file_picker_scroll)
-                    .h_full(),
-                ),
+                div()
+                    .w_full()
+                    .h(px(52.0))
+                    .px(px(12.0))
+                    .pt(px(10.0))
+                    .pb(px(8.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .child(search_box),
             )
+            .child(
+                div()
+                    .id("file-picker-list")
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.file_picker_scroll)
+                    .p(px(9.0))
+                    .flex()
+                    .flex_col()
+                    .children(rows),
+            )
+            .child(crate::scrollbar::vertical(
+                &self.file_picker_scroll,
+                &self.file_picker_scrollbar,
+            ))
             .into_any_element()
     }
 
@@ -3102,19 +5348,19 @@ impl ShellState {
         div()
             .flex()
             .flex_col()
-            .gap_1()
+            .gap_0()
             .mx_5()
             .mt_2()
-            .p_2()
-            .rounded_md()
+            .rounded(px(13.0))
+            .overflow_hidden()
             .border_1()
-            .border_color(rgb(dark::BORDER))
-            .bg(rgb(dark::BUTTON_BG))
-            .max_h(px(200.0))
-            .overflow_y_hidden()
+            .border_color(rgba(dark::BORDER_STRONG))
+            .bg(rgb(dark::RAISED))
+            .shadow_lg()
+            .max_h(px(300.0))
             .text_sm()
             .child(
-                div().h(px(180.)).child(
+                div().h(px(250.)).child(
                     uniform_list(
                         "slash-cmd-list",
                         row_count,
@@ -3139,26 +5385,33 @@ impl ShellState {
                                     let name_for_click = name.clone();
                                     div()
                                         .id(("slash-cmd", idx))
+                                        .h(px(38.0))
+                                        .px(px(11.0))
+                                        .mx(px(4.0))
+                                        .my(px(1.0))
+                                        .rounded(px(8.0))
                                         .flex()
+                                        .items_center()
                                         .gap_3()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .bg(if idx == current_selected {
-                                            rgb(dark::BUTTON_HOVER)
+                                        .border_1()
+                                        .border_color(if idx == current_selected {
+                                            rgb(dark::ACCENT)
                                         } else {
                                             rgba(0x00000000)
                                         })
-                                        .border_1()
-                                        .when(idx == current_selected, |d| {
-                                            d.border_color(rgb(dark::ACCENT))
+                                        .bg(if idx == current_selected {
+                                            rgba(dark::OVERLAY)
+                                        } else {
+                                            rgba(0x00000000)
                                         })
-                                        .when(idx != current_selected, |d| {
-                                            d.border_color(rgba(0x00000000))
-                                        })
+                                        .hover(|element| element.bg(rgba(dark::OVERLAY)))
                                         .child(
                                             div()
-                                                .text_color(rgb(dark::TEXT))
+                                                .text_color(if idx == current_selected {
+                                                    rgb(dark::ACCENT)
+                                                } else {
+                                                    rgb(dark::TEXT)
+                                                })
                                                 .text_sm()
                                                 .min_w(px(80.0))
                                                 .child(name),
@@ -3166,14 +5419,14 @@ impl ShellState {
                                         .child(div().flex_1())
                                         .child(
                                             div()
-                                                .text_color(rgb(dark::TEXT_MUTED))
+                                                .text_color(rgb(dark::TEXT_TERTIARY))
                                                 .text_sm()
                                                 .child(desc),
                                         )
                                         .on_click(move |_ev, _window, cx| {
                                             view_for_click.update(cx, |state, cx| {
                                                 state.input_text =
-                                                    SharedString::new(name_for_click.to_string());
+                                                    SharedString::new(&name_for_click);
                                                 state.input_cursor = name_for_click.chars().count();
                                                 state.slash_popup_visible = false;
                                                 cx.notify();
@@ -3189,37 +5442,6 @@ impl ShellState {
             )
             .into_any_element()
     }
-}
-
-/// Render a single sidebar pin button. The pin-row layout has a
-/// uniform padding/border style with an optional leading icon glyph;
-/// only the click handler and label differ between rows. Splitting
-/// Render a small pill that just carries a label/symbol (`+` for the
-/// leading action chip, provider/model metadata, mode, MCP status,
-/// help, etc.). The optional trailing glyph (`▾` on the mode chip)
-/// hints at "click to change" without implying a real menu today — the
-/// chip clicks no-op for now, leaving room to wire mode pickers later.
-fn input_chip_meta(label: &str, trailing: Option<&'static str>) -> gpui::AnyElement {
-    div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .px_2p5()
-        .py_1()
-        .rounded_md()
-        .bg(rgb(dark::CHIP_BG))
-        .border_1()
-        .border_color(rgb(dark::CHIP_BORDER))
-        .text_color(rgb(dark::TEXT_SECONDARY))
-        .child(label.to_string())
-        .when(trailing.is_some(), |d| {
-            d.child(
-                div()
-                    .text_color(rgb(dark::ICON_MUTED))
-                    .child(trailing.unwrap_or("")),
-            )
-        })
-        .into_any_element()
 }
 
 /// Render the leading `+` chip on the input row. Mirrors the
@@ -3255,45 +5477,80 @@ fn input_chip_status(label: &str, is_thinking: bool) -> gpui::AnyElement {
         .into_any_element()
 }
 
-/// Trailing pill on the input row: shows a faint `↗` arrow when
-/// the input box has content (click-to-submit), or a muted `↗`
-/// when empty (visually still a chip but inert). The click
-/// handler braches into the same `submit_input` path
-/// `UserAction::Send`/Enter uses, so keyboard-driven submitting
-/// and click-driven submitting don't diverge.
+/// Trailing pill on the composer controls row (Waku-style): a 26×26
+/// `rounded_full` button. Idle with a draft → light `inverse` fill with a dark
+/// up-arrow (click submits); idle with an empty input → muted ghost arrow;
+/// busy → a stop glyph that cancels the running turn (red wash on hover).
 fn input_chip_send(
     has_input: bool,
     is_thinking: bool,
+    escape_stop_armed: bool,
     view_entity: gpui::Entity<ShellState>,
 ) -> gpui::AnyElement {
-    let active = has_input && !is_thinking;
-    let (bg, fg) = if active {
-        (rgb(dark::ACCENT), rgb(dark::APP_BG))
+    let has_draft = has_input && !is_thinking;
+    // Armed stop: the button literally reads "Esc" as a confirm hint.
+    let (bg, fg, glyph) = if is_thinking && escape_stop_armed {
+        (
+            rgba(dark::DANGER_SOFT),
+            rgb(dark::TEXT),
+            SharedString::from("Esc"),
+        )
+    } else if is_thinking {
+        (
+            rgba(dark::OVERLAY_STRONG),
+            rgb(dark::TEXT),
+            SharedString::from("■"),
+        )
+    } else if has_draft {
+        (
+            rgb(dark::INVERSE),
+            rgb(dark::ON_INVERSE),
+            SharedString::from("↑"),
+        )
     } else {
-        (rgb(dark::CHIP_BG), rgb(dark::ICON_MUTED))
+        (
+            rgba(dark::OVERLAY_STRONG),
+            rgb(dark::TEXT_GHOST),
+            SharedString::from("↑"),
+        )
     };
-    let border = if active {
-        rgb(dark::ACCENT)
-    } else {
-        rgb(dark::CHIP_BORDER)
-    };
-    let chip = div()
+    let mut chip = div()
         .id("input-chip-send")
         .flex()
         .items_center()
         .justify_center()
-        .w(px(28.0))
-        .h(px(28.0))
-        .rounded_md()
+        .w(px(26.0))
+        .h(px(26.0))
+        .rounded_full()
         .bg(bg)
-        .border_1()
-        .border_color(border)
-        .text_sm()
-        .font_weight(gpui::FontWeight::BOLD)
+        .text_size(px(11.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(fg)
-        .child("↗");
-    if active {
-        chip.cursor_pointer()
+        .tooltip(crate::tooltip::Tooltip::text(if is_thinking {
+            "Stop"
+        } else {
+            "Send (Enter)"
+        }))
+        .child(glyph);
+    if is_thinking {
+        // Stop: cancels the stream. Red-tinted wash on hover.
+        chip = chip
+            .cursor_pointer()
+            .hover(|element| element.bg(rgba(dark::DANGER_SOFT)))
+            .on_click({
+                let view_entity = view_entity.clone();
+                move |_ev, _window, cx| {
+                    view_entity.update(cx, |state, cx| {
+                        let _ = state.bridge.send(UserAction::CancelStream);
+                        cx.notify();
+                    });
+                }
+            });
+    } else if has_draft {
+        chip = chip
+            .cursor_pointer()
+            .hover(|element| element.opacity(0.9))
+            .active(|element| element.opacity(0.8))
             .on_click({
                 let view_entity = view_entity.clone();
                 move |_ev, _window, cx| {
@@ -3301,11 +5558,9 @@ fn input_chip_send(
                         state.submit_input(cx);
                     });
                 }
-            })
-            .into_any_element()
-    } else {
-        chip.into_any_element()
+            });
     }
+    chip.into_any_element()
 }
 
 /// Render a small pill chip that opens (or dismisses) one of the input-bar
@@ -3390,6 +5645,189 @@ fn load_quick_models() -> Vec<QuickModelEntry> {
     entries
 }
 
+impl ShellState {
+    /// Keep the highlighted model row in view. Fixed 58px rows make the
+    /// target offset a simple multiplication; the scroll handle clamps it.
+    fn model_picker_scroll_to_selected(&mut self) {
+        let row = self.model_picker_selected as f32 * 58.0;
+        let viewport = self
+            .model_picker_scroll
+            .bounds()
+            .size
+            .height
+            .as_f32()
+            .max(1.0);
+        let max = self.model_picker_scroll.max_offset().y.as_f32().max(0.0);
+        let y = (row - viewport / 2.0).clamp(0.0, max);
+        self.model_picker_scroll.set_offset(gpui::Point {
+            x: px(0.0),
+            y: px(y),
+        });
+    }
+
+    /// Same for the file picker (48px rows).
+    fn file_picker_scroll_to_selected(&mut self) {
+        let row = self.file_picker_selected as f32 * 48.0;
+        let viewport = self
+            .file_picker_scroll
+            .bounds()
+            .size
+            .height
+            .as_f32()
+            .max(1.0);
+        let max = self.file_picker_scroll.max_offset().y.as_f32().max(0.0);
+        let y = (row - viewport / 2.0).clamp(0.0, max);
+        self.file_picker_scroll.set_offset(gpui::Point {
+            x: px(0.0),
+            y: px(y),
+        });
+    }
+
+    /// Models matching the picker's free-text filter, case-insensitive, over
+    /// name / provider / `provider/model`. Empty query returns everything.
+    /// Ask the engine for fresh MCP server status and mark the request as
+    /// in-flight so the panel can show a spinner.
+    fn refresh_mcp(&mut self, cx: &mut Context<Self>) {
+        if !self.bridge.send(UserAction::QueryMcp) {
+            self.last_error = Some(SharedString::new("engine is offline"));
+            return;
+        }
+        self.mcp_refreshing = true;
+        cx.notify();
+    }
+
+    fn filtered_quick_models(&self) -> Vec<QuickModelEntry> {
+        let query = self.model_picker_query.trim();
+        if query.is_empty() {
+            return self.quick_models.clone();
+        }
+        let query = query.to_ascii_lowercase();
+        self.quick_models
+            .iter()
+            .filter(|entry| {
+                entry.name.to_ascii_lowercase().contains(&query)
+                    || entry.provider.to_ascii_lowercase().contains(&query)
+                    || entry.model_arg.to_ascii_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Shared keyboard navigation for the model picker. Returns `true` when
+    /// the key was consumed (caller should stop propagation). Used by both
+    /// the input-box listener and the search field's own listener so the
+    /// arrow/enter/esc keys behave identically whether the search box or the
+    /// composer holds focus.
+    fn handle_model_picker_key(&mut self, key: &str, mods: &gpui::Modifiers) -> bool {
+        match key {
+            "up" => {
+                let len = self.filtered_quick_models().len();
+                if len > 0 {
+                    let cur = self.model_picker_selected as isize - 1;
+                    self.model_picker_selected = cur.rem_euclid(len as isize) as usize;
+                    self.model_picker_scroll_to_selected();
+                }
+                true
+            }
+            "down" => {
+                let len = self.filtered_quick_models().len();
+                if len > 0 {
+                    let cur = self.model_picker_selected as isize + 1;
+                    self.model_picker_selected = cur.rem_euclid(len as isize) as usize;
+                    self.model_picker_scroll_to_selected();
+                }
+                true
+            }
+            "enter" => {
+                let matches = self.filtered_quick_models();
+                if let Some(entry) = matches.get(self.model_picker_selected).cloned() {
+                    let _ = self.bridge.send(UserAction::SetModel {
+                        model: CompactString::new(entry.model_arg.as_str()),
+                    });
+                    self.model_picker_visible = false;
+                    self.model_picker_query = SharedString::new("");
+                }
+                true
+            }
+            "escape" => {
+                self.model_picker_visible = false;
+                self.model_picker_query = SharedString::new("");
+                true
+            }
+            "backspace" if mods.platform || mods.control => {
+                self.model_picker_query = SharedString::new("");
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Files matching the picker's free-text filter, case-insensitive
+    /// substring over the display path. Empty query returns everything.
+    fn filtered_cwd_files(&self) -> Vec<String> {
+        let query = self.file_picker_query.trim();
+        if query.is_empty() {
+            return self.cwd_files.clone();
+        }
+        let query = query.to_ascii_lowercase();
+        self.cwd_files
+            .iter()
+            .filter(|path| {
+                path.to_ascii_lowercase().contains(&query)
+                    || path_to_display(path).to_ascii_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Shared keyboard navigation for the file picker. Returns `true` when
+    /// the key was consumed (caller should stop propagation). Mirrors
+    /// [`ShellState::handle_model_picker_key`].
+    fn handle_file_picker_key(&mut self, key: &str, mods: &gpui::Modifiers) -> bool {
+        match key {
+            "up" => {
+                let len = self.filtered_cwd_files().len();
+                if len > 0 {
+                    let cur = self.file_picker_selected as isize - 1;
+                    self.file_picker_selected = cur.rem_euclid(len as isize) as usize;
+                    self.file_picker_scroll_to_selected();
+                }
+                true
+            }
+            "down" => {
+                let len = self.filtered_cwd_files().len();
+                if len > 0 {
+                    let cur = self.file_picker_selected as isize + 1;
+                    self.file_picker_selected = cur.rem_euclid(len as isize) as usize;
+                    self.file_picker_scroll_to_selected();
+                }
+                true
+            }
+            "enter" => {
+                let matches = self.filtered_cwd_files();
+                if let Some(path) = matches.get(self.file_picker_selected).cloned() {
+                    let _ = self.bridge.send(UserAction::AddFile {
+                        path: CompactString::new(path.as_str()),
+                    });
+                    self.file_picker_visible = false;
+                    self.file_picker_query = SharedString::new("");
+                }
+                true
+            }
+            "escape" => {
+                self.file_picker_visible = false;
+                self.file_picker_query = SharedString::new("");
+                true
+            }
+            "backspace" if mods.platform || mods.control => {
+                self.file_picker_query = SharedString::new("");
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 /// List of files in the current working directory. Refreshed once at
 /// startup. We deliberately cap to a small number and skip common
 /// noise directories (`.git`, hidden dirs) — the picker is a quick
@@ -3424,18 +5862,6 @@ fn load_cwd_files() -> Vec<String> {
     }
     names.sort();
     names
-}
-
-/// Compact label header for the picker popups (e.g. `model`, `file picker`).
-/// Kept tiny and muted so it doesn't compete with the actual list rows.
-fn label_hint(text: &'static str) -> gpui::AnyElement {
-    div()
-        .text_xs()
-        .px_2()
-        .py_1()
-        .text_color(rgb(dark::TEXT_MUTED))
-        .child(text)
-        .into_any_element()
 }
 
 /// Render a path string for the file picker: truncate the directory prefix
@@ -3610,6 +6036,43 @@ impl EntityInputHandler for ShellState {
     }
 }
 
+/// Open right-click context menu for a message row.
+#[derive(Clone, Debug)]
+struct MsgMenuState {
+    msg_idx: usize,
+    /// Window-space position for the menu's top-left corner.
+    x: f32,
+    y: f32,
+}
+
+/// One flattened row of the chat transcript. The renderer builds these from
+/// the raw message list so activity runs, reasoning folds and turn folds can
+/// be interleaved with plain messages.
+#[derive(Clone, Debug)]
+enum ChatRow {
+    User(usize),
+    /// (index, is_streaming)
+    Assistant(usize, bool),
+    System(usize),
+    Permission(usize),
+    /// Plain tool message without structured metadata.
+    ToolText(usize),
+    /// Reasoning fold at index.
+    Reasoning(usize),
+    /// Consecutive structured tool messages [start, end).
+    ToolRun {
+        start: usize,
+        end: usize,
+    },
+    /// "Worked for Ns" divider; `answer_idx` is the settled answer below it.
+    TurnFold {
+        answer_idx: usize,
+        elapsed: f32,
+    },
+    /// Pinned "Working for Ns" row while the agent is busy.
+    Working(f32),
+}
+
 /// An invisible element that owns an `EntityInputHandler` registration for the
 /// duration of one paint pass. Sits next to the visual input-box div so that
 /// when our focus handle is active, gpui routes IME callbacks to our handler.
@@ -3681,13 +6144,853 @@ impl Element for ImeInputElement {
     }
 }
 
-fn render_message(msg: &ChatMessage, view_entity: gpui::Entity<ShellState>, is_streaming: bool) -> gpui::AnyElement {
-    match msg.role {
-        Role::Reasoning => render_reasoning_card(msg),
-        Role::Permission => render_permission_card(msg, view_entity),
-        Role::Tool if msg.tool_meta().is_some() => render_tool_card(msg, view_entity.clone()),
-        _ => render_message_text(msg, is_streaming),
+/// Humanized time for the hover footer: "9:05 AM" today, "Yesterday 5:00 PM"
+/// otherwise, "May 12, 1:12 PM" within the same year, "Aug 4 2024, 11:00 AM"
+/// beyond that.
+fn format_message_time(when: std::time::Instant) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let then = now.saturating_sub(when.elapsed().as_secs() as i64);
+    format_unix_time(then, now)
+}
+
+/// Format a unix timestamp relative to `now` (both in seconds).
+fn format_unix_time(then: i64, now: i64) -> String {
+    // Twelve-hour clock helper.
+    fn hm(secs_of_day: i64) -> String {
+        let h24 = ((secs_of_day / 3600) % 24 + 24) % 24;
+        let m = (secs_of_day / 60) % 60;
+        let period = if h24 >= 12 { "PM" } else { "AM" };
+        let h12 = if h24 % 12 == 0 { 12 } else { h24 % 12 };
+        format!("{h12}:{m:02} {period}")
     }
+
+    const DAY: i64 = 86400;
+    let (now_day, _now_tod) = (now.div_euclid(DAY), now.rem_euclid(DAY));
+    let (then_day, then_tod) = (then.div_euclid(DAY), then.rem_euclid(DAY));
+    if then_day == now_day {
+        return hm(then_tod);
+    }
+    // "Yesterday" for calendar-day differences, weekday within 6 days, else date.
+    let days = now_day - then_day;
+    if days == 1 {
+        return format!("Yesterday {}", hm(then_tod));
+    }
+    if days <= 7 && days > 1 {
+        let weekday = [
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+        ];
+        // Day 0 = Thursday 1970-01-01.
+        let idx = (then_day.rem_euclid(7) as usize + 3) % 7;
+        return format!("{} {}", weekday[idx], hm(then_tod));
+    }
+    // Month / day (year when the date differs from the current year).
+    let months = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    // Approximate calendar from day count (good enough for footers; drift of a
+    // few days near year boundaries is acceptable for a hover timestamp).
+    let mut year = 1970i64;
+    let mut rem = then_day;
+    let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    loop {
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let days_in_year = if leap { 366 } else { 365 };
+        if rem < days_in_year {
+            break;
+        }
+        rem -= days_in_year;
+        year += 1;
+    }
+    let mut month = 0usize;
+    let mut day_of_month = rem;
+    for (i, md) in month_days.iter().enumerate() {
+        let days_in_month = if i == 1 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+            29
+        } else {
+            *md
+        };
+        if day_of_month < days_in_month {
+            month = i;
+            break;
+        }
+        day_of_month -= days_in_month;
+    }
+    let cur_year = {
+        let mut y = 1970i64;
+        let mut r = now_day;
+        loop {
+            let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+            let d = if leap { 366 } else { 365 };
+            if r < d {
+                break;
+            }
+            r -= d;
+            y += 1;
+        }
+        y
+    };
+    let date = format!(
+        "{} {}{}",
+        months[month],
+        day_of_month + 1,
+        ordinal_suffix(day_of_month + 1)
+    );
+    if year == cur_year {
+        format!("{date}, {}", hm(then_tod))
+    } else {
+        format!("{date} {year}, {}", hm(then_tod))
+    }
+}
+
+fn ordinal_suffix(n: i64) -> &'static str {
+    match n % 100 {
+        11..=13 => "th",
+        _ => match n % 10 {
+            1 => "st",
+            2 => "nd",
+            3 => "rd",
+            _ => "th",
+        },
+    }
+}
+
+/// Wrap a message row so a right-click opens the context menu at the pointer.
+fn wrap_msg_menu(
+    inner: gpui::AnyElement,
+    msg_idx: usize,
+    view_entity: gpui::Entity<ShellState>,
+) -> gpui::AnyElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .on_mouse_down(
+            gpui::MouseButton::Right,
+            move |ev: &gpui::MouseDownEvent, _window, cx| {
+                view_entity.update(cx, |state, cx| {
+                    state.msg_menu = Some(MsgMenuState {
+                        msg_idx,
+                        x: ev.position.x.as_f32(),
+                        y: ev.position.y.as_f32(),
+                    });
+                    cx.notify();
+                });
+            },
+        )
+        .child(inner)
+        .into_any_element()
+}
+
+/// One row of the message context menu.
+fn menu_item<F>(
+    glyph: &'static str,
+    label: &'static str,
+    view_entity: gpui::Entity<ShellState>,
+    on_click: F,
+) -> gpui::AnyElement
+where
+    F: Fn(&mut ShellState, &mut gpui::Context<ShellState>) + 'static,
+{
+    div()
+        .id(ElementId::Name(format!("msg-menu-{label}").into()))
+        .h(px(30.0))
+        .px(px(9.0))
+        .flex()
+        .items_center()
+        .gap_2()
+        .cursor_pointer()
+        .hover(|element| element.bg(rgba(dark::OVERLAY)))
+        .child(
+            div()
+                .w(px(16.0))
+                .text_color(rgb(dark::TEXT_TERTIARY))
+                .child(glyph),
+        )
+        .child(
+            div()
+                .text_size(px(11.5))
+                .text_color(rgb(dark::TEXT))
+                .child(label),
+        )
+        .on_click(move |_ev, _window, cx| {
+            view_entity.update(cx, |state, cx| {
+                on_click(state, cx);
+            });
+        })
+        .into_any_element()
+}
+
+/// Concatenate every fenced code block in `text`, separated by blank lines
+/// (the "Copy code" context-menu action). Returns empty when there are none.
+fn extract_fenced_code(text: &str) -> String {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut in_block = false;
+    let mut buf = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            if in_block {
+                blocks.push(std::mem::take(&mut buf));
+                in_block = false;
+            } else {
+                in_block = true;
+            }
+            continue;
+        }
+        if in_block {
+            buf.push_str(line);
+            buf.push('\n');
+        }
+    }
+    if in_block {
+        blocks.push(buf);
+    }
+    blocks
+        .iter()
+        .map(|b| b.trim_end().to_string())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Hover footer shared by user / assistant rows: timestamp + copy button,
+/// revealed on row hover via a group. `align_right` right-aligns (user rows).
+fn render_message_footer(
+    msg: &ChatMessage,
+    idx: usize,
+    align_right: bool,
+    view_entity: gpui::Entity<ShellState>,
+    copied: bool,
+) -> gpui::AnyElement {
+    let group = SharedString::from(format!("msg-row-{idx}"));
+    let time = msg.sent_at.map(format_message_time);
+    let copy_text = msg.content.to_string();
+    let footer_color = rgb(dark::TEXT_GHOST);
+
+    let mut footer = div()
+        .w_full()
+        .h(px(27.0))
+        .flex()
+        .items_center()
+        .gap_1()
+        .invisible()
+        .group_hover(group.clone(), |element| element.visible());
+    if align_right {
+        footer = footer.justify_end();
+    } else {
+        footer = footer.ml(px(-6.0));
+    }
+    let mut items: Vec<gpui::AnyElement> = Vec::new();
+
+    if !align_right {
+        // Assistant: [copy][time]
+        items.push(copy_button(
+            idx,
+            copy_text.clone(),
+            copied,
+            view_entity.clone(),
+        ));
+    }
+    if let Some(time) = time {
+        items.push(
+            div()
+                .h(px(27.0))
+                .px(px(4.0))
+                .flex()
+                .items_center()
+                .text_size(px(11.5))
+                .line_height(px(14.0))
+                .text_color(footer_color)
+                .child(time)
+                .into_any_element(),
+        );
+    }
+    if align_right {
+        items.push(copy_button(idx, copy_text, copied, view_entity));
+    }
+
+    footer.children(items).into_any_element()
+}
+
+/// 27x27 copy icon-button; swaps to a check for 2s after a click.
+fn copy_button(
+    idx: usize,
+    text: String,
+    copied: bool,
+    view_entity: gpui::Entity<ShellState>,
+) -> gpui::AnyElement {
+    let glyph = if copied { "✓" } else { "⧉" };
+    let color = if copied {
+        rgb(dark::SUCCESS)
+    } else {
+        rgb(dark::TEXT_GHOST)
+    };
+    div()
+        .id(ElementId::Name(format!("copy-msg-{idx}").into()))
+        .w(px(27.0))
+        .h(px(27.0))
+        .rounded(px(8.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(12.0))
+        .text_color(color)
+        .cursor_pointer()
+        .hover(|element| element.bg(rgba(dark::OVERLAY_STRONG)))
+        .tooltip(crate::tooltip::Tooltip::text(if copied {
+            "Copied"
+        } else {
+            "Copy message"
+        }))
+        .child(glyph)
+        .on_click(move |_ev, _window, cx| {
+            view_entity.update(cx, |state, cx| {
+                state.copied_message = Some((idx, Instant::now()));
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                cx.notify();
+            });
+        })
+        .into_any_element()
+}
+
+/// User message: right-aligned raised bubble (Waku-style), max 540px wide.
+fn render_user_msg(
+    msg: &ChatMessage,
+    idx: usize,
+    view_entity: gpui::Entity<ShellState>,
+    copied: bool,
+) -> gpui::AnyElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .items_end()
+        .group(SharedString::from(format!("msg-row-{idx}")))
+        .child(
+            div()
+                .max_w(px(540.0))
+                .rounded(px(12.0))
+                .bg(rgb(dark::RAISED))
+                .px(px(12.0))
+                .py(px(8.0))
+                .text_size(px(14.0))
+                .line_height(px(20.0))
+                .text_color(rgb(dark::TEXT))
+                .whitespace_normal()
+                .child(msg.content.to_string()),
+        )
+        .child(render_message_footer(msg, idx, true, view_entity, copied))
+        .into_any_element()
+}
+
+/// Assistant message: flat, full-width markdown (no bubble), with a hover
+/// footer and a streaming caret while chunks are still landing. `blocks` is
+/// the (cached) parse of `msg.content`.
+fn render_assistant_msg(
+    msg: &ChatMessage,
+    idx: usize,
+    is_streaming: bool,
+    view_entity: gpui::Entity<ShellState>,
+    copied: bool,
+    blocks: Arc<Vec<MarkdownBlock>>,
+    copied_code: Option<(usize, usize)>,
+) -> gpui::AnyElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .py(px(4.0))
+        .gap_1()
+        .group(SharedString::from(format!("msg-row-{idx}")))
+        .child(render_markdown_blocks_copied(
+            &blocks,
+            idx,
+            copied_code,
+            view_entity.clone(),
+        ))
+        .when(is_streaming, |d| {
+            d.child(
+                div()
+                    .w(px(8.0))
+                    .h(px(16.0))
+                    .bg(rgb(dark::ACCENT))
+                    .rounded_sm()
+                    .mt_1(),
+            )
+        })
+        .child(render_message_footer(msg, idx, false, view_entity, copied))
+        .into_any_element()
+}
+
+/// System message: centered overlay pill, muted.
+fn render_system_msg(msg: &ChatMessage) -> gpui::AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .px(px(10.0))
+                .py(px(4.0))
+                .rounded_full()
+                .bg(rgba(dark::OVERLAY))
+                .text_size(px(11.0))
+                .line_height(px(16.0))
+                .text_color(rgb(dark::TEXT_TERTIARY))
+                .child(msg.content.to_string()),
+        )
+        .into_any_element()
+}
+
+/// Plain tool message (no structured meta): a compact mono line.
+fn render_tool_text(msg: &ChatMessage) -> gpui::AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .text_size(px(11.5))
+        .line_height(px(16.0))
+        .font_family("ui-monospace")
+        .text_color(rgb(dark::TEXT_SECONDARY))
+        .child(msg.content.to_string())
+        .into_any_element()
+}
+
+/// Working indicator: three chasing dots + "Working for Ns".
+fn render_working_row(elapsed: f32) -> gpui::AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_size(px(11.5))
+        .line_height(px(16.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(rgb(dark::TEXT_TERTIARY))
+        .child(working_dots())
+        .child(SharedString::from(format!(
+            "Working for {}",
+            format_elapsed(elapsed)
+        )))
+        .into_any_element()
+}
+
+/// Three small pulsing dots (respects reduce-motion via gpui animation).
+fn working_dots() -> gpui::AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .children((0..3).map(|i| {
+            div()
+                .w(px(4.5))
+                .h(px(4.5))
+                .rounded_full()
+                .bg(rgb(dark::TEXT_TERTIARY))
+                .with_animation(
+                    format!("working-dot-{i}"),
+                    gpui::Animation::new(Duration::from_millis(1400))
+                        .repeat()
+                        .with_easing(gpui::pulsating_between(0.25, 1.0)),
+                    move |element, delta| {
+                        let phase = ((delta * 2.0 + i as f32 * 0.18).fract() as f64) as f32;
+                        element.opacity(0.25 + 0.75 * phase)
+                    },
+                )
+                .into_any_element()
+        }))
+        .into_any_element()
+}
+
+/// Compact duration label: "9s", "1m 12s", "1h 2m".
+fn format_elapsed(secs: f32) -> String {
+    let total = secs.max(0.0) as u64;
+    if total < 60 {
+        return format!("{total}s");
+    }
+    let m = total / 60;
+    let s = total % 60;
+    if m < 60 {
+        return format!("{m}m {s}s");
+    }
+    let h = m / 60;
+    let rm = m % 60;
+    format!("{h}h {rm}m")
+}
+
+/// Reasoning row: folds to a one-line "Thinking…" / "Thought for Ns" header
+/// when collapsed; expands to muted markdown.
+fn render_reasoning_row(
+    msg: &ChatMessage,
+    idx: usize,
+    expanded: bool,
+    is_live: bool,
+    view_entity: gpui::Entity<ShellState>,
+) -> gpui::AnyElement {
+    let header_label = if is_live {
+        "Thinking…".to_string()
+    } else if let Some(sent) = msg.sent_at {
+        format!(
+            "Thought for {}",
+            format_elapsed(sent.elapsed().as_secs_f32())
+        )
+    } else {
+        "Thinking…".to_string()
+    };
+    let chevron = if expanded { "▾" } else { "▸" };
+    let header = div()
+        .id(ElementId::Name(format!("reasoning-toggle-{idx}").into()))
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .text_size(px(11.5))
+        .line_height(px(16.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(rgb(dark::TEXT_TERTIARY))
+        .cursor_pointer()
+        .hover(|element| element.text_color(rgb(dark::TEXT_SECONDARY)))
+        .child(if is_live {
+            pulse_dot(format!("reasoning-pulse-{idx}"), 5.0, dark::ACCENT)
+        } else {
+            div().w(px(5.0)).into_any_element()
+        })
+        .child(header_label)
+        .child(div().text_color(rgb(dark::TEXT_GHOST)).child(chevron))
+        .on_click(move |_ev, _window, cx| {
+            view_entity.update(cx, |state, cx| {
+                let next = !state.reasoning_expanded.get(&idx).copied().unwrap_or(true);
+                state.reasoning_expanded.insert(idx, next);
+                cx.notify();
+            });
+        });
+
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(header)
+        .when(expanded, |d| {
+            d.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .pl_3()
+                    .border_l_2()
+                    .border_color(rgba(dark::BORDER_STRONG))
+                    .text_color(rgb(dark::TEXT_TERTIARY))
+                    .child(render_markdown_body(msg.content.as_str())),
+            )
+        })
+        .into_any_element()
+}
+
+/// A 5px accent pulse dot (running indicators).
+fn pulse_dot(id: impl Into<SharedString>, size: f32, color: u32) -> gpui::AnyElement {
+    div()
+        .w(px(size))
+        .h(px(size))
+        .rounded_full()
+        .bg(rgb(color))
+        .with_animation(
+            id.into(),
+            gpui::Animation::new(Duration::from_millis(1600))
+                .repeat()
+                .with_easing(gpui::pulsating_between(0.3, 1.0)),
+            |element, delta| element.opacity(delta),
+        )
+        .into_any_element()
+}
+
+/// Tool-activity run: a collapsible cluster of tool invocations between a
+/// user message and the answer. Collapsed shows a one-line summary
+/// ("bash · read 2 files") + chevron; expanded shows per-item rows with
+/// running/ok status and click-to-reveal output.
+fn render_tool_run(
+    msgs: &[ChatMessage],
+    start: usize,
+    _end: usize,
+    expanded: bool,
+    is_live: bool,
+    view_entity: gpui::Entity<ShellState>,
+) -> gpui::AnyElement {
+    let summary = tool_run_summary(msgs);
+    let chevron = if expanded { "▾" } else { "▸" };
+    let running = is_live;
+    // The on_click closure below captures `view_entity`; clone before moving
+    // it in so the per-item loop can still use the original.
+    let view_for_toggle = view_entity.clone();
+    let header = div()
+        .id(ElementId::Name(format!("tool-run-{start}").into()))
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .text_size(px(11.5))
+        .line_height(px(14.0))
+        .text_color(rgb(dark::TEXT_TERTIARY))
+        .cursor_pointer()
+        .hover(|element| element.text_color(rgb(dark::TEXT_SECONDARY)))
+        .when(running, |element| {
+            element.child(pulse_dot(
+                format!("tool-run-pulse-{start}"),
+                5.0,
+                dark::ACCENT,
+            ))
+        })
+        .child(div().font_weight(gpui::FontWeight::MEDIUM).child(summary))
+        .child(div().text_color(rgb(dark::TEXT_GHOST)).child(chevron))
+        .on_click(move |_ev, _window, cx| {
+            view_for_toggle.update(cx, |state, cx| {
+                let next = !state.activity_expanded.get(&start).copied().unwrap_or(true);
+                state.activity_expanded.insert(start, next);
+                cx.notify();
+            });
+        });
+
+    let mut children: Vec<gpui::AnyElement> = Vec::new();
+    children.push(header.into_any_element());
+    if expanded {
+        for (offset, msg) in msgs.iter().enumerate() {
+            children.push(render_tool_item(msg, start + offset, view_entity.clone()));
+        }
+    }
+    let _ = view_entity;
+
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .pl(px(2.0))
+        .children(children)
+        .into_any_element()
+}
+
+/// One tool invocation inside a run: icon + name/args + status glyph.
+fn render_tool_item(
+    msg: &ChatMessage,
+    idx: usize,
+    view_entity: gpui::Entity<ShellState>,
+) -> gpui::AnyElement {
+    let Some(meta) = msg.tool_meta() else {
+        return render_tool_text(msg);
+    };
+    let status = &meta.status;
+    let (status_glyph, status_color) = match status {
+        ToolStatus::Pending => (
+            pulse_dot(format!("tool-pulse-{idx}"), 5.0, dark::ACCENT),
+            rgb(dark::ACCENT),
+        ),
+        ToolStatus::Ok => (
+            div()
+                .text_color(rgb(dark::TEXT_GHOST))
+                .child("✓")
+                .into_any_element(),
+            rgb(dark::TEXT_GHOST),
+        ),
+    };
+    let _ = status_color;
+
+    let has_detail = !meta.result.is_empty();
+    // Capture the tool name for the toggle closure (the closure outlives
+    // `msg`, so we need an owned string, not a borrow).
+    let toggle_name = meta.name.to_string();
+    let body: gpui::AnyElement = if has_detail && meta.expanded {
+        div()
+            .ml(px(21.0))
+            .mr(px(4.0))
+            .min_w_0()
+            .mt(px(2.0))
+            .mb(px(4.0))
+            .p(px(8.0))
+            .rounded(px(7.0))
+            .bg(rgb(dark::INSET))
+            .border_1()
+            .border_color(rgba(dark::BORDER))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .font_family("ui-monospace")
+            .text_size(px(10.5))
+            .line_height(px(16.0))
+            .text_color(rgb(dark::TEXT_SECONDARY))
+            .whitespace_normal()
+            .child(meta.result.to_string())
+            .into_any_element()
+    } else {
+        div().into_any_element()
+    };
+
+    let row = div()
+        .id(ElementId::Name(format!("tool-item-{idx}").into()))
+        .min_h(px(24.0))
+        .px(px(4.0))
+        .py(px(2.0))
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_size(px(11.5))
+        .line_height(px(14.0))
+        .when(has_detail, |element| {
+            element
+                .cursor_pointer()
+                .hover(|element| element.bg(rgba(dark::OVERLAY)))
+        })
+        .child(status_glyph)
+        .child(
+            div()
+                .flex_none()
+                .max_w(px(300.0))
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(rgb(dark::TEXT_SECONDARY))
+                        .child(meta.name.to_string()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(rgb(dark::TEXT_GHOST))
+                        .child(meta.args_summary.to_string()),
+                ),
+        )
+        // Collapsed preview: a one-line peek at the tool output.
+        .when(has_detail && !meta.expanded, |element| {
+            element.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(11.0))
+                    .text_color(rgb(dark::TEXT_GHOST))
+                    .child(tool_utils::preview_tool_result(meta.result.as_str(), 120)),
+            )
+        });
+    let row = if has_detail {
+        row.on_click(move |_ev, _window, cx| {
+            view_entity.update(cx, |state, cx| {
+                for m in state.chat.iter_mut().rev() {
+                    if m.role == Role::Tool
+                        && let Some(meta) = m.tool_meta.as_mut()
+                        && meta.name.as_ref() == toggle_name.as_str()
+                    {
+                        meta.expanded = !meta.expanded;
+                        cx.notify();
+                        return;
+                    }
+                }
+            });
+        })
+    } else {
+        row
+    };
+
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .child(row)
+        .child(body)
+        .into_any_element()
+}
+
+/// "Read 2 files · Ran bash" style summary for a tool run.
+fn tool_run_summary(msgs: &[ChatMessage]) -> String {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    let mut any_pending = false;
+    for msg in msgs {
+        if let Some(meta) = msg.tool_meta() {
+            if meta.status == ToolStatus::Pending {
+                any_pending = true;
+            }
+            let name = meta.name.to_string();
+            if let Some((_, c)) = counts.iter_mut().find(|(n, _)| *n == name) {
+                *c += 1;
+            } else {
+                counts.push((name, 1));
+            }
+        }
+    }
+    let verb = if any_pending { "Running" } else { "Ran" };
+    let parts: Vec<String> = counts
+        .into_iter()
+        .map(|(name, count)| {
+            if count > 1 {
+                format!("{verb} {name} ×{count}")
+            } else {
+                format!("{verb} {name}")
+            }
+        })
+        .collect();
+    if parts.is_empty() {
+        "Tool activity".to_string()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+/// Centered "Worked for Ns" divider folding a settled turn's activity.
+fn render_turn_fold(
+    answer_idx: usize,
+    elapsed: f32,
+    expanded: bool,
+    view_entity: gpui::Entity<ShellState>,
+) -> gpui::AnyElement {
+    let label = format!("Worked for {}", format_elapsed(elapsed));
+    let chevron = if expanded { "▾" } else { "▸" };
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap_3()
+        .py_1()
+        .child(div().h(px(1.0)).flex_1().bg(rgba(dark::BORDER)))
+        .child(
+            div()
+                .id(ElementId::Name(format!("turn-fold-{answer_idx}").into()))
+                .flex()
+                .items_center()
+                .gap_1()
+                .text_size(px(11.5))
+                .line_height(px(16.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(rgb(dark::TEXT_TERTIARY))
+                .cursor_pointer()
+                .hover(|element| element.text_color(rgb(dark::TEXT_SECONDARY)))
+                .child(label)
+                .child(div().text_color(rgb(dark::TEXT_GHOST)).child(chevron))
+                .on_click(move |_ev, _window, cx| {
+                    view_entity.update(cx, |state, cx| {
+                        let next = !state
+                            .turn_fold_expanded
+                            .get(&answer_idx)
+                            .copied()
+                            .unwrap_or(false);
+                        state.turn_fold_expanded.insert(answer_idx, next);
+                        cx.notify();
+                    });
+                }),
+        )
+        .child(div().h(px(1.0)).flex_1().bg(rgba(dark::BORDER)))
+        .into_any_element()
 }
 
 /// Render assistant / tool / system text as markdown.
@@ -3702,7 +7005,12 @@ fn render_message(msg: &ChatMessage, view_entity: gpui::Entity<ShellState>, is_s
 /// formatting, so chip-like spans (inline code, links) can keep their
 /// background.
 fn render_markdown_body(text: &str) -> gpui::AnyElement {
-    let blocks: Vec<MarkdownBlock> = parse_markdown(text);
+    let blocks = Arc::new(parse_markdown(text));
+    render_markdown_blocks(&blocks)
+}
+
+/// Render pre-parsed markdown blocks (cached by [`ShellState::blocks_for`]).
+fn render_markdown_blocks(blocks: &[MarkdownBlock]) -> gpui::AnyElement {
     div()
         .flex()
         .flex_col()
@@ -3711,8 +7019,134 @@ fn render_markdown_body(text: &str) -> gpui::AnyElement {
         .min_w_0()
         .text_color(rgb(dark::TEXT))
         .text_sm()
-        .children(blocks.into_iter().map(render_markdown_block))
+        .children(blocks.iter().cloned().map(render_markdown_block))
         .into_any_element()
+}
+
+/// Markdown blocks whose code blocks carry per-block copy buttons. `msg_idx`
+/// keys the copied-feedback state on [`ShellState::copied_code`]; `view_entity`
+/// is captured by the buttons' click handlers.
+fn render_markdown_blocks_copied(
+    blocks: &[MarkdownBlock],
+    msg_idx: usize,
+    copied_code: Option<(usize, usize)>,
+    view_entity: gpui::Entity<ShellState>,
+) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .w_full()
+        .min_w_0()
+        .text_color(rgb(dark::TEXT))
+        .text_sm()
+        .children(
+            blocks
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(block_idx, block)| {
+                    render_markdown_block_copied(
+                        block,
+                        msg_idx,
+                        block_idx,
+                        copied_code,
+                        view_entity.clone(),
+                    )
+                }),
+        )
+        .into_any_element()
+}
+
+/// Like [`render_markdown_block`] but code blocks get a copy button in their
+/// header bar. `copied_code` is the `(msg_idx, block_idx)` currently showing
+/// its "copied ✓" feedback, if any.
+fn render_markdown_block_copied(
+    block: MarkdownBlock,
+    msg_idx: usize,
+    block_idx: usize,
+    copied_code: Option<(usize, usize)>,
+    view_entity: gpui::Entity<ShellState>,
+) -> gpui::AnyElement {
+    match block.kind {
+        BlockKind::CodeBlock(lang) => {
+            let joined: String = block
+                .spans
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>()
+                .trim_end_matches('\n')
+                .to_string();
+            render_code_block(
+                &joined,
+                lang,
+                Some((msg_idx, block_idx)),
+                copied_code == Some((msg_idx, block_idx)),
+                Some(view_entity),
+            )
+        }
+        _ => render_markdown_block(block),
+    }
+}
+
+/// `TextRun`s that tile `code` exactly, colored by the lexer. Every run shares
+/// one font (mono, 12px), so the shaped width of a line is identical with or
+/// without highlighting — the property that makes coloring safe to defer
+/// while a block is still streaming.
+fn code_runs(code: &str, lang: highlight::Lang, plain: u32) -> Vec<TextRun> {
+    let token_color = |class: TokenClass| -> u32 {
+        match class {
+            TokenClass::Keyword => dark::TOKEN_KEYWORD,
+            TokenClass::Literal => dark::TOKEN_LITERAL,
+            TokenClass::String => dark::TOKEN_STRING,
+            TokenClass::Comment => dark::TEXT_GHOST,
+            TokenClass::Number => dark::TOKEN_LITERAL,
+            TokenClass::Type => dark::TOKEN_TYPE,
+            TokenClass::Function => dark::TOKEN_TYPE,
+            TokenClass::Meta => dark::TEXT_TERTIARY,
+            TokenClass::Added => dark::SUCCESS,
+            TokenClass::Removed => dark::ERROR,
+        }
+    };
+
+    let mut font = font("ui-monospace");
+    font.weight = gpui::FontWeight::NORMAL;
+    let mut runs: Vec<TextRun> = Vec::new();
+    let push = |runs: &mut Vec<TextRun>, len: usize, color: u32| {
+        if len == 0 {
+            return;
+        }
+        let color: gpui::Hsla = rgb(color).into();
+        match runs.last_mut() {
+            Some(last) if last.color == color => last.len += len,
+            _ => runs.push(TextRun {
+                len,
+                font: font.clone(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }),
+        }
+    };
+
+    let tokenized = highlight::tokenize(lang, code);
+    let lines = code.split('\n').collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate() {
+        let tokens = tokenized.get(index).map(Vec::as_slice).unwrap_or_default();
+        let mut cursor = 0;
+        for token in tokens {
+            push(&mut runs, token.range.start.saturating_sub(cursor), plain);
+            push(&mut runs, token.range.len(), token_color(token.class));
+            cursor = token.range.end;
+        }
+        push(&mut runs, line.len().saturating_sub(cursor), plain);
+        if index + 1 < lines.len() {
+            // The '\n' separator must belong to a run or shaping rejects them.
+            push(&mut runs, 1, plain);
+        }
+    }
+    runs
 }
 
 fn render_markdown_block(block: MarkdownBlock) -> gpui::AnyElement {
@@ -3768,53 +7202,93 @@ fn render_markdown_block(block: MarkdownBlock) -> gpui::AnyElement {
                 .collect::<String>()
                 .trim_end_matches('\n')
                 .to_string();
-            let lang_label = lang.clone();
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
+            render_code_block(&joined, lang, None, false, None)
+        }
+        BlockKind::Table(header, rows) => {
+            let mut table = div()
                 .w_full()
                 .min_w_0()
                 .my_1()
-                .p_3()
                 .rounded_md()
-                .bg(rgb(dark::TOOL_BUBBLE_BG))
+                .overflow_hidden()
                 .border_1()
-                .border_color(rgb(dark::BORDER))
-                .when(lang_label.is_some(), |d| {
-                    let l = lang_label.unwrap();
-                    d.child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(dark::TEXT_MUTED))
-                            .child(l.to_string()),
-                    )
-                })
-                .child(
+                .border_color(rgba(dark::BORDER))
+                .flex()
+                .flex_col();
+            let col_count = header.len().max(1);
+            // Header row.
+            let mut header_row = div()
+                .flex()
+                .flex_row()
+                .bg(rgba(dark::OVERLAY))
+                .border_b_1()
+                .border_color(rgba(dark::BORDER));
+            for (ci, cell) in header.iter().enumerate() {
+                let cell_html = render_table_cell(cell.clone());
+                header_row = header_row.child(
                     div()
-                        .w_full()
+                        .flex_1()
                         .min_w_0()
-                        .font_family("ui-monospace")
-                        .text_xs()
+                        .px(px(9.0))
+                        .py(px(6.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(rgb(dark::TEXT))
-                        .whitespace_normal()
-                        .child(joined),
-                )
-                .into_any_element()
+                        .child(cell_html),
+                );
+                if ci + 1 < col_count {
+                    header_row =
+                        header_row.child(div().w(px(1.0)).self_stretch().bg(rgba(dark::BORDER)));
+                }
+            }
+            table = table.child(header_row);
+            // Body rows.
+            for (ri, row) in rows.iter().enumerate() {
+                let mut row_div = div().flex().flex_row().when(ri + 1 < rows.len(), |d| {
+                    d.border_b_1().border_color(rgba(dark::BORDER))
+                });
+                for (ci, cell) in row.iter().enumerate() {
+                    let cell_html = render_table_cell(cell.clone());
+                    row_div = row_div.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .px(px(9.0))
+                            .py(px(6.0))
+                            .text_size(px(12.5))
+                            .line_height(px(19.0))
+                            .child(cell_html),
+                    );
+                    if ci + 1 < col_count {
+                        row_div =
+                            row_div.child(div().w(px(1.0)).self_stretch().bg(rgba(dark::BORDER)));
+                    }
+                }
+                table = table.child(row_div);
+            }
+            table.into_any_element()
         }
         BlockKind::ListItem(marker) => {
             let prefix = match marker {
                 Some(n) => format!("{n}. "),
                 None => "\u{2022} ".to_string(),
             };
+            // A task checkbox appears as the first span with `task = Some(..)`;
+            // render a small box instead of the bullet for it.
+            let task = block.spans.iter().find_map(|s| s.task);
             let has_styled = block
                 .spans
                 .iter()
                 .any(|s| s.bold || s.italic || s.strikethrough || s.code || s.link.is_some());
+            let body_spans: Vec<MarkdownSpan> = block
+                .spans
+                .iter()
+                .filter(|s| s.task.is_none())
+                .cloned()
+                .collect();
             let body: gpui::AnyElement = if has_styled {
-                render_styled_paragraph(block.spans)
+                render_styled_paragraph(body_spans)
             } else {
-                let joined: String = block.spans.iter().map(|s| s.text.as_str()).collect();
+                let joined: String = body_spans.iter().map(|s| s.text.as_str()).collect();
                 div()
                     .flex_1()
                     .min_w_0()
@@ -3823,19 +7297,50 @@ fn render_markdown_block(block: MarkdownBlock) -> gpui::AnyElement {
                     .child(joined)
                     .into_any_element()
             };
+            let marker_el: gpui::AnyElement = if let Some(checked) = task {
+                div()
+                    .w(px(14.0))
+                    .h(px(14.0))
+                    .flex_shrink_0()
+                    .mt(px(2.0))
+                    .rounded(px(3.0))
+                    .border_1()
+                    .border_color(if checked {
+                        rgb(dark::ACCENT)
+                    } else {
+                        rgba(dark::BORDER_STRONG)
+                    })
+                    .bg(if checked {
+                        rgb(dark::ACCENT)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(10.0))
+                    .text_color(if checked {
+                        rgb(dark::INSET)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .child(if checked { "✓" } else { "" })
+                    .into_any_element()
+            } else {
+                div()
+                    .text_color(rgb(dark::TEXT_TERTIARY))
+                    .min_w(px(28.0))
+                    .flex_shrink_0()
+                    .child(prefix)
+                    .into_any_element()
+            };
             div()
                 .flex()
                 .flex_row()
                 .gap_2()
                 .w_full()
                 .min_w_0()
-                .child(
-                    div()
-                        .text_color(rgb(dark::TEXT_MUTED))
-                        .min_w(px(28.0))
-                        .flex_shrink_0()
-                        .child(prefix),
-                )
+                .child(marker_el)
                 .child(body)
                 .into_any_element()
         }
@@ -3874,6 +7379,146 @@ fn render_markdown_block(block: MarkdownBlock) -> gpui::AnyElement {
             .w_full()
             .bg(rgb(dark::BORDER))
             .into_any_element(),
+    }
+}
+
+/// Render a fenced code block: a 24px header bar (language tag + optional
+/// copy button) over an inset card with the code body. `copy_key` is
+/// `(msg_idx, block_idx)` when the caller wants a copy button; `copied` flips
+/// the button to its "✓" feedback state.
+fn render_code_block(
+    joined: &str,
+    lang: Option<CompactString>,
+    copy_key: Option<(usize, usize)>,
+    copied: bool,
+    view_entity: Option<gpui::Entity<ShellState>>,
+) -> gpui::AnyElement {
+    let lang_label = lang.clone();
+    let code_body: gpui::AnyElement = if let Some(lang) = lang
+        && let Some(hl) = highlight::lang_for_tag(lang.as_str())
+    {
+        // Syntax-highlighted: tiled `TextRun`s on one mono font, so a
+        // line measures identically with or without coloring (streaming
+        // safe). Gaps keep the default foreground.
+        let runs = code_runs(joined, hl, dark::TEXT_SECONDARY);
+        StyledText::new(SharedString::from(joined.to_string()))
+            .with_runs(runs)
+            .into_any_element()
+    } else {
+        div()
+            .w_full()
+            .px(px(10.0))
+            .py(px(8.0))
+            .font_family("ui-monospace")
+            .text_xs()
+            .text_color(rgb(dark::TEXT_SECONDARY))
+            .whitespace_normal()
+            .child(joined.to_string())
+            .into_any_element()
+    };
+
+    let copy_button: gpui::AnyElement =
+        if let (Some((msg_idx, block_idx)), Some(view)) = (copy_key, view_entity) {
+            let code = joined.to_string();
+            let glyph = if copied { "✓" } else { "⧉" };
+            let color = if copied {
+                rgb(dark::SUCCESS)
+            } else {
+                rgb(dark::TEXT_GHOST)
+            };
+            div()
+                .id(ElementId::Name(
+                    format!("code-copy-{msg_idx}-{block_idx}").into(),
+                ))
+                .w(px(20.0))
+                .h(px(20.0))
+                .rounded(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(11.0))
+                .text_color(color)
+                .cursor_pointer()
+                .hover(|element| element.bg(rgba(dark::OVERLAY_STRONG)))
+                .tooltip(crate::tooltip::Tooltip::text(if copied {
+                    "Copied"
+                } else {
+                    "Copy code"
+                }))
+                .child(glyph)
+                .on_click(move |_ev, _window, cx| {
+                    view.update(cx, |state, cx| {
+                        state.copied_code = Some(((msg_idx, block_idx), Instant::now()));
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()));
+                        cx.notify();
+                    });
+                })
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_w_0()
+        .my_1()
+        .rounded_md()
+        .overflow_hidden()
+        .border_1()
+        .border_color(rgba(dark::BORDER))
+        .bg(rgb(dark::INSET))
+        // Header bar: language tag on the left, copy button on the right.
+        .child(
+            div()
+                .w_full()
+                .h(px(24.0))
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .border_b_1()
+                .border_color(rgba(dark::BORDER))
+                .text_size(px(10.0))
+                .line_height(px(14.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(rgb(dark::TEXT_GHOST))
+                .child(
+                    lang_label
+                        .unwrap_or_else(|| CompactString::from(""))
+                        .to_string(),
+                )
+                .child(copy_button),
+        )
+        .child(
+            div()
+                .w_full()
+                .px(px(10.0))
+                .py(px(8.0))
+                .font_family("ui-monospace")
+                .text_xs()
+                .whitespace_normal()
+                .child(code_body),
+        )
+        .into_any_element()
+}
+
+/// Render a single table cell's inline spans.
+fn render_table_cell(spans: Vec<MarkdownSpan>) -> gpui::AnyElement {
+    let has_styled = spans
+        .iter()
+        .any(|s| s.bold || s.italic || s.strikethrough || s.code || s.link.is_some());
+    if has_styled {
+        render_styled_paragraph(spans)
+    } else {
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        div()
+            .w_full()
+            .min_w_0()
+            .whitespace_normal()
+            .child(joined)
+            .into_any_element()
     }
 }
 
@@ -3916,10 +7561,11 @@ fn group_runs(spans: Vec<MarkdownSpan>) -> Vec<(MarkdownFlags, String)> {
             link: span.link.clone(),
         };
         if let Some((existing_flags, text)) = out.last_mut()
-            && existing_flags == &flags {
-                text.push_str(span.text.as_str());
-                continue;
-            }
+            && existing_flags == &flags
+        {
+            text.push_str(span.text.as_str());
+            continue;
+        }
         out.push((flags, span.text.to_string()));
     }
     out
@@ -3942,7 +7588,7 @@ fn render_styled_span_run(flags: MarkdownFlags, text: String) -> gpui::AnyElemen
         .text_color(rgb(dark::TEXT))
         .text_sm()
         .min_w_0()
-        .flex_shrink()
+        .flex_shrink(1.0)
         .whitespace_normal();
     if flags.bold {
         d = d.font_weight(gpui::FontWeight::BOLD);
@@ -3957,276 +7603,15 @@ fn render_styled_span_run(flags: MarkdownFlags, text: String) -> gpui::AnyElemen
         d = d
             .font_family("ui-monospace")
             .text_xs()
-            .px_1()
+            .px_1p5()
             .rounded_sm()
-            .bg(rgb(dark::BUTTON_BG));
+            .bg(rgba(dark::CODE_WASH))
+            .text_color(rgb(dark::CODE_TEXT));
     }
     if flags.link.is_some() {
         d = d.text_color(rgb(dark::ACCENT)).underline();
     }
     d.child(text).into_any_element()
-}
-
-/// Foldable card for a tool invocation.
-///
-/// Layout: a left accent bar so the card reads as "this is structured
-/// output, different from prose", then a one-line header
-/// (`<name> <args summary>   <status pill>`) and an expandable body with the
-/// tool result. The header always shows; the body toggles on click. We use
-/// the message's position in `ShellState::chat` as a stable expansion key so
-/// each message hashes independently and we never lose state across diffs.
-fn render_tool_card(msg: &ChatMessage, view_entity: gpui::Entity<ShellState>) -> gpui::AnyElement {
-    // We can't keep a borrow across non-blocking updates on `msg`, so we
-    // copy out the fields we need to render before any callback closure.
-    let (name_str, args_str, result_str, status, is_expanded, pending_since) = match msg.tool_meta() {
-        Some(m) => (
-            m.name.to_string(),
-            m.args_summary.to_string(),
-            m.result.to_string(),
-            m.status.clone(),
-            m.expanded,
-            m.pending_since,
-        ),
-        None => return render_message_text(msg, false),
-    };
-
-    let (status_label, status_fg) = match &status {
-        ToolStatus::Pending => {
-            let elapsed = pending_since.map(|t| t.elapsed()).unwrap_or_default();
-            let label = if elapsed.as_secs() >= 60 {
-                format!("running ({}m{}s)", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
-            } else if elapsed.as_secs() > 0 {
-                format!("running ({}s)", elapsed.as_secs())
-            } else {
-                "running".to_string()
-            };
-            (label, rgb(dark::WARNING))
-        }
-        ToolStatus::Ok => ("done".to_string(), rgb(dark::SUCCESS)),
-    };
-
-    let preview = tool_utils::preview_tool_result(result_str.as_str(), 240);
-
-    let body: gpui::AnyElement = if !is_expanded || preview.is_empty() {
-        // Collapsed or no result yet: nothing below the header.
-        div().into_any_element()
-    } else {
-        // Expanded: present the result with a code-style background so it
-        // visually separates from prose.
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .mt_2()
-            .p_2()
-            .rounded_sm()
-            .bg(rgb(dark::APP_BG))
-            .border_1()
-            .border_color(rgb(dark::BORDER))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(dark::TEXT_MUTED))
-                    .child("output"),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .font_family("ui-monospace")
-                    .text_xs()
-                    .text_color(rgb(dark::TEXT))
-                    .whitespace_normal()
-                    .child(preview),
-            )
-            .into_any_element()
-    };
-
-    // Header acts as the click target for expand/collapse.
-    let header_id = ElementId::Name(format!("tool-card-header-{name_str}").into());
-    let header = div()
-        .id(header_id)
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .child(
-            div()
-                .text_sm()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgb(dark::TEXT))
-                .child(name_str.clone()),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_color(rgb(dark::TEXT_SECONDARY))
-                .whitespace_normal()
-                .child(args_str),
-        )
-        .child(
-            div()
-                .text_xs()
-                .px_2()
-                .py_0p5()
-                .rounded_sm()
-                .border_1()
-                .border_color(status_fg)
-                .text_color(status_fg)
-                .child(status_label),
-        );
-
-    let view_for_toggle = view_entity;
-    let header_clickable = header.on_click(move |_event, _window, cx| {
-        view_for_toggle.update(cx, |state, cx| {
-            // Toggle the most recent tool card with this name. Newer tool
-            // invocations of the same name are exceedingly rare, so the
-            // newest-first walk is the right disambiguation.
-            for m in state.chat.iter_mut().rev() {
-                if m.role == Role::Tool
-                    && let Some(meta) = m.tool_meta.as_mut()
-                    && meta.name.as_ref() == name_str.as_str()
-                {
-                    meta.expanded = !meta.expanded;
-                    cx.notify();
-                    return;
-                }
-            }
-        });
-    });
-
-    div()
-        .flex()
-        .flex_row()
-        .gap_2()
-        .w_full()
-        .min_w_0()
-        .bg(rgb(dark::TOOL_BUBBLE_BG))
-        .px_4()
-        .py_3()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(dark::BORDER))
-        .child(
-            // Left accent bar so the card reads as structured output.
-            div().w(px(3.0)).h_full().bg(rgb(dark::ACCENT)).rounded_sm(),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .flex_1()
-                .min_w_0()
-                .child(header_clickable)
-                .child(body),
-        )
-        .into_any_element()
-}
-
-fn render_message_text(msg: &ChatMessage, is_streaming: bool) -> gpui::AnyElement {
-    let (bg, label) = match msg.role {
-        Role::User => (rgb(dark::USER_BUBBLE_BG), "you"),
-        Role::Assistant => (rgb(dark::ASST_BUBBLE_BG), "zerostack"),
-        Role::Tool => (rgb(dark::TOOL_BUBBLE_BG), "tool"),
-        Role::System => (rgba(0x00000000), "system"),
-        _ => unreachable!("render_message_text handles non-special roles"),
-    };
-    let content_for_copy = msg.content.to_string();
-
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .w_full()
-        .min_w_0()
-        .bg(bg)
-        .px_4()
-        .py_3()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(dark::BORDER))
-        .group("msg-row")
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(dark::TEXT_MUTED))
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .id(ElementId::Name(
-                            format!("msg-copy-{}", &content_for_copy[..content_for_copy.len().min(32)]).into(),
-                        ))
-                        .px_1p5()
-                        .py_0p5()
-                        .rounded_sm()
-                        .text_xs()
-                        .text_color(rgba(0x00000000))
-                        .cursor_pointer()
-                        .hover(|this| {
-                            this.bg(rgb(dark::BUTTON_BG)).text_color(rgb(dark::TEXT_MUTED))
-                        })
-                        .child("⧉")
-                        .on_click({
-                            let text = content_for_copy.clone();
-                            move |_ev, _window, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    text.clone(),
-                                ));
-                            }
-                        }),
-                ),
-        )
-        .child(render_markdown_body(msg.content.as_str()))
-        .when(is_streaming, |d| {
-            d.child(
-                div()
-                    .w(px(8.))
-                    .h(px(16.))
-                    .bg(rgb(dark::ACCENT))
-                    .rounded_sm()
-                    .mt_1(),
-            )
-        })
-        .into_any_element()
-}
-
-/// Reasoning bubble: model output gathered from `ReasoningDelta` events and
-/// folded into a single placeholder row. Render as a muted / italic card with
-/// a left accent bar so the user can scan past it without losing context
-/// (matching how the TUI's statusline prefixes `▌thinking…`).
-fn render_reasoning_card(msg: &ChatMessage) -> gpui::AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .px_4()
-        .py_2()
-        .rounded_md()
-        .border_l_2()
-        .border_color(rgb(dark::ACCENT))
-        .bg(rgba(0x00000000))
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(dark::TEXT_MUTED))
-                .child("thinking…"),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(dark::TEXT_SECONDARY))
-                .child(msg.content.clone()),
-        )
-        .into_any_element()
 }
 
 /// Permission card: surfaces the tool the engine wants to call and the
@@ -4249,12 +7634,12 @@ fn render_permission_card(
         .flex()
         .flex_col()
         .gap_2()
-        .bg(rgb(dark::TOOL_BUBBLE_BG))
+        .bg(rgb(dark::RAISED))
         .px_4()
         .py_3()
-        .rounded_md()
+        .rounded(px(12.0))
         .border_1()
-        .border_color(rgb(dark::ACCENT))
+        .border_color(rgba(dark::BORDER_STRONG))
         .child(
             div()
                 .flex()
@@ -4263,13 +7648,14 @@ fn render_permission_card(
                 .child(
                     div()
                         .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(rgb(dark::TEXT))
                         .child("permission requested"),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(dark::TEXT_MUTED))
+                        .text_color(rgb(dark::TEXT_TERTIARY))
                         .child(format!("#{ask_id}")),
                 ),
         )
@@ -4289,10 +7675,11 @@ fn render_permission_card(
                         .id(allow_id)
                         .px_3()
                         .py_1()
-                        .rounded_md()
-                        .bg(rgb(dark::ACCENT))
-                        .text_color(rgb(dark::APP_BG))
+                        .rounded(px(7.))
+                        .bg(rgb(dark::INVERSE))
+                        .text_color(rgb(dark::ON_INVERSE))
                         .cursor_pointer()
+                        .hover(|element| element.opacity(0.9))
                         .text_sm()
                         .child("Allow")
                         .on_click(move |_ev, _window, cx| {
@@ -4306,10 +7693,13 @@ fn render_permission_card(
                         .id(deny_id)
                         .px_3()
                         .py_1()
-                        .rounded_md()
-                        .bg(rgb(dark::BUTTON_BG))
+                        .rounded(px(7.))
+                        .border_1()
+                        .border_color(rgba(dark::BORDER))
+                        .bg(rgba(0x00000000))
                         .text_color(rgb(dark::TEXT))
                         .cursor_pointer()
+                        .hover(|element| element.bg(rgba(dark::OVERLAY)))
                         .text_sm()
                         .child("Deny")
                         .on_click(move |_ev, _window, cx| {
@@ -4329,9 +7719,38 @@ fn render_permission_card(
 ///     back to the full string if the bytes are not valid UTF-8 (Windows
 ///     paths in cross-platform runs use lossy decoding in the engine, but
 ///     at the GUI boundary we tolerate whatever landed in `SessionInfo`).
+///
 /// Header (title bar + search input + action buttons) for the sidebar. Kept as
 /// a free function so the closures inside can lazily capture all the click
-/// entities we need without entangling the sidebar renderer's lifetime.
+/// entities we need without entangling the sidebar renderer's lifetime./// The `−` / `+` button used by [`ShellState::settings_number_row`].
+fn settings_step_btn(
+    glyph: &'static str,
+    next: u64,
+    view_entity: gpui::Entity<ShellState>,
+    on_change: impl Fn(&mut ShellState, u64) + 'static,
+) -> gpui::AnyElement {
+    div()
+        .id(ElementId::Name(format!("settings-step-{glyph}").into()))
+        .w(px(22.0))
+        .h(px(22.0))
+        .rounded(px(5.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(12.0))
+        .text_color(rgb(dark::TEXT_SECONDARY))
+        .cursor_pointer()
+        .hover(|element| element.bg(rgba(dark::OVERLAY)).text_color(rgb(dark::TEXT)))
+        .child(glyph)
+        .on_click(move |_ev, _window, cx| {
+            view_entity.update(cx, |state, cx| {
+                on_change(state, next);
+                cx.notify();
+            });
+        })
+        .into_any_element()
+}
+
 fn render_sidebar_header(
     view_for_new: gpui::Entity<ShellState>,
     view_for_refresh: gpui::Entity<ShellState>,
@@ -4375,17 +7794,18 @@ fn render_sidebar_header(
                                 .id(ElementId::Name("sidebar-refresh".into()))
                                 .px_2()
                                 .py_1()
-                                .rounded_md()
-                                .bg(rgb(dark::BUTTON_BG))
+                                .rounded(px(6.0))
+                                .bg(rgba(0x00000000))
                                 .text_color(if is_refreshing {
                                     rgb(dark::ACCENT)
                                 } else {
-                                    rgb(dark::TEXT)
+                                    rgb(dark::TEXT_SECONDARY)
                                 })
                                 .cursor_pointer()
                                 .text_xs()
                                 .child(if is_refreshing { "syncing…" } else { "↻" })
-                                .hover(|this| this.bg(rgb(dark::BUTTON_HOVER)))
+                                .tooltip(crate::tooltip::Tooltip::text("Refresh sessions"))
+                                .hover(|this| this.bg(rgba(dark::OVERLAY)))
                                 .on_click({
                                     let view_entity = view_for_refresh.clone();
                                     move |_ev, _window, cx| {
@@ -4400,13 +7820,14 @@ fn render_sidebar_header(
                                 .id(ElementId::Name("sidebar-new".into()))
                                 .px_2()
                                 .py_1()
-                                .rounded_md()
-                                .bg(rgb(dark::ACCENT))
-                                .text_color(rgb(dark::APP_BG))
+                                .rounded(px(6.0))
+                                .bg(rgb(dark::INVERSE))
+                                .text_color(rgb(dark::ON_INVERSE))
                                 .cursor_pointer()
                                 .text_xs()
                                 .child("+ New")
-                                .hover(|this| this.bg(rgb(dark::BUTTON_HOVER)))
+                                .tooltip(crate::tooltip::Tooltip::text("New session"))
+                                .hover(|this| this.opacity(0.9))
                                 .on_click({
                                     let view_entity = view_for_new.clone();
                                     move |_ev, _window, cx| {
@@ -4431,14 +7852,14 @@ fn render_sidebar_header(
                 .track_focus(&focus_handle)
                 .focus_visible(|d| d.border_color(rgb(dark::ACCENT)))
                 .border_1()
-                .border_color(rgb(dark::BORDER))
-                .rounded_md()
+                .border_color(rgba(dark::BORDER))
+                .rounded(px(7.0))
                 .px_2()
                 .py_1()
-                .bg(rgb(dark::INPUT_BG))
+                .bg(rgb(dark::COMPOSER))
                 .text_xs()
                 .text_color(if placeholder {
-                    rgb(dark::TEXT_MUTED)
+                    rgb(dark::TEXT_GHOST)
                 } else {
                     rgb(dark::TEXT)
                 })
@@ -4482,9 +7903,10 @@ fn render_sidebar_header(
                                 }
                             } else if key.chars().count() == 1
                                 && let Some(first) = key.chars().next()
-                                    && !first.is_control() {
-                                        state.append_sidebar_filter_char(first);
-                                    }
+                                && !first.is_control()
+                            {
+                                state.append_sidebar_filter_char(first);
+                            }
                             cx.notify();
                         });
                         // Don't let the handler leak into the chat input.
@@ -4551,7 +7973,7 @@ fn render_project_row(
         .mx_1()
         .cursor_pointer()
         .bg(if active {
-            rgb(dark::BUTTON_HOVER)
+            rgba(dark::OVERLAY_STRONG)
         } else {
             rgba(0x00000000)
         })
@@ -4561,7 +7983,7 @@ fn render_project_row(
         } else {
             rgba(0x00000000)
         })
-        .hover(|this| this.bg(rgb(dark::BUTTON_BG)))
+        .hover(|this| this.bg(rgba(dark::OVERLAY)))
         .child(
             div()
                 .flex()
@@ -4571,7 +7993,7 @@ fn render_project_row(
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(dark::TEXT_MUTED))
+                        .text_color(rgb(dark::TEXT_TERTIARY))
                         .child(chevron),
                 )
                 .child(
@@ -4604,7 +8026,7 @@ fn render_project_row(
                     d.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(dark::TEXT_MUTED))
+                            .text_color(rgb(dark::TEXT_TERTIARY))
                             .truncate()
                             .child(SharedString::new(group.hint.clone())),
                     )
@@ -4619,7 +8041,7 @@ fn render_project_row(
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(dark::TEXT_MUTED))
+                        .text_color(rgb(dark::TEXT_TERTIARY))
                         .child(format!("{}", group.session_indices.len())),
                 )
                 .child(
@@ -4675,7 +8097,7 @@ fn render_session_row(
     let secondary_color = if is_active {
         rgb(dark::TEXT_SECONDARY)
     } else {
-        rgb(dark::TEXT_MUTED)
+        rgb(dark::TEXT_TERTIARY)
     };
 
     let view_for_delete = view_entity.clone();
@@ -4699,7 +8121,7 @@ fn render_session_row(
         .rounded_sm()
         .cursor_pointer()
         .bg(if is_active {
-            rgb(dark::BUTTON_HOVER)
+            rgba(dark::OVERLAY_STRONG)
         } else {
             rgba(0x00000000)
         })
@@ -4709,7 +8131,7 @@ fn render_session_row(
         } else {
             rgba(0x00000000)
         })
-        .hover(|this| this.bg(rgb(dark::BUTTON_BG)))
+        .hover(|this| this.bg(rgba(dark::OVERLAY)))
         .child(
             div()
                 .flex()
@@ -4757,12 +8179,12 @@ fn render_session_row(
                                     .px_1()
                                     .rounded_sm()
                                     .text_xs()
-                                    .text_color(rgb(dark::ICON_MUTED))
+                                    .text_color(rgb(dark::TEXT_GHOST))
                                     .cursor_pointer()
                                     .hover(|this| {
-                                        this.bg(rgb(dark::BUTTON_HOVER))
-                                            .text_color(rgb(dark::ACCENT))
+                                        this.bg(rgba(dark::OVERLAY)).text_color(rgb(dark::ACCENT))
                                     })
+                                    .tooltip(crate::tooltip::Tooltip::text("Rename session"))
                                     .child("✎")
                                     .on_click({
                                         let view = view_for_rename.clone();
@@ -4775,10 +8197,11 @@ fn render_session_row(
                                                 if old_name.is_empty() {
                                                     return;
                                                 }
-                                                let _ = state.bridge.send(UserAction::RenameSession {
-                                                    session_id: sid.clone(),
-                                                    name: CompactString::new(old_name),
-                                                });
+                                                let _ =
+                                                    state.bridge.send(UserAction::RenameSession {
+                                                        session_id: sid.clone(),
+                                                        name: CompactString::new(old_name),
+                                                    });
                                                 cx.notify();
                                             });
                                         }
@@ -4792,21 +8215,22 @@ fn render_session_row(
                                     .px_1()
                                     .rounded_sm()
                                     .text_xs()
-                                    .text_color(rgb(dark::ICON_MUTED))
+                                    .text_color(rgb(dark::TEXT_GHOST))
                                     .cursor_pointer()
                                     .hover(|this| {
-                                        this.bg(rgb(dark::BUTTON_HOVER))
-                                            .text_color(rgb(dark::ERROR))
+                                        this.bg(rgba(dark::OVERLAY)).text_color(rgb(dark::ERROR))
                                     })
+                                    .tooltip(crate::tooltip::Tooltip::text("Delete session"))
                                     .child("✕")
                                     .on_click({
                                         let view = view_for_delete.clone();
                                         let sid = id_for_delete.clone();
                                         move |_ev, _window, cx| {
                                             view.update(cx, |state, _cx| {
-                                                let _ = state.bridge.send(UserAction::DeleteSession {
-                                                    session_id: sid.clone(),
-                                                });
+                                                let _ =
+                                                    state.bridge.send(UserAction::DeleteSession {
+                                                        session_id: sid.clone(),
+                                                    });
                                             });
                                         }
                                     }),
@@ -4913,10 +8337,7 @@ fn split_at_char(s: &SharedString, chars_before: usize) -> (SharedString, Shared
     match buf.char_indices().nth(idx) {
         Some((byte_idx, _)) => {
             let (a, b) = buf.split_at(byte_idx);
-            (
-                SharedString::new(a.to_string()),
-                SharedString::new(b.to_string()),
-            )
+            (SharedString::new(a), SharedString::new(b))
         }
         None => (s.clone(), SharedString::new("")),
     }
@@ -4935,6 +8356,19 @@ fn render_input_text(
     cursor_visible: bool,
 ) -> gpui::AnyElement {
     if is_empty {
+        // Empty input still needs the caret at position 0: render the
+        // placeholder text with a blinking cursor block right after it.
+        let cursor_block = div()
+            .w(px(1.5))
+            .h(px(18.))
+            .my(px(2.))
+            .bg(if cursor_visible {
+                rgb(dark::ACCENT)
+            } else {
+                rgba(0x00000000)
+            })
+            .rounded_sm()
+            .flex_shrink_0();
         return div()
             .flex()
             .flex_row()
@@ -4942,17 +8376,18 @@ fn render_input_text(
             .gap_0()
             .child(
                 div()
-                    .text_color(rgb(dark::TEXT_MUTED))
-                    .child(SharedString::new("Ask zerostack…")),
+                    .text_color(rgb(dark::TEXT_GHOST))
+                    .child(SharedString::new("Do anything…")),
             )
+            .child(cursor_block)
             .into_any_element();
     }
 
     let before_str = before.to_string();
     let after_str = after.to_string();
     let cursor_block = div()
-        .w(px(2.))
-        .h(px(16.))
+        .w(px(1.5))
+        .h(px(18.))
         .my(px(2.))
         .bg(if cursor_visible {
             rgb(dark::ACCENT)
@@ -5135,7 +8570,13 @@ impl Render for ShellState {
                         // column, which is the behavior we want.
                         let key = ev.keystroke.key.as_str();
                         let mods = &ev.keystroke.modifiers;
-                        let viewport_h = this.chat_scroll.bounds().size.height.as_f32().max(1.0);
+                        let viewport_h = this
+                            .chat_list
+                            .viewport_bounds()
+                            .size
+                            .height
+                            .as_f32()
+                            .max(1.0);
                         let bump = viewport_h * 0.9;
                         let page_h = viewport_h - 32.0;
                         let handled = match key {
@@ -5156,16 +8597,15 @@ impl Render for ShellState {
                                 true
                             }
                             "home" if mods.platform || mods.control => {
-                                let offset = this.chat_scroll.offset();
-                                this.chat_scroll.set_offset(Point {
-                                    x: offset.x,
-                                    y: px(0.0),
+                                this.chat_list.scroll_to(ListOffset {
+                                    item_ix: 0,
+                                    offset_in_item: px(0.0),
                                 });
                                 this.chat_follow_tail = false;
                                 true
                             }
                             "end" if mods.platform || mods.control => {
-                                this.chat_scroll.scroll_to_bottom();
+                                this.chat_list.scroll_to_end();
                                 this.chat_follow_tail = true;
                                 true
                             }
@@ -5177,7 +8617,7 @@ impl Render for ShellState {
                         }
                     }))
                     .child(self.render_chat(cx))
-                    .child(self.render_input(cx)),
+                    .child(self.render_input(cx, window)),
             )
             // Close-confirmation modal. Even though it's a flex sibling
             // here, `.absolute() + inset_0()` takes it out of normal flow
@@ -5290,7 +8730,7 @@ fn run_inner(model: &str, provider: &str, mode: zerostack_core::permission::Secu
         start_poll_loop(view.clone(), cx);
         spawn_cursor_blink(view.clone(), cx);
 
-        cx.on_window_closed(|cx| {
+        cx.on_window_closed(|cx, _window_id| {
             if cx.windows().is_empty() {
                 cx.quit();
             }

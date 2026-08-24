@@ -30,6 +30,7 @@ default = ["extensions"]
 [dependencies]
 zerostack-core = { path = "../core", default-features = false, features = [
   "extensions",
+  "mcp",
 ] }
 gpui = { git = "https://github.com/egoist/zed" }
 gpui_platform = { git = "https://github.com/egoist/zed" }
@@ -42,7 +43,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-gpui_macos = { git = "https://github.com/egoist/zed", features = ["font-kit"] }
+gpui_macos = { git = "https://github.com/egoist/zed", features = [
+  "font-kit",
+  "runtime_shaders",
+] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 gpui_windows = { git = "https://github.com/egoist/zed" }

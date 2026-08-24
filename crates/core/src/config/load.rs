@@ -151,6 +151,45 @@ pub fn save_quick_model(
     Ok(())
 }
 
+/// Remove a quick model by name, persisting the config file. Returns whether
+/// the key existed before removal. Symmetric with [`save_quick_model`]; the GUI
+/// settings panel uses it to delete entries.
+pub fn remove_quick_model(name: &str) -> std::io::Result<bool> {
+    let path = resolve_config_path();
+    if !path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let mut cfg: Config = match path.extension().and_then(|e| e.to_str()) {
+        Some("toml") => toml::from_str(&content).map_err(std::io::Error::other)?,
+        _ => serde_yaml_ng::from_str::<Config>(&content).map_err(std::io::Error::other)?,
+    };
+
+    let removed = match cfg.quick_models.as_mut() {
+        Some(models) => models.remove(name).is_some(),
+        None => false,
+    };
+    if !removed {
+        return Ok(false);
+    }
+
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid config path")
+    })?;
+    std::fs::create_dir_all(parent)?;
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("toml") => {
+            let content = toml::to_string(&cfg).map_err(std::io::Error::other)?;
+            atomic_config_write(&path, &content)?;
+        }
+        _ => {
+            let content = serde_yaml_ng::to_string(&cfg).map_err(std::io::Error::other)?;
+            atomic_config_write(&path, &content)?;
+        }
+    }
+    Ok(true)
+}
+
 fn rich_default_config() -> Config {
     Config {
         quick_models: Some(default_quick_models()),
