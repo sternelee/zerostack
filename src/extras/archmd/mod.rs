@@ -53,6 +53,7 @@ pub(crate) fn should_ask_with_path(dir: &Path, asked_path: &Path) -> bool {
     !arch_path.exists() && !has_been_asked_with_path(dir, asked_path)
 }
 
+#[allow(dead_code)]
 pub fn ask_and_create(dir: &Path) -> anyhow::Result<bool> {
     if !should_ask(dir) {
         return Ok(false);
@@ -73,6 +74,48 @@ pub fn ask_and_create(dir: &Path) -> anyhow::Result<bool> {
 
     if input == "y" || input == "yes" {
         create_architecture_template(dir)?;
+        eprintln!(
+            "Created {}/ARCHITECTURE.md — edit it to describe the codebase architecture.",
+            dir.display()
+        );
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+pub async fn ask_and_create_async(dir: PathBuf) -> anyhow::Result<bool> {
+    // should_ask and file writes are blocking; run on blocking pool
+    let should = tokio::task::spawn_blocking({
+        let dir = dir.clone();
+        move || should_ask(&dir)
+    })
+    .await?;
+    if !should {
+        return Ok(false);
+    }
+    let input = tokio::task::spawn_blocking({
+        let dir = dir.clone();
+        move || {
+            eprint!(
+                "No ARCHITECTURE.md found in {} (documents high-level codebase architecture for AI agents). Create one? [y/N] ",
+                dir.display()
+            );
+            let _ = std::io::stdout().flush();
+            let mut s = String::new();
+            std::io::stdin().read_line(&mut s).map(|_| s)
+        }
+    })
+    .await??;
+    let input = input.trim().to_lowercase();
+    // record_asked_dir is blocking file I/O
+    let dir_clone = dir.clone();
+    if let Err(e) = tokio::task::spawn_blocking(move || record_asked_dir(&dir_clone)).await? {
+        tracing::warn!("Failed to record asked directory: {e}");
+    }
+    if input == "y" || input == "yes" {
+        let d = dir.clone();
+        tokio::task::spawn_blocking(move || create_architecture_template(&d)).await??;
         eprintln!(
             "Created {}/ARCHITECTURE.md — edit it to describe the codebase architecture.",
             dir.display()
@@ -124,7 +167,9 @@ pub(crate) fn record_asked_dir_with_path(dir: &Path, asked_path: &Path) -> anyho
     Ok(())
 }
 
-pub(crate) fn create_architecture_template(dir: &Path) -> anyhow::Result<()> {
+/// `pub` (not `pub(crate)`): the headless [`Engine`](crate::engine::Engine)
+/// creates the same template via `/init force`.
+pub fn create_architecture_template(dir: &Path) -> anyhow::Result<()> {
     let path = dir.join("ARCHITECTURE.md");
     if path.exists() {
         return Ok(());

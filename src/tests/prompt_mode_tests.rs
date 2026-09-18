@@ -20,6 +20,7 @@ fn make_context(prompts: &[(&str, &str)]) -> ContextFiles {
             .collect::<HashMap<_, _>>(),
         current_prompt: None,
         current_prompt_name: None,
+        extra_prompts_dirs: Vec::new(),
         themes: HashMap::new(),
         current_theme_name: None,
         extra_files: Vec::new(),

@@ -146,3 +146,53 @@ fn set_deny_repeated_reads_toggle() {
     set_deny_repeated_reads(true);
     assert!(deny_repeated_reads());
 }
+
+#[test]
+fn find_files_descriptors_say_regex_not_glob() {
+    use rig::tool::Tool;
+
+    let tool = crate::agent::tools::FindFilesTool::new(None, None, 100);
+    let desc = tool.description();
+    assert!(
+        desc.contains("regex"),
+        "find_files description should say regex, got: {desc}"
+    );
+    assert!(
+        !desc.to_lowercase().contains("glob"),
+        "find_files description must not say glob, got: {desc}"
+    );
+    let params = tool.parameters();
+    let pattern_desc = params
+        .pointer("/properties/pattern/description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        pattern_desc.contains("Regex"),
+        "find_files pattern param should say Regex, got: {pattern_desc}"
+    );
+}
+
+#[test]
+fn system_and_explore_prompts_describe_find_files_as_regex() {
+    #[cfg(feature = "subagents")]
+    let prompts = [
+        crate::agent::prompt::SYSTEM_PROMPT,
+        crate::extras::subagents::prompt::EXPLORE_PROMPT,
+    ];
+    #[cfg(not(feature = "subagents"))]
+    let prompts = [crate::agent::prompt::SYSTEM_PROMPT];
+    for prompt in prompts {
+        let line = prompt
+            .lines()
+            .find(|l| l.contains("**find_files**"))
+            .unwrap_or("");
+        assert!(
+            line.contains("regex"),
+            "prompt find_files line should say regex, got: {line}"
+        );
+        assert!(
+            !line.to_lowercase().contains("glob pattern"),
+            "prompt find_files line must not say glob pattern, got: {line}"
+        );
+    }
+}

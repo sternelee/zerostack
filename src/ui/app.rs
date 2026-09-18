@@ -1,10 +1,9 @@
-use std::io::{self, Write};
+use std::io;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crossterm::ExecutableCommand;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::Color;
 use tokio::sync::mpsc;
@@ -20,6 +19,7 @@ use crate::ui::events::{render_session, sanitize_output};
 use crate::ui::input::InputEditor;
 use crate::ui::permission_handler::handle_permission_request;
 use crate::ui::pickers::rewind::RewindOutcome;
+use crate::ui::pickers::switcher::SwitcherResult;
 use crate::ui::renderer::{self as renderer_mod, ChainPrompt, Renderer, copy_to_clipboard};
 use crate::ui::slash::{apply_prompt_model, handle_compress, handle_slash};
 #[cfg(feature = "git-worktree")]
@@ -52,7 +52,6 @@ pub(crate) struct App<'a> {
 
     renderer: Renderer,
     input: InputEditor,
-    last_branch_check: std::time::Instant,
     ask_rx: Option<mpsc::Receiver<crate::permission::ask::AskRequest>>,
     #[cfg(feature = "advisor")]
     handoff_rx: Option<crate::extras::advisor::HandoffReceiver>,
@@ -72,6 +71,7 @@ pub(crate) struct App<'a> {
     event_handle: Option<std::thread::JoinHandle<()>>,
     prebuild_rx: Option<mpsc::Receiver<PrebuildPayload>>,
     _terminal_guard: Option<TerminalGuard>,
+    last_git_refresh: Option<std::time::Instant>,
 }
 
 impl<'a> App<'a> {
@@ -137,9 +137,8 @@ impl<'a> App<'a> {
 
         ui.session.refresh_git_branch();
         if crate::ui::statusline::needs_git_status() {
-            ui.session.refresh_git_status();
+            ui.session.refresh_git_status_async().await;
         }
-        let last_branch_check = std::time::Instant::now();
 
         let mut renderer = match headless_backend {
             Some(backend) => Renderer::with_backend(backend),
@@ -235,12 +234,16 @@ impl<'a> App<'a> {
         {
             let provider = ui.session.provider.to_string();
             let is_custom = ui.cfg.custom_providers_map().contains_key(&provider);
-            let warm_start = std::time::Instant::now();
             // Headless tests skip the cache warm: it can reach the network for
             // non-catalog providers and the model list is never exercised.
+            // For baked catalog providers (anthropic/openai/gemini/openrouter) the
+            // fetch is instant (no network). For custom/ollama where a network
+            // GET is required, run it in the background so startup remains
+            // interactive — the picker will populate from cache on next open.
             let ids = if headless {
                 Vec::new()
-            } else {
+            } else if !is_custom && crate::models_catalog::catalog_entries(&provider).is_some() {
+                let warm_start = std::time::Instant::now();
                 let ids = crate::ui::slash::warm_model_cache(
                     &provider, is_custom, &ui.client, ui.cli, ui.cfg,
                 )
@@ -252,68 +255,93 @@ impl<'a> App<'a> {
                     ids.len()
                 );
                 ids
+            } else {
+                // Network path: warm in background, return any cached ids for now.
+                let p = provider.clone();
+                let cli_c = ui.cli.clone();
+                let cfg_c = ui.cfg.clone();
+                let client_c = ui.client.clone();
+                tokio::spawn(async move {
+                    let _ = crate::ui::slash::warm_model_cache(
+                        &p, is_custom, &client_c, &cli_c, &cfg_c,
+                    )
+                    .await;
+                });
+                crate::ui::slash::cached_model_ids(&provider)
             };
             input.set_live_model_names(ids);
         }
 
         #[cfg(feature = "git-worktree")]
-        if let Some(name) = &ui.cli.worktree {
-            let wt_base_dir = ui.cli.resolve_wt_base_dir(ui.cfg);
-            match crate::extras::git_worktree::create(name, wt_base_dir.as_deref()) {
-                Ok((path, _info)) => {
-                    std::env::set_current_dir(&path).ok();
-                    ui.session.working_dir =
-                        compact_str::CompactString::new(path.to_string_lossy());
-                    ui.context.reload();
-                    apply_current_prompt_mode(ui.context, &ui.permission);
-                    #[cfg(feature = "mcp")]
-                    ensure_mcp_manager(&mut ui.mcp_manager, ui.cfg).await;
-                    run.agent = Some(
-                        ui.agent_build_ctx()
-                            .rebuild_agent(&ui.session.model, slash.reasoning_enabled)
-                            .await,
-                    );
-                    if let Err(e) =
-                        render_session(&mut renderer, ui.session, ui.cli, ui.cfg, ui.context)
-                    {
-                        tracing::warn!("failed to re-render session after worktree switch: {e}");
-                    }
-                }
-                Err(e) => {
-                    let _ = renderer.write_line(&format!("worktree failed: {}", e), C_ERROR);
-                }
+        {
+            // `--worktree <name>` and `--parallel` both create a worktree;
+            // running both would create two and silently keep the second.
+            // `--parallel` wins with a warning when both are given.
+            let parallel_name: Option<String> = if ui.cli.parallel {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                // Timestamp alone collides when two instances start in the
+                // same second; fold in the pid so parallel agents don't fight
+                // over one worktree name.
+                Some(format!("wt-{}-{}", ts, std::process::id()))
+            } else {
+                None
+            };
+            if ui.cli.parallel && ui.cli.worktree.is_some() {
+                let _ = renderer.write_line(
+                    "warning: both --worktree and --parallel were given; using --parallel",
+                    C_ERROR,
+                );
             }
-        }
-        #[cfg(feature = "git-worktree")]
-        if ui.cli.parallel {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let name = ts.to_string();
-            let wt_base_dir = ui.cli.resolve_wt_base_dir(ui.cfg);
-            match crate::extras::git_worktree::create(&name, wt_base_dir.as_deref()) {
-                Ok((path, _info)) => {
-                    std::env::set_current_dir(&path).ok();
-                    ui.session.working_dir =
-                        compact_str::CompactString::new(path.to_string_lossy());
-                    ui.context.reload();
-                    apply_current_prompt_mode(ui.context, &ui.permission);
-                    #[cfg(feature = "mcp")]
-                    ensure_mcp_manager(&mut ui.mcp_manager, ui.cfg).await;
-                    run.agent = Some(
-                        ui.agent_build_ctx()
-                            .rebuild_agent(&ui.session.model, slash.reasoning_enabled)
-                            .await,
-                    );
-                    if let Err(e) =
-                        render_session(&mut renderer, ui.session, ui.cli, ui.cfg, ui.context)
-                    {
-                        tracing::warn!("failed to re-render session after worktree switch: {e}");
-                    }
-                }
-                Err(e) => {
+            let requested: Option<String> = parallel_name.or_else(|| ui.cli.worktree.clone());
+            if let Some(name) = requested {
+                if let Err(e) = crate::extras::git_worktree::validate_branch_name(&name) {
                     let _ = renderer.write_line(&format!("worktree failed: {}", e), C_ERROR);
+                } else {
+                    let wt_base_dir = ui.cli.resolve_wt_base_dir(ui.cfg);
+                    match crate::extras::git_worktree::create(&name, wt_base_dir.as_deref()) {
+                        Ok((path, _info)) => {
+                            if let Err(e) = std::env::set_current_dir(&path) {
+                                let _ = renderer.write_line(
+                                    &format!(
+                                        "worktree created at {} but cd failed: {}",
+                                        path.display(),
+                                        e
+                                    ),
+                                    C_ERROR,
+                                );
+                            } else {
+                                ui.session.working_dir =
+                                    compact_str::CompactString::new(path.to_string_lossy());
+                                ui.context.reload();
+                                apply_current_prompt_mode(ui.context, &ui.permission);
+                                #[cfg(feature = "mcp")]
+                                ensure_mcp_manager(&mut ui.mcp_manager, ui.cfg).await;
+                                run.agent = Some(
+                                    ui.agent_build_ctx()
+                                        .rebuild_agent(&ui.session.model, slash.reasoning_enabled)
+                                        .await,
+                                );
+                                if let Err(e) = render_session(
+                                    &mut renderer,
+                                    ui.session,
+                                    ui.cli,
+                                    ui.cfg,
+                                    ui.context,
+                                ) {
+                                    tracing::warn!(
+                                        "failed to re-render session after worktree switch: {e}"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ =
+                                renderer.write_line(&format!("worktree failed: {}", e), C_ERROR);
+                        }
+                    }
                 }
             }
         }
@@ -414,7 +442,6 @@ impl<'a> App<'a> {
             slash,
             renderer,
             input,
-            last_branch_check,
             ask_rx,
             #[cfg(feature = "advisor")]
             handoff_rx,
@@ -432,6 +459,7 @@ impl<'a> App<'a> {
             event_handle,
             prebuild_rx,
             _terminal_guard,
+            last_git_refresh: Some(std::time::Instant::now()),
         })
     }
 
@@ -454,13 +482,6 @@ impl<'a> App<'a> {
     pub(crate) async fn step(&mut self) -> anyhow::Result<ControlFlow<(), ()>> {
         {
             self.ui.session.reasoning_enabled = self.slash.reasoning_enabled;
-            if self.last_branch_check.elapsed() >= Duration::from_secs(1) {
-                self.ui.session.refresh_git_branch();
-                if crate::ui::statusline::needs_git_status() {
-                    self.ui.session.refresh_git_status();
-                }
-                self.last_branch_check = std::time::Instant::now();
-            }
 
             tokio::select! {
                 Some(ev) = self.user_rx.recv() => {
@@ -492,6 +513,15 @@ impl<'a> App<'a> {
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)), if self.run.is_running => {
                     self.refresh()?;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                    // The event thread sets this to false when it exits
+                    // (e.g. stdin closed because the parent terminal quit).
+                    // Without this check the app would otherwise idle
+                    // forever with no way to receive input.
+                    if !self.running.load(Ordering::Relaxed) {
+                        return Ok(ControlFlow::Break(()));
+                    }
                 }
                 else => {
                     if let Some(rx) = self.prebuild_rx.as_mut()
@@ -569,6 +599,11 @@ impl<'a> App<'a> {
         self.ui.session
     }
 
+    #[cfg(test)]
+    pub(crate) fn switcher_kind(&self) -> Option<&'static str> {
+        self.input.switcher_kind()
+    }
+
     pub(crate) async fn teardown(self) {
         self.running.store(false, Ordering::Relaxed);
         if let Some(h) = self.event_handle {
@@ -595,8 +630,34 @@ impl<'a> App<'a> {
         )
     }
 
+    #[allow(dead_code)]
+    fn refresh_git_state(&mut self) {
+        self.ui.session.refresh_git_branch();
+        if crate::ui::statusline::needs_git_status() {
+            self.ui.session.refresh_git_status();
+        }
+    }
+
+    async fn refresh_git_state_async(&mut self) {
+        // Debounce: don't refresh more than once per 2 seconds (FocusGained can fire rapidly)
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_git_refresh
+            && now.duration_since(last) < Duration::from_secs(2)
+        {
+            return;
+        }
+        self.last_git_refresh = Some(now);
+        self.ui.session.refresh_git_branch_async().await;
+        if crate::ui::statusline::needs_git_status() {
+            self.ui.session.refresh_git_status_async().await;
+        }
+    }
+
     async fn handle_user_event(&mut self, ev: UserEvent) -> anyhow::Result<ControlFlow<(), ()>> {
         match ev {
+            UserEvent::FocusGained => {
+                self.refresh_git_state_async().await;
+            }
             UserEvent::Resize => {
                 self.renderer.resize();
             }
@@ -767,6 +828,16 @@ impl<'a> App<'a> {
             _ => {}
         }
 
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if alt && matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M')) {
+            self.open_model_switcher()?;
+            return Ok(());
+        }
+        if alt && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
+            self.open_prompt_switcher()?;
+            return Ok(());
+        }
+
         if self.input.picker.as_ref().is_some_and(|p| p.active())
             && self.input.handle_picker_key(key)
         {
@@ -798,6 +869,17 @@ impl<'a> App<'a> {
                     )?;
                     self.renderer
                         .write_line("rewound; /redo to restore", Color::Green)?;
+                }
+            }
+            if let Some(switcher) = self.input.take_switcher_outcome() {
+                match switcher {
+                    SwitcherResult::Model(name) => {
+                        self.run_slash_command(&format!("/models {name}")).await?;
+                    }
+                    SwitcherResult::Prompt(name) => {
+                        self.run_slash_command(&format!("/prompt {name}")).await?;
+                    }
+                    SwitcherResult::Cancelled => {}
                 }
             }
             return Ok(());
@@ -956,7 +1038,7 @@ impl<'a> App<'a> {
 
     async fn handle_agent_event(&mut self, event: AgentEvent) -> anyhow::Result<()> {
         match &event {
-            AgentEvent::ToolCall { name, args } => {
+            AgentEvent::ToolCall { name, args, .. } => {
                 if self.run.turn_trace.len() < TURN_TRACE_MAX {
                     self.run
                         .turn_trace
@@ -1024,6 +1106,9 @@ impl<'a> App<'a> {
         }
 
         let turn_errored = matches!(&event, AgentEvent::Error(_));
+        let is_terminal = matches!(&event, AgentEvent::Done { .. } | AgentEvent::Error(_));
+        let is_bash_result =
+            matches!(&event, AgentEvent::ToolResult { name, .. } if name == "bash");
         event_handler::handle_agent_event(
             event,
             &mut self.renderer,
@@ -1034,8 +1119,16 @@ impl<'a> App<'a> {
         )
         .await?;
 
+        if is_bash_result {
+            self.refresh_git_state_async().await;
+        }
+
         self.finalize_turn(turn_errored).await?;
-        if !self.run.is_running {
+        // Terminal events (Done/Error) must always repaint, even when a queued input
+        // re-activated the run (is_running now true) or loop respawn did – otherwise
+        // the chain prompt (or spinner removal) would require an extra keystroke to
+        // appear (same bug class as spinner fix ba8aa82).
+        if is_terminal || !self.run.is_running {
             self.refresh()?;
         }
         Ok(())
@@ -1064,6 +1157,7 @@ impl<'a> App<'a> {
             } else {
                 None
             };
+            let extra = self.ui.context.extra_prompts_dirs.clone();
             self.ui.session.prompt =
                 self.ui
                     .context
@@ -1071,7 +1165,7 @@ impl<'a> App<'a> {
                     .as_deref()
                     .map(|name| PromptRef {
                         name: name.into(),
-                        source: crate::context::prompts::source_of(name),
+                        source: crate::context::prompts::source_of_with_extra(name, &extra),
                     });
             if let Some(perm) = &self.ui.permission {
                 let mut guard = perm.lock().unwrap_or_else(|e| e.into_inner());
@@ -1079,7 +1173,8 @@ impl<'a> App<'a> {
             }
         }
 
-        if !self.run.is_running
+        if !turn_errored
+            && !self.run.is_running
             && self.chain.pending.is_none()
             && let Some(ref name) = self.ui.context.current_prompt_name
             && !self.ui.context.chain_declined.contains(name)
@@ -1126,6 +1221,7 @@ impl<'a> App<'a> {
         self.run.agent_rx = None;
         self.run.turn_trace.clear();
         self.run.awaiting_compaction_relief = false;
+        self.run.clear_pending_tool_calls();
         self.run.pending_inputs.clear();
         #[cfg(feature = "loop")]
         if let Some(ref mut ls) = self.chain.loop_state {
@@ -1142,6 +1238,7 @@ impl<'a> App<'a> {
             } else {
                 None
             };
+            let extra = self.ui.context.extra_prompts_dirs.clone();
             self.ui.session.prompt =
                 self.ui
                     .context
@@ -1149,7 +1246,7 @@ impl<'a> App<'a> {
                     .as_deref()
                     .map(|name| PromptRef {
                         name: name.into(),
-                        source: crate::context::prompts::source_of(name),
+                        source: crate::context::prompts::source_of_with_extra(name, &extra),
                     });
             if let Some(perm) = &self.ui.permission {
                 let mut guard = perm.lock().unwrap_or_else(|e| e.into_inner());
@@ -1452,72 +1549,65 @@ impl<'a> App<'a> {
 
     async fn handle_slash_result(&mut self, result: anyhow::Result<()>) -> anyhow::Result<()> {
         match result {
-            Err(e) if e.to_string().starts_with("DEFER_COMPRESS:") => {
-                let err_msg = e.to_string();
-                let instructions = err_msg.strip_prefix("DEFER_COMPRESS:").and_then(|s| {
-                    let s = s.trim();
-                    if s.is_empty() || s == "(none)" {
-                        None
-                    } else {
-                        Some(s.to_string())
-                    }
-                });
-                let compress_result = handle_compress(
-                    instructions.as_deref(),
-                    false,
-                    &mut self.run.agent,
-                    &mut self.renderer,
-                    &mut self.ui,
-                    self.slash.reasoning_enabled,
-                )
-                .await;
-                if let Err(e) = compress_result {
-                    self.renderer
-                        .write_line(&format!("compress error: {}", e), C_ERROR)?;
-                }
-                let _ = crate::session::storage::save_session(self.ui.session);
-            }
-            #[cfg(feature = "mcp")]
-            Err(e)
-                if e.to_string()
-                    .starts_with(crate::ui::slash::settings::DEFER_MCP_LOGIN) =>
-            {
-                let server = e
-                    .to_string()
-                    .strip_prefix(crate::ui::slash::settings::DEFER_MCP_LOGIN)
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-                let resolved = self
-                    .ui
-                    .cfg
-                    .mcp_servers
-                    .as_ref()
-                    .and_then(|m| m.get(&server))
-                    .and_then(|s| {
-                        if let crate::extras::mcp::config::McpServerConfig::Url {
-                            url, oauth, ..
-                        } = s
-                        {
-                            oauth
-                                .as_ref()
-                                .and_then(|o| o.settings())
-                                .map(|set| (url.clone(), set))
-                        } else {
-                            None
+            Err(e) if e.downcast_ref::<crate::ui::slash::SlashOutcome>().is_some() => {
+                let outcome = e
+                    .downcast_ref::<crate::ui::slash::SlashOutcome>()
+                    .unwrap()
+                    .clone();
+                match outcome {
+                    crate::ui::slash::SlashOutcome::DeferCompress { instructions } => {
+                        let compress_result = handle_compress(
+                            instructions.as_deref(),
+                            false,
+                            &mut self.run.agent,
+                            &mut self.renderer,
+                            &mut self.ui,
+                            self.slash.reasoning_enabled,
+                        )
+                        .await;
+                        if let Err(e) = compress_result {
+                            self.renderer
+                                .write_line(&format!("compress error: {}", e), C_ERROR)?;
                         }
-                    });
-                match resolved {
-                    Some((url, settings)) => {
-                        self.renderer.write_line(
-                            &format!("starting OAuth login for '{}'...", server),
-                            C_AGENT,
-                        )?;
-                        match crate::extras::mcp::oauth::begin_login(&server, &url, &settings).await
-                        {
-                            Ok(login) => {
-                                let copied = copy_to_clipboard(&login.auth_url).is_ok();
+                        let _ = crate::session::storage::save_session(self.ui.session);
+                    }
+                    #[cfg(feature = "mcp")]
+                    crate::ui::slash::SlashOutcome::DeferMcpLogin { server } => {
+                        let resolved = self
+                            .ui
+                            .cfg
+                            .mcp_servers
+                            .as_ref()
+                            .and_then(|m| m.get(&server))
+                            .and_then(|s| {
+                                if let crate::extras::mcp::config::McpServerConfig::Url {
+                                    url,
+                                    oauth,
+                                    ..
+                                } = s
+                                {
+                                    oauth
+                                        .as_ref()
+                                        .and_then(|o| o.settings())
+                                        .map(|set| (url.clone(), set))
+                                } else {
+                                    None
+                                }
+                            });
+                        match resolved {
+                            Some((url, settings)) => {
                                 self.renderer.write_line(
+                                    &format!("starting OAuth login for '{}'...", server),
+                                    C_AGENT,
+                                )?;
+                                match crate::extras::mcp::oauth::begin_login(
+                                    &server, &url, &settings,
+                                )
+                                .await
+                                {
+                                    Ok(login) => {
+                                        let copied = copy_to_clipboard(&login.auth_url).is_ok();
+                                        self.renderer.write_line(
                                     if copied {
                                         "open this URL to authorize (copied to clipboard):"
                                     } else {
@@ -1525,46 +1615,133 @@ impl<'a> App<'a> {
                                     },
                                     C_AGENT,
                                 )?;
-                                self.renderer.write_line(&login.auth_url, Color::Cyan)?;
-                                self.renderer.write_line(
+                                        self.renderer.write_line(&login.auth_url, Color::Cyan)?;
+                                        self.renderer.write_line(
                                     &format!(
                                         "waiting for authorization on 127.0.0.1:{} in the background...",
                                         settings.redirect_port()
                                     ),
                                     Color::DarkGrey,
                                 )?;
-                                let tx = self.user_tx.clone();
-                                let sname = compact_str::CompactString::new(&server);
-                                tokio::spawn(async move {
-                                    let error = login
-                                        .wait_for_callback(Duration::from_secs(180))
-                                        .await
-                                        .err()
-                                        .map(|e| compact_str::CompactString::new(e.to_string()));
-                                    let _ = tx
-                                        .send(UserEvent::McpLoginDone {
-                                            server: sname,
-                                            error,
-                                        })
-                                        .await;
-                                });
+                                        let tx = self.user_tx.clone();
+                                        let sname = compact_str::CompactString::new(&server);
+                                        tokio::spawn(async move {
+                                            let error = login
+                                                .wait_for_callback(Duration::from_secs(180))
+                                                .await
+                                                .err()
+                                                .map(|e| {
+                                                    compact_str::CompactString::new(e.to_string())
+                                                });
+                                            let _ = tx
+                                                .send(UserEvent::McpLoginDone {
+                                                    server: sname,
+                                                    error,
+                                                })
+                                                .await;
+                                        });
+                                    }
+                                    Err(err) => {
+                                        self.renderer.write_line(
+                                            &format!(
+                                                "login setup failed for '{}': {}",
+                                                server, err
+                                            ),
+                                            C_ERROR,
+                                        )?;
+                                    }
+                                }
                             }
-                            Err(err) => {
+                            None => {
                                 self.renderer.write_line(
-                                    &format!("login setup failed for '{}': {}", server, err),
+                                    &format!(
+                                        "cannot start login for '{}' (not an OAuth URL server)",
+                                        server
+                                    ),
                                     C_ERROR,
                                 )?;
                             }
                         }
                     }
-                    None => {
-                        self.renderer.write_line(
-                            &format!(
-                                "cannot start login for '{}' (not an OAuth URL server)",
-                                server
-                            ),
-                            C_ERROR,
+                    crate::ui::slash::SlashOutcome::DeferInit => {
+                        let prompt = crate::ui::slash::init::AGENTS_CREATION_PROMPT.to_string();
+                        self.ensure_agent().await;
+                        let history = crate::agent::runner::convert_history(self.ui.session);
+                        let runner = self
+                            .run
+                            .agent
+                            .as_ref()
+                            .unwrap()
+                            .clone()
+                            .spawn_runner(
+                                prompt,
+                                history,
+                                self.ui.cfg.retry.clone(),
+                                #[cfg(feature = "hooks")]
+                                None,
+                            )
+                            .await;
+                        self.run.agent_rx = Some(runner.event_rx);
+                        self.run.main_abort = Some(runner.abort_handle);
+                        self.run.is_running = true;
+                        if let Some(ss) = self.ui.status_signals.as_ref() {
+                            ss.send_start();
+                        }
+                    }
+                    crate::ui::slash::SlashOutcome::DeferReview { message } => {
+                        let msg = message;
+                        self.chain.dot_prompt_restore = self.ui.context.one_shot_restore.take();
+                        self.ui.session.add_message(MessageRole::User, &msg);
+                        self.ensure_agent().await;
+                        let history = crate::agent::runner::convert_history(self.ui.session);
+                        let runner = self
+                            .run
+                            .agent
+                            .as_ref()
+                            .unwrap()
+                            .clone()
+                            .spawn_runner(
+                                msg,
+                                history,
+                                self.ui.cfg.retry.clone(),
+                                #[cfg(feature = "hooks")]
+                                None,
+                            )
+                            .await;
+                        self.run.agent_rx = Some(runner.event_rx);
+                        self.run.main_abort = Some(runner.abort_handle);
+                        self.run.is_running = true;
+                        if let Some(ss) = self.ui.status_signals.as_ref() {
+                            ss.send_start();
+                        }
+                    }
+                    #[cfg(feature = "memory")]
+                    crate::ui::slash::SlashOutcome::DeferEditor { path } => {
+                        let path_str = path.display().to_string();
+                        let editor = self
+                            .ui
+                            .cfg
+                            .editor
+                            .clone()
+                            .or_else(|| std::env::var("EDITOR").ok())
+                            .unwrap_or_else(|| "editor".to_string());
+                        let mouse_capture = self.ui.cfg.resolve_mouse_capture();
+                        crate::ui::terminal::suspend_tui(mouse_capture, || {
+                            let (prog, args) = crate::ui::terminal::parse_editor_command(&editor);
+                            let _ = std::process::Command::new(prog)
+                                .args(args)
+                                .arg(&path_str)
+                                .status();
+                        });
+                        render_session(
+                            &mut self.renderer,
+                            self.ui.session,
+                            self.ui.cli,
+                            self.ui.cfg,
+                            self.ui.context,
                         )?;
+                        self.renderer
+                            .write_line(&format!("returned from editing {}", path_str), C_AGENT)?;
                     }
                 }
             }
@@ -1625,111 +1802,6 @@ impl<'a> App<'a> {
                         )?;
                     }
                 }
-            }
-            Err(e) if e.to_string().starts_with("DEFER_INIT:") => {
-                let prompt = e
-                    .to_string()
-                    .strip_prefix("DEFER_INIT:")
-                    .unwrap_or("")
-                    .to_string();
-                self.ensure_agent().await;
-                let history = crate::agent::runner::convert_history(self.ui.session);
-                let runner = self
-                    .run
-                    .agent
-                    .as_ref()
-                    .unwrap()
-                    .clone()
-                    .spawn_runner(
-                        prompt,
-                        history,
-                        self.ui.cfg.retry.clone(),
-                        #[cfg(feature = "hooks")]
-                        None,
-                    )
-                    .await;
-                self.run.agent_rx = Some(runner.event_rx);
-                self.run.main_abort = Some(runner.abort_handle);
-                self.run.is_running = true;
-                if let Some(ss) = self.ui.status_signals.as_ref() {
-                    ss.send_start();
-                }
-            }
-            Err(e) if e.to_string().starts_with("DEFER_REVIEW:") => {
-                let msg = e
-                    .to_string()
-                    .strip_prefix("DEFER_REVIEW:")
-                    .unwrap_or("")
-                    .to_string();
-                self.chain.dot_prompt_restore = self.ui.context.one_shot_restore.take();
-                self.ui.session.add_message(MessageRole::User, &msg);
-                self.ensure_agent().await;
-                let history = crate::agent::runner::convert_history(self.ui.session);
-                let runner = self
-                    .run
-                    .agent
-                    .as_ref()
-                    .unwrap()
-                    .clone()
-                    .spawn_runner(
-                        msg,
-                        history,
-                        self.ui.cfg.retry.clone(),
-                        #[cfg(feature = "hooks")]
-                        None,
-                    )
-                    .await;
-                self.run.agent_rx = Some(runner.event_rx);
-                self.run.main_abort = Some(runner.abort_handle);
-                self.run.is_running = true;
-                if let Some(ss) = self.ui.status_signals.as_ref() {
-                    ss.send_start();
-                }
-            }
-            Err(e) if e.to_string().starts_with("DEFER_EDITOR:") => {
-                let path = e
-                    .to_string()
-                    .strip_prefix("DEFER_EDITOR:")
-                    .unwrap_or("")
-                    .to_string();
-                let editor = self
-                    .ui
-                    .cfg
-                    .editor
-                    .clone()
-                    .or_else(|| std::env::var("EDITOR").ok())
-                    .unwrap_or_else(|| "editor".to_string());
-                let mouse_capture = self.ui.cfg.resolve_mouse_capture();
-                let _ = crossterm::terminal::disable_raw_mode();
-                let mut stdout = std::io::stdout();
-                if mouse_capture {
-                    let _ = stdout.execute(crossterm::event::DisableMouseCapture);
-                }
-                let _ = stdout.execute(crossterm::terminal::LeaveAlternateScreen);
-                let _ = stdout.flush();
-                let _ = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(format!("{} \"$1\"", editor))
-                    .arg("sh")
-                    .arg(&path)
-                    .status();
-                let _ = stdout.execute(crossterm::terminal::EnterAlternateScreen);
-                let _ = stdout.execute(crossterm::terminal::Clear(
-                    crossterm::terminal::ClearType::All,
-                ));
-                if mouse_capture {
-                    let _ = stdout.execute(crossterm::event::EnableMouseCapture);
-                }
-                let _ = crossterm::terminal::enable_raw_mode();
-                render_session(
-                    &mut self.renderer,
-                    self.ui.session,
-                    self.ui.cli,
-                    self.ui.cfg,
-                    self.ui.context,
-                )?;
-                self.renderer
-                    .write_line(&format!("returned from editing {}", path), C_AGENT)?;
             }
             Err(e)
                 if e.downcast_ref::<std::io::Error>()
@@ -1844,6 +1916,7 @@ impl<'a> App<'a> {
                 },
             );
         }
+        self.refresh_git_state_async().await;
         Ok(())
     }
 
@@ -2014,22 +2087,9 @@ impl<'a> App<'a> {
             let _ = h.join();
         }
         let mouse_capture = self.ui.cfg.resolve_mouse_capture();
-        let _ = crossterm::terminal::disable_raw_mode();
-        let mut stdout = std::io::stdout();
-        if mouse_capture {
-            let _ = stdout.execute(crossterm::event::DisableMouseCapture);
-        }
-        let _ = stdout.execute(crossterm::terminal::LeaveAlternateScreen);
-        let _ = stdout.flush();
-        let _ = std::process::Command::new("lazygit").status();
-        let _ = stdout.execute(crossterm::terminal::EnterAlternateScreen);
-        let _ = stdout.execute(crossterm::terminal::Clear(
-            crossterm::terminal::ClearType::All,
-        ));
-        if mouse_capture {
-            let _ = stdout.execute(crossterm::event::EnableMouseCapture);
-        }
-        let _ = crossterm::terminal::enable_raw_mode();
+        crate::ui::terminal::suspend_tui(mouse_capture, || {
+            let _ = std::process::Command::new("lazygit").status();
+        });
         self.rebind_event_thread();
         Ok(())
     }
@@ -2041,6 +2101,99 @@ impl<'a> App<'a> {
             self.renderer
                 .write_line(&format!("warning: failed to save session: {}", e), C_ERROR)?;
         }
+        Ok(())
+    }
+
+    /// Open the Quick-Model switcher (`Alt+M`). Reuses the `/models` slash
+    /// path on confirm, so pricing, provider switching, and context-window
+    /// updates stay identical.
+    fn open_model_switcher(&mut self) -> anyhow::Result<()> {
+        if self.run.is_running {
+            self.renderer.write_line(
+                "agent is running — wait for it to finish or press Ctrl-C before switching models",
+                C_ERROR,
+            )?;
+            return Ok(());
+        }
+        let qm = config::quick_models_map(self.ui.cfg);
+        let mut quick: Vec<String> = qm.keys().cloned().collect();
+        quick.sort();
+        let provider = self.ui.session.provider.to_string();
+        let live = crate::ui::slash::cached_model_ids(&provider);
+        // Keep the input editor's copies fresh for the `/models` insertion
+        // picker as well.
+        self.input.set_quick_model_names(quick.clone());
+        self.input.set_live_model_names(live.clone());
+
+        let mut details = std::collections::HashMap::new();
+        for name in &quick {
+            if let Some(q) = qm.get(name) {
+                details.insert(
+                    name.clone(),
+                    format!(
+                        "({} / {})  ${:.4}/M in  ${:.4}/M out",
+                        q.provider, q.model, q.input_token_cost, q.output_token_cost
+                    ),
+                );
+            }
+        }
+        let current_quick = quick.iter().find_map(|name| {
+            qm.get(name).and_then(|q| {
+                if q.provider.as_str() == self.ui.session.provider.as_str()
+                    && q.model.as_str() == self.ui.session.model.as_str()
+                {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+        });
+        self.input.start_model_switcher(
+            quick,
+            live,
+            details,
+            current_quick,
+            self.ui.session.model.to_string(),
+        );
+        Ok(())
+    }
+
+    /// Open the Prompt switcher (`Alt+P`). Reuses the `/prompt` slash path
+    /// on confirm, so `%%mode=` directives and `[prompt_to_model]` linked
+    /// model switches stay identical.
+    fn open_prompt_switcher(&mut self) -> anyhow::Result<()> {
+        if self.run.is_running {
+            self.renderer.write_line(
+                "agent is running — wait for it to finish or press Ctrl-C before switching prompts",
+                C_ERROR,
+            )?;
+            return Ok(());
+        }
+        let mut items: Vec<String> = self.ui.context.prompts.keys().cloned().collect();
+        items.sort();
+        self.input.set_prompt_names(items.clone());
+
+        let mut details = std::collections::HashMap::new();
+        let extra = self.ui.context.extra_prompts_dirs.clone();
+        for name in &items {
+            if let Some(content) = self.ui.context.prompts.get(name) {
+                let source = match crate::context::prompts::source_of_with_extra(name, &extra) {
+                    crate::session::PromptSource::BuiltIn => "BuiltIn",
+                    crate::session::PromptSource::UserFile => "UserFile",
+                };
+                let (mode, _) = crate::permission::parse_prompt_mode(content);
+                let label = match mode {
+                    Some(m) => format!("{} · mode: {}", source, m),
+                    None => source.to_string(),
+                };
+                details.insert(name.clone(), label);
+            }
+        }
+        self.input.start_prompt_switcher(
+            items,
+            details,
+            self.ui.context.current_prompt_name.clone(),
+        );
         Ok(())
     }
 
@@ -2147,12 +2300,23 @@ impl<'a> App<'a> {
                 }
             }
             crate::extras::git_worktree::MergeOutcome::Conflicts(files) => {
-                let _ = self.renderer.write_line(
-                    &format!("merge conflict in {} file(s):", files.len()),
-                    C_ERROR,
-                );
-                for f in &files {
-                    let _ = self.renderer.write_line(&format!("  {}", f), C_ERROR);
+                if files.is_empty() {
+                    // try_merge reports Conflicts only when unmerged entries
+                    // exist, so an empty list means the file listing failed —
+                    // say so instead of printing "0 file(s)".
+                    let _ = self.renderer.write_line(
+                        "merge conflict detected but the conflicting file list is unavailable; \
+                         run `git status` in the main repo to see them",
+                        C_ERROR,
+                    );
+                } else {
+                    let _ = self.renderer.write_line(
+                        &format!("merge conflict in {} file(s):", files.len()),
+                        C_ERROR,
+                    );
+                    for f in &files {
+                        let _ = self.renderer.write_line(&format!("  {}", f), C_ERROR);
+                    }
                 }
                 if let Some(ss) = self.ui.status_signals.as_ref() {
                     ss.send_git_conflict();
@@ -2192,13 +2356,17 @@ impl<'a> App<'a> {
                             .write_line("merge aborted, restored original state", C_AGENT);
                     }
                     'l' => {
-                        let _ = self.renderer.write_line(
-                            &format!(
-                                "conflict state left in {} for manual resolution",
-                                info.main_repo_path.display()
-                            ),
-                            C_AGENT,
+                        let mut msg = format!(
+                            "conflict state left in {} for manual resolution",
+                            info.main_repo_path.display()
                         );
+                        if state.stashed {
+                            msg.push_str(
+                                " (your pre-merge main-repo changes are stashed; \
+                                 run `git stash pop` after resolving)",
+                            );
+                        }
+                        let _ = self.renderer.write_line(&msg, C_AGENT);
                     }
                     'h' => {
                         let _ = crate::extras::git_worktree::cancel_merge(&state);
@@ -2248,6 +2416,7 @@ impl<'a> App<'a> {
                                                         ss.send_stop();
                                                     }
                                                     self.run.agent_rx = None;
+                                                    self.run.clear_pending_tool_calls();
                                                 }
                                             }
                                             None

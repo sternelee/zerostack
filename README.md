@@ -30,7 +30,7 @@ Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/lates
 - **Subagents**: Parallel and fast, used for exploring the codebase
 - **ARCHITECTURE.md**: Our own companion file for AGENTS.md, it allows to offer a shared core knowledge for all agents working on the same codebase
 - **Prompt chaining**: offers to advance brainstorm → plan → code → review as each phase finishes, config-gated per transition
-- **Status signals**: emits start/stop/git-conflict events over a Unix socket for external status bars or tooling
+- **Status signals**: emits run-state events (start, stop, git-conflict, permission waits) over a Unix socket for external status bars or tooling ([docs/STATUS_SIGNALS.md](docs/STATUS_SIGNALS.md))
 
 **NOTE**: Windows support is not tested is any way, but feel free to try and open an issue if you encounter any bugs!
 
@@ -45,11 +45,11 @@ Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/lates
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=gi-dellav%2Fzerostack&type=date&legend=top-left">
+<a href="https://star-history.dera.page/#gi-dellav/zerostack&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=gi-dellav/zerostack&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=gi-dellav/zerostack&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=gi-dellav/zerostack&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=gi-dellav/zerostack&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=gi-dellav/zerostack&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=gi-dellav/zerostack&type=date&legend=top-left" />
  </picture>
 </a>
 
@@ -224,7 +224,7 @@ Built-in prompts:
 | **`refactor`**        | Refactoring mode — restructures code for design and maintainability while preserving behavior |
 | **`autoconfig`**      | Configuration mode — reads docs and edits your config/prompts, writes no code |
 | **`orchestrator`**    | Orchestration mode — combines direct tool use with parallel `zerostack` subprocess invocations for heavier work |
-| **`write-text`**      | Prose-writing mode — drafts and reviews non-code writing (docs, posts, emails) |
+| **`write-text`**      | Technical-writing mode — drafts and reviews unambiguous text in Simplified Technical English |
 
 You can also create custom prompts by placing markdown files in
 `$XDG_CONFIG_HOME/zerostack/prompts/` and referencing them by name.
@@ -520,9 +520,9 @@ provider's multimodal support.
 **NOTE:** Status signals require the `status-signals` feature, which is
 included in the default build.
 
-Pass `--status-socket <path>` to have zerostack emit `start`, `stop`, and
-`git-conflict` events over a Unix domain socket, for external status bars or
-tooling to watch.
+Pass `--status-socket <path>` to have zerostack report its run state over a
+Unix domain socket, for external status bars or tooling to watch. See
+[docs/STATUS_SIGNALS.md](docs/STATUS_SIGNALS.md) for the full protocol.
 
 ## Parallel Agent
 
@@ -576,8 +576,8 @@ The worktrees integrations offers 3 slash commands:
 
 | Command              | Description                                                                                                       |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `/worktree <name>`   | Create a git worktree on branch `<name>` and move into it (skips creating it if it already exists)                |
-| `/wt-merge [branch]` | Merge the worktree branch into `[branch]` (default: `main`/`master`), push, clean up, and return to the main repo |
+| `/worktree <name>`   | Create a git worktree on a new branch `<name>` and move into it. Fails if the branch exists or the target path is occupied |
+| `/wt-merge [branch]` | Merge the worktree branch into `[branch]` (default: `main`/`master`), clean up, and return to the main repo. Does not push — run `git push` yourself |
 | `/wt-exit`           | Return to the main repo without merging                                                                           |
 
 ### Example workflow for git worktrees
@@ -591,27 +591,42 @@ The worktrees integrations offers 3 slash commands:
 
 When you quit zerostack while in a worktree, the `--wt-auto-merge` flag
 (or `--parallel`, which implies it) causes zerostack to attempt merging the
-worktree branch before exiting.
+worktree branch before exiting. The merge is a local `--squash` merge and is
+never pushed — run `git push` yourself afterwards.
 
-- **Clean merge**: completes silently (merge, push, remove worktree, delete branch).
+- **Clean merge**: completes silently (merge, remove worktree, delete branch).
 - **Merge conflicts**: zerostack lists conflicting files and prompts:
 
   ```
   [a]bort  [l]eave for manual resolution  [h]elp (agent resolves)
   ```
 
-  - `a` – abort the merge, restore clean state, do not delete the worktree.
-  - `l` – leave the conflict state in the main repo for manual `git mergetool`.
+  - `a` – abort the merge, restore clean state, keep the worktree and branch.
+  - `l` – leave the conflict state in the main repo for manual `git mergetool`
+    (pre-merge main-repo changes stay stashed; `git stash pop` after resolving).
   - `h` – abort the merge, then spawn the agent to redo the merge with
     interactive conflict-resolution guidance (same as `/wt-merge`).
 
+### Worktree notes
+
+- Names are single words: no spaces, slashes, or leading dashes (also used as
+  the worktree directory name). Existing branches are rejected — pick another name.
+- The base directory defaults to the parent of the repo (`--wt-base-dir` overrides).
+- Uncommitted worktree changes: `[c]` auto-commits tracked files only
+  (untracked files are skipped, commit them manually); `[a]` aborts.
+- `--wt-force` lets cleanup remove a dirty worktree and delete the branch
+  even when not fully merged. Without it, cleanup refuses dirty state.
+- Detached-HEAD worktrees cannot merge (no branch); check out a branch first.
+- `pull` during merge is best-effort: local-only `main`/`master` with no
+  upstream merges fine without it.
+
 | Flag | Description |
-| ------ | ------------- |
-| `--worktree <name>` | Create a worktree on branch `<name>` and `cd` into it. |
-| `--wt-auto-merge` | Auto-merge worktree branch on exit. |
-| `--parallel` | Create a timestamped worktree with auto-merge on exit. |
-| `--wt-force` | Force worktree remove and branch delete (`-D`) even if dirty. |
-| `--wt-base-dir <dir>` | Base directory for worktrees (default: parent of repo). |
+|------|-------------|
+| `--worktree <name>` | Create a worktree on branch `<name>` and `cd` into it. Mutually exclusive with `--parallel` (which wins with a warning). |
+| `--wt-auto-merge`   | Auto-merge worktree branch on exit. |
+| `--parallel`        | Create a timestamped worktree (`wt-<ts>-<pid>`) with auto-merge on exit. |
+| `--wt-force`        | Force worktree remove and branch delete (`-D`) even if dirty. |
+| `--wt-base-dir <dir>` | Base directory for worktrees (default: parent of repo; created if missing). |
 
 ## ACP (Agent Communication Protocol) support
 

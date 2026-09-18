@@ -204,8 +204,8 @@ Requires the `subagents` feature (default-on; see [SUBAGENTS.md](SUBAGENTS.md)).
 
 | Command | Description |
 | ------- | ----------- |
-| `/worktree <name>` | Create a git worktree on a new branch and `cd` into it. |
-| `/wt-merge [branch]` | Merge the worktree branch back into the target branch. |
+| `/worktree <name>` | Create a git worktree on a new branch and `cd` into it. Rejects existing branches and occupied paths; names are single words (no spaces, slashes, leading dashes). |
+| `/wt-merge [branch]` | Merge the worktree branch back into the target branch (local `--squash` merge, no push). The worktree/branch are removed only after the merge is verified; aborts keep everything. |
 | `/wt-exit` | Exit the worktree and return to the main repo. |
 
 ## Loop (feature-gated)
@@ -259,18 +259,23 @@ message, and after the response restores the previous prompt and
 | Shortcut | Action |
 | -------- | ------ |
 | `Enter` | Send message. |
-| `Shift+Enter` | Insert newline. |
-| `Ctrl+C` | Cancel current agent response or quit. |
-| `Ctrl+D` | Send message (alternative). |
+| `Alt+Enter` / `Shift+Enter` | Insert newline. |
+| `Ctrl+C` / `Ctrl+D` | Cancel current agent response or quit. |
 | `Ctrl+W` | Delete word backwards. |
-| `Ctrl+U` | Delete to beginning of line. |
-| `Ctrl+L` | Clear terminal. |
+| `Ctrl+U` / `Ctrl+K` | Delete to start / end of line. |
+| `Ctrl+Y` | Yank (paste) the most recently deleted text. |
+| `Ctrl+A` / `Ctrl+E` | Jump to start / end of line. |
+| `Ctrl+B` / `Ctrl+F` | Move one character left / right. |
+| `Ctrl+P` / `Ctrl+N` | Previous / next line (history on the first / last line). |
+| `Alt+B` / `Alt+F` | Move one word left / right. |
+| `Alt+D` / `Alt+Y` | Delete next word / cycle the kill ring. |
 | `Ctrl+G` | Open the current input in the system editor (`$EDITOR`). |
 | `Ctrl+H` | Launch `lazygit` (git TUI) in the project directory. |
-| `Ctrl+S` | Save session. |
-| `Tab` | Activate file picker / auto-complete paths. |
+| `Alt+M` | Open the quick-model switcher (fuzzy filter, `Tab` toggles Quick/Provider, `Enter` applies immediately via `/models <name>`). |
+| `Alt+P` | Open the prompt switcher (fuzzy filter, `Enter` applies immediately via `/prompt <name>`, including `%%mode=` and `[prompt_to_model]`). |
+| `Tab` | Insert two spaces. |
+| `@` at word start | Open the file picker. |
 | `Up / Down` | Navigate command history. |
 | `PageUp / PageDown` | Scroll viewport. |
-| `Home / End` | Jump to start/end of input. |
-| `Alt+Enter` | Retry last prompt. |
+| `Home / End` | Scroll to top / bottom. |
 | `Escape` | Close active picker / cancel. |

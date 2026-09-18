@@ -69,6 +69,31 @@ async fn call_tool_with_timeout(
     }
 }
 
+/// Render collected MCP tool-result content as the string handed to the LLM.
+///
+/// Text-only results stay plain text. When image blocks are present, the output
+/// is the JSON envelope rig's `ToolResultContent::from_tool_output` parses into
+/// real multimodal image parts — emitting the base64 inline as text would send
+/// the image to the model as garbage tokens instead of pixels.
+/// Image parts sort after all text parts; rig's envelope cannot interleave them.
+pub(crate) fn render_result(texts: Vec<String>, images: Vec<(String, String)>) -> String {
+    if images.is_empty() {
+        return texts.join("\n");
+    }
+    let parts: Vec<serde_json::Value> = images
+        .into_iter()
+        .map(|(mime_type, data)| {
+            serde_json::json!({ "type": "image", "data": data, "mimeType": mime_type })
+        })
+        .collect();
+    let response = texts.join("\n\n");
+    if response.is_empty() {
+        serde_json::json!({ "parts": parts }).to_string()
+    } else {
+        serde_json::json!({ "response": response, "parts": parts }).to_string()
+    }
+}
+
 impl ToolDyn for McpTool {
     fn name(&self) -> String {
         self.definition.name.to_string()
@@ -152,29 +177,35 @@ impl ToolDyn for McpTool {
                 return Err(tool_err(msg));
             }
 
-            let mut content = String::new();
+            let mut texts: Vec<String> = Vec::new();
+            let mut images: Vec<(String, String)> = Vec::new();
             for item in result.content {
                 match item {
-                    ContentBlock::Text(t) => content.push_str(&t.text),
-                    ContentBlock::Image(img) => {
-                        content.push_str(&format!("data:{};base64,{}", img.mime_type, img.data));
-                    }
+                    ContentBlock::Text(t) => texts.push(t.text),
+                    ContentBlock::Image(img) => images.push((img.mime_type, img.data)),
                     ContentBlock::Resource(r) => match &r.resource {
                         rmcp::model::ResourceContents::TextResourceContents { text, .. } => {
-                            content.push_str(text);
+                            texts.push(text.clone());
                         }
-                        rmcp::model::ResourceContents::BlobResourceContents { blob, .. } => {
-                            content.push_str(blob);
-                        }
+                        rmcp::model::ResourceContents::BlobResourceContents {
+                            mime_type,
+                            blob,
+                            ..
+                        } => match mime_type.as_deref() {
+                            Some(m) if m.starts_with("image/") => {
+                                images.push((m.to_string(), blob.clone()));
+                            }
+                            _ => texts.push(blob.clone()),
+                        },
                         _ => {}
                     },
                     _ => {}
                 }
             }
             if let Some(msg) = coaching {
-                content = format!("{}\n\n{}", msg, content);
+                texts.insert(0, msg);
             }
-            Ok(content)
+            Ok(render_result(texts, images))
         })
     }
 }

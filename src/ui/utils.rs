@@ -138,7 +138,9 @@ pub(crate) fn parse_color(s: &str) -> Option<Color> {
 }
 
 /// Formats a tool call showing only the primary file/command parameter.
-pub(crate) fn format_tool_call_summary(name: &str, args: &serde_json::Value) -> String {
+/// `pub` (not `pub(crate)`): the headless [`Engine`](crate::engine::Engine)
+/// builds the same turn-trace summaries without a renderer.
+pub fn format_tool_call_summary(name: &str, args: &serde_json::Value) -> String {
     let obj = match args {
         serde_json::Value::Object(map) => map,
         _ => return name.to_string(),
@@ -201,7 +203,7 @@ pub(crate) fn suggest_pattern(tool: &str, input: &str) -> String {
     match tool {
         "bash" => {
             let first = input.split_whitespace().next().unwrap_or("*");
-            format!("{} *", first)
+            format!("{} **", first)
         }
         "read" | "write" | "edit" | "list_dir" => {
             let expanded = crate::fs::expand_tilde(input);

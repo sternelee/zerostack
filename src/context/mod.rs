@@ -96,6 +96,10 @@ pub struct ContextFiles {
     pub prompts: HashMap<String, String>,
     pub current_prompt: Option<String>,
     pub current_prompt_name: Option<String>,
+    /// Extra prompts dirs (`--prompts-dir` / `ZS_PROMPTS_DIR`), preserved so
+    /// reloads and `/regen-prompts` keep CLI precedence. Highest precedence
+    /// last, mirroring [`prompts::load_with_extra`].
+    pub extra_prompts_dirs: Vec<PathBuf>,
     pub themes: HashMap<String, String>,
     pub current_theme_name: Option<String>,
     pub extra_files: Vec<std::path::PathBuf>,
@@ -117,7 +121,7 @@ impl ContextFiles {
         {
             self.architecture = walk_context_files().1;
         }
-        self.prompts = prompts::load();
+        self.prompts = prompts::load_with_extra(&self.extra_prompts_dirs);
         if let Some(name) = &self.current_prompt_name {
             self.current_prompt = self.prompts.get(name).cloned();
         }
@@ -131,7 +135,21 @@ impl ContextFiles {
     }
 }
 
+/// Load context files (AGENTS.md, prompts, themes). Kept for call sites
+/// without CLI prompts dirs (tests, headless test harness); production
+/// entry is [`load_with_prompts_dirs`]. Both share the same body, so they
+/// cannot drift apart.
+#[allow(dead_code)]
 pub fn load(no_context_files: bool) -> ContextFiles {
+    load_with_prompts_dirs(no_context_files, &[])
+}
+
+/// Same as [`load`], with extra prompts dirs layered over
+/// `.zerostack/prompts/` (highest precedence last).
+pub fn load_with_prompts_dirs(
+    no_context_files: bool,
+    extra_prompts_dirs: &[PathBuf],
+) -> ContextFiles {
     if let Err(e) = prompts::ensure_global() {
         tracing::warn!("failed to install default prompts: {e}");
     }
@@ -147,7 +165,7 @@ pub fn load(no_context_files: bool) -> ContextFiles {
     let architecture = arch_candidate;
     #[cfg(not(feature = "archmd"))]
     let _ = arch_candidate;
-    let prompt_map = prompts::load();
+    let prompt_map = prompts::load_with_extra(extra_prompts_dirs);
     let theme_map = themes::load();
     let theme_name = crate::session::storage::load_theme_name();
     #[cfg(feature = "memory")]
@@ -158,6 +176,7 @@ pub fn load(no_context_files: bool) -> ContextFiles {
         prompts: prompt_map,
         current_prompt: None,
         current_prompt_name: None,
+        extra_prompts_dirs: extra_prompts_dirs.to_vec(),
         themes: theme_map,
         current_theme_name: theme_name,
         extra_files: Vec::new(),

@@ -7,7 +7,7 @@ cross-referencing, and synthesizing findings. Report your answer concisely.
 
 - **read**: Read file contents (offset/limit for large files).
 - **grep**: Search file contents with regex. Respects .gitignore.
-- **find_files**: Find files by glob pattern.
+- **find_files**: Find files by regex on filename (e.g. `.*\\.rs$`). Respects .gitignore.
 - **list_dir**: List directory contents.
 
 ## Rules

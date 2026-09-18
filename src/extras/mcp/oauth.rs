@@ -12,8 +12,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use rmcp::transport::auth::{
-    AuthClient, AuthError, AuthorizationManager, AuthorizationSession, CredentialStore,
-    StoredCredentials,
+    AuthClient, AuthError, AuthorizationManager, AuthorizationRequest, AuthorizationSession,
+    CredentialStore, StoredCredentials,
 };
 
 use super::config::OAuthSettings;
@@ -173,7 +173,16 @@ pub async fn build_auth_client(
         anyhow::bail!("no OAuth token stored; run `/mcp login {server_name}`");
     }
 
-    Ok(AuthClient::new(reqwest::Client::new(), manager))
+    let http = reqwest::Client::builder()
+        .user_agent(format!(
+            "zerostack/{} (https://github.com/gi-dellav/zerostack)",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    Ok(AuthClient::new(http, manager))
 }
 
 /// Result of starting an interactive login: the URL to open and the live session.
@@ -196,19 +205,24 @@ pub async fn begin_login(
         .map_err(|e| anyhow::anyhow!("OAuth init failed: {e}"))?;
     manager.set_credential_store(FileCredentialStore::new(server_name));
 
-    let metadata = manager
-        .discover_metadata()
+    let resolution = manager
+        .resolve_metadata()
         .await
         .map_err(|e| anyhow::anyhow!("OAuth metadata discovery failed: {e}"))?;
-    manager.set_metadata(metadata);
+    manager.set_metadata(resolution.metadata);
 
     let redirect_uri = settings.redirect_uri();
-    let scope_refs: Vec<&str> = settings.scopes.iter().map(|s| s.as_str()).collect();
+    let mut request = AuthorizationRequest::new(redirect_uri).with_client_name(CLIENT_NAME);
+    if !settings.scopes.is_empty() {
+        request = request.with_scopes(settings.scopes.clone());
+    }
+    if let Some(client_id) = &settings.client_id {
+        request = request.with_preregistered_client(client_id.clone());
+    }
 
-    let session =
-        AuthorizationSession::new(manager, &scope_refs, &redirect_uri, Some(CLIENT_NAME), None)
-            .await
-            .map_err(|e| anyhow::anyhow!("OAuth authorization setup failed: {e}"))?;
+    let session = AuthorizationSession::new(manager, request)
+        .await
+        .map_err(|(_, e)| anyhow::anyhow!("OAuth authorization setup failed: {e}"))?;
 
     Ok(LoginSession {
         auth_url: session.get_authorization_url().to_string(),
@@ -220,11 +234,9 @@ pub async fn begin_login(
 impl LoginSession {
     /// Run a one-shot loopback listener to catch the redirect, then exchange the
     /// code for a token (persisted via the credential store). Times out after
-    /// `timeout`.
+    /// `timeout`. Uses async tokio networking so it doesn't block the runtime.
     pub async fn wait_for_callback(self, timeout: Duration) -> anyhow::Result<()> {
-        let port = self.redirect_port;
-        let captured =
-            tokio::task::spawn_blocking(move || listen_for_callback(port, timeout)).await??;
+        let captured = listen_for_callback_async(self.redirect_port, timeout).await?;
 
         self.session
             .handle_callback(&captured.code, &captured.state)
@@ -239,7 +251,44 @@ struct CapturedCode {
     state: String,
 }
 
+/// Async loopback HTTP listener for the OAuth redirect.
+/// Binds with `tokio::net::TcpListener` and respects the overall timeout
+/// without blocking the executor.
+async fn listen_for_callback_async(port: u16, timeout: Duration) -> anyhow::Result<CapturedCode> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot bind 127.0.0.1:{port} for OAuth redirect: {e}"))?;
+
+    let (mut stream, _addr) = tokio::time::timeout(timeout, listener.accept())
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out waiting for OAuth redirect on port {port}"))?
+        .map_err(|e| anyhow::anyhow!("accept failed: {e}"))?;
+
+    // Read with a per-connection timeout so a stalled client doesn't block forever.
+    let request_line =
+        match tokio::time::timeout(Duration::from_secs(5), read_request_line_async(&mut stream))
+            .await
+        {
+            Ok(Ok(l)) => l,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => anyhow::bail!("read redirect request timed out"),
+        };
+    let (code, state) = parse_callback(&request_line)?;
+    let body = "<html><body><h3>zerostack: authorization complete.</h3>You can close this tab and return to the terminal.</body></html>";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    use tokio::io::AsyncWriteExt;
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.flush().await;
+    Ok(CapturedCode { code, state })
+}
+
 /// Blocking single-request loopback HTTP listener for the OAuth redirect.
+/// Kept for tests / sync callers; prefers the async variant above for runtime use.
+#[allow(dead_code)]
 fn listen_for_callback(port: u16, timeout: Duration) -> anyhow::Result<CapturedCode> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", port))
         .map_err(|e| anyhow::anyhow!("cannot bind 127.0.0.1:{port} for OAuth redirect: {e}"))?;
@@ -278,6 +327,22 @@ fn listen_for_callback(port: u16, timeout: Duration) -> anyhow::Result<CapturedC
     }
 }
 
+async fn read_request_line_async(stream: &mut tokio::net::TcpStream) -> anyhow::Result<String> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 4096];
+    let n = stream
+        .read(&mut buf)
+        .await
+        .map_err(|e| anyhow::anyhow!("read redirect request failed: {e}"))?;
+    let text = String::from_utf8_lossy(&buf[..n]);
+    let first = text
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("empty redirect request"))?;
+    Ok(first.to_string())
+}
+
+#[allow(dead_code)]
 fn read_request_line(stream: &mut std::net::TcpStream) -> anyhow::Result<String> {
     let mut buf = [0u8; 4096];
     let n = stream

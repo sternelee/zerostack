@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::sandbox::partition_expose;
+use crate::tests::acquire_cwd;
 use crate::tests::sandbox_support::{args_of, bwrap_sandbox, pair_at, scratch_dir, triple_at};
 
 fn dir(name: &str) -> PathBuf {
@@ -266,6 +267,7 @@ fn test_expose_emits_ro_bind_try_between_masks_and_cwd_bind() {
 
     let args = args_of(&sandbox.wrap_command("echo hello").unwrap());
     let root_str = root.to_string_lossy();
+    let _cwd_lock = acquire_cwd();
     let cwd = std::env::current_dir().unwrap();
 
     let mask = pair_at(&args, "--tmpfs", &root_str)

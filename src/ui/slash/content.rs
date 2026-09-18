@@ -178,7 +178,8 @@ async fn handle_theme(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<
 async fn handle_regen_prompts(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
     match context::prompts::regen() {
         Ok(()) => {
-            ctx.context.prompts = context::prompts::load();
+            ctx.context.prompts =
+                context::prompts::load_with_extra(&ctx.context.extra_prompts_dirs.clone());
             write_ok(ctx.renderer, "default prompts regenerated");
         }
         Err(e) => {

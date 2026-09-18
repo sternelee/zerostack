@@ -1,5 +1,6 @@
 use crate::permission::checker::{CheckResult, PermissionChecker};
 use crate::permission::{Action, PermissionConfig, PermissionConfigs, SecurityMode, ToolPerm};
+use crate::ui::utils::suggest_pattern;
 
 fn default_modes() -> Option<Vec<String>> {
     Some(vec![
@@ -366,6 +367,14 @@ fn session_allowlist_cannot_bypass_deny_rules() {
 }
 
 #[test]
+fn session_allowlist_covers_a_bash_command_with_a_path_argument() {
+    let cmd = "pytest tests/test_login.py";
+    let mut checker = make_checker(SecurityMode::Guarded);
+    checker.add_session_allowlist("bash".into(), &suggest_pattern("bash", cmd));
+    assert!(matches!(checker.check("bash", cmd), CheckResult::Allowed));
+}
+
+#[test]
 fn session_allowlist_is_tool_specific() {
     let mut checker = make_checker(SecurityMode::Restrictive);
     checker.add_session_allowlist("read".into(), "**");
@@ -535,6 +544,68 @@ fn standard_allows_configured_bash_commands() {
     ));
     assert!(matches!(
         checker.check("bash", "cargo build"),
+        CheckResult::Allowed
+    ));
+}
+
+#[test]
+fn standard_asks_for_sudo_but_denies_destructive_sudo() {
+    let mut checker = make_checker(SecurityMode::Standard);
+    assert!(
+        matches!(checker.check("bash", "sudo"), CheckResult::Ask),
+        "expected Ask for bare sudo"
+    );
+    assert!(
+        matches!(checker.check("bash", "sudo ls"), CheckResult::Ask),
+        "expected Ask for sudo ls"
+    );
+    // Specific destructive deny must still win over the generic sudo ask.
+    assert!(
+        matches!(
+            checker.check("bash", "sudo rm -rf /home/user/project"),
+            CheckResult::Denied(_)
+        ),
+        "expected Denied for sudo rm -rf"
+    );
+}
+
+#[test]
+fn standard_allows_readonly_git_commands() {
+    let mut checker = make_checker(SecurityMode::Standard);
+    for cmd in [
+        "git status",
+        "git status --short",
+        "git log",
+        "git log --oneline",
+        "git diff",
+        "git diff HEAD",
+        "git show HEAD",
+        "git branch -a",
+        "git ls-files",
+        "git remote -v",
+        "git rev-parse HEAD",
+        "git ls-tree HEAD",
+        "git ls-remote",
+        "git cat-file -p HEAD",
+        "git blame src/main.rs",
+        "git reflog",
+        "git tag",
+        "git tag -l",
+        "git stash list",
+        "git config --get user.name",
+    ] {
+        assert!(
+            matches!(checker.check("bash", cmd), CheckResult::Allowed),
+            "expected Allowed for {cmd}"
+        );
+    }
+}
+
+#[test]
+fn standard_allows_pixi_run() {
+    let mut checker = make_checker(SecurityMode::Standard);
+    assert!(matches!(
+        checker.check("bash", "pixi run test"),
         CheckResult::Allowed
     ));
 }

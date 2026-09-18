@@ -2,6 +2,7 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 use crate::sandbox::{Sandbox, mask_roots_for};
+use crate::tests::acquire_cwd;
 use crate::tests::sandbox_support::{args_of, bwrap_sandbox, pair_at, scratch_dir};
 
 fn dir(name: &str) -> PathBuf {
@@ -57,6 +58,7 @@ fn test_existing_mask_root_is_masked_between_root_bind_and_cwd_bind() {
     let sandbox = bwrap_sandbox(vec![root.clone()], cache_dir.clone());
 
     let args = args_of(&sandbox.wrap_command("echo hello").unwrap());
+    let _cwd_lock = acquire_cwd();
     let cwd = std::env::current_dir().unwrap();
     let root_bind = pair_at(&args, "--ro-bind", "/").expect("`/` should be ro-bound");
     let mask = pair_at(&args, "--tmpfs", &root.to_string_lossy())
@@ -113,6 +115,7 @@ fn test_zerobox_invocation_is_unchanged_by_masks() {
 
     let cmd = sandbox.wrap_command("echo hello").unwrap();
     assert_eq!(cmd.as_std().get_program(), "zerobox");
+    let _cwd_lock = acquire_cwd();
     let cwd = std::env::current_dir()
         .unwrap()
         .to_string_lossy()
@@ -208,6 +211,7 @@ fn test_mask_root_under_the_cwd_is_remasked_after_the_project_bind() {
     let sandbox = bwrap_sandbox(vec![root.clone()], cache_dir.clone());
 
     let args = args_of(&sandbox.wrap_command("echo hello").unwrap());
+    let _cwd_lock = acquire_cwd();
     let cwd = std::env::current_dir().unwrap();
     let cwd_bind = pair_at(&args, "--bind", &cwd.to_string_lossy())
         .expect("the working directory should be bound");
@@ -270,6 +274,7 @@ fn test_mask_root_symlinked_into_the_project_is_remasked() {
     let sandbox = bwrap_sandbox(vec![root.clone()], cache_dir.clone());
 
     let args = args_of(&sandbox.wrap_command("echo hello").unwrap());
+    let _cwd_lock = acquire_cwd();
     let cwd = std::env::current_dir().unwrap();
     let cwd_bind = pair_at(&args, "--bind", &cwd.to_string_lossy())
         .expect("the working directory should be bound");
@@ -332,6 +337,7 @@ fn test_expose_under_a_remasked_root_stays_visible_read_only() {
         bwrap_sandbox(vec![root.clone()], cache_dir.clone()).with_expose(vec![exposed.clone()]);
 
     let args = args_of(&sandbox.wrap_command("echo hello").unwrap());
+    let _cwd_lock = acquire_cwd();
     let cwd = std::env::current_dir().unwrap();
     let cwd_bind = pair_at(&args, "--bind", &cwd.to_string_lossy())
         .expect("the working directory should be bound");
@@ -357,6 +363,7 @@ fn test_mask_root_containing_the_cwd_keeps_the_project_bind_as_the_last_word() {
     // The other side of the same rule: a project living inside a masked
     // directory stays usable, so a mask root that *contains* the working
     // directory is masked once and left shadowed there.
+    let _cwd_lock = acquire_cwd();
     let cwd = std::env::current_dir().unwrap();
     let root = cwd
         .parent()
@@ -484,6 +491,7 @@ fn test_shadowed_mask_warning_is_computed_against_the_bound_working_directory() 
     // The sandbox binds this process's working directory, never a directory
     // handed in by a caller (an ACP client's session cwd, say), so the warning
     // has to be about that one.
+    let _cwd_lock = acquire_cwd();
     let cwd = std::env::current_dir().unwrap();
     let sandbox = Sandbox::new(true, "bwrap")
         .with_backend_available(true)

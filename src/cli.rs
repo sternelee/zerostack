@@ -19,6 +19,32 @@ pub struct Cli {
     #[arg(long = "load-prompt", help = "Load a named prompt (same as /prompt)")]
     pub load_prompt: Option<String>,
 
+    #[cfg(feature = "mcp")]
+    #[arg(
+        long = "custom-mcp",
+        value_name = "NAME=COMMAND ...",
+        action = clap::ArgAction::Append,
+        help = "Add a stdio MCP server: NAME=command args (repeatable, overrides config)"
+    )]
+    pub custom_mcp: Vec<String>,
+
+    #[cfg(feature = "mcp")]
+    #[arg(
+        long = "custom-mcp-http",
+        value_name = "NAME=URL",
+        action = clap::ArgAction::Append,
+        help = "Add an HTTP MCP server: NAME=https://... (repeatable, overrides config)"
+    )]
+    pub custom_mcp_http: Vec<String>,
+
+    #[arg(
+        long = "prompts-dir",
+        value_name = "PATH",
+        action = clap::ArgAction::Append,
+        help = "Extra prompts directory (repeatable, highest precedence; last wins; ZS_PROMPTS_DIR also adds dirs)"
+    )]
+    pub prompts_dir: Vec<std::path::PathBuf>,
+
     #[arg(long = "print-config", help = "Print resolved configuration and exit")]
     pub print_config: bool,
 
@@ -71,11 +97,18 @@ pub struct Cli {
         short = 't',
         long = "tools",
         value_delimiter = ',',
-        help = "Allowlist specific tools"
+        value_name = "TOOL",
+        conflicts_with = "no_tools",
+        help = "Allowlist specific tools (comma-separated; repeatable). Available: read, write, edit, bash, grep, find_files, list_dir, todo_write, task, memory_write, memory_edit, memory_read, memory_search, advisor, lsp_diagnostics, mcp__*",
+        long_help = "Allowlist specific tools. Empty means all tools. Core: read, write, edit, bash, grep, find_files, list_dir, todo_write. Feature-gated: task (subagents), memory_write/edit/read/search, advisor, lsp_diagnostics, mcp__<server>__<tool>. Example: --tools read,write,bash --tools grep. Unknown names are reported and ignored. Use --no-tools to disable all tools."
     )]
     pub tools: Vec<String>,
 
-    #[arg(long = "no-tools", help = "Disable all tools")]
+    #[arg(
+        long = "no-tools",
+        conflicts_with = "tools",
+        help = "Disable all tools (overrides --tools)"
+    )]
     pub no_tools: bool,
 
     #[arg(long = "no-color", help = "Disable colored TUI output")]
@@ -399,6 +432,62 @@ impl Cli {
 
     pub fn resolve_no_tools(&self, cfg: &config::Config) -> bool {
         self.no_tools || cfg.no_tools.unwrap_or(false)
+    }
+
+    pub fn resolve_tools(&self, cfg: &config::Config) -> Vec<String> {
+        if !self.tools.is_empty() {
+            self.tools.clone()
+        } else {
+            cfg.tools.clone().unwrap_or_default()
+        }
+    }
+
+    /// Extra prompts directories from `--prompts-dir` plus `ZS_PROMPTS_DIR`
+    /// (`:`-separated, appended after the flags). Order is preserved; later
+    /// entries take precedence in [`crate::context::prompts`].
+    pub fn resolve_prompts_dirs(&self) -> Vec<std::path::PathBuf> {
+        let mut dirs = self.prompts_dir.clone();
+        if let Some(env) = std::env::var_os("ZS_PROMPTS_DIR") {
+            dirs.extend(std::env::split_paths(&env));
+        }
+        dirs
+    }
+
+    /// CLI-supplied MCP servers (`--custom-mcp`, `--custom-mcp-http`), merged
+    /// by name with later flags winning. Callers insert these over the config
+    /// map so the CLI wins over same-named config entries.
+    #[cfg(feature = "mcp")]
+    pub fn extra_mcp_servers(
+        &self,
+    ) -> anyhow::Result<
+        std::collections::HashMap<String, crate::extras::mcp::config::McpServerConfig>,
+    > {
+        use crate::extras::mcp::config::{parse_custom_mcp, parse_custom_mcp_http};
+        let mut servers = std::collections::HashMap::new();
+        for entry in &self.custom_mcp {
+            let (name, cfg) = parse_custom_mcp(entry)?;
+            servers.insert(name, cfg);
+        }
+        for entry in &self.custom_mcp_http {
+            let (name, cfg) = parse_custom_mcp_http(entry)?;
+            servers.insert(name, cfg);
+        }
+        Ok(servers)
+    }
+
+    /// Merge CLI MCP servers over `cfg.mcp_servers`. Invalid entries are a
+    /// hard error: silently dropping an MCP server would change which tools
+    /// the agent gets without the user noticing.
+    #[cfg(feature = "mcp")]
+    pub fn merge_cli_mcp(&self, cfg: &mut config::Config) -> anyhow::Result<()> {
+        let extra = self.extra_mcp_servers()?;
+        if extra.is_empty() {
+            return Ok(());
+        }
+        cfg.mcp_servers
+            .get_or_insert_with(Default::default)
+            .extend(extra);
+        Ok(())
     }
 
     pub fn resolve_sandbox(&self, cfg: &config::Config) -> bool {

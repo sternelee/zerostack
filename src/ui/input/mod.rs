@@ -9,7 +9,6 @@ pub use pickers::Picker;
 
 use compact_str::CompactString;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::io::Write;
 
 use crate::ui::pickers::file::FilePicker;
 use crate::ui::pickers::list::ListPicker;
@@ -199,6 +198,76 @@ impl InputEditor {
         outcome
     }
 
+    /// Open the immediate-apply Quick-Model switcher (`Alt+M`). Modal: typing
+    /// filters, Enter applies via `/models <name>`, Esc cancels.
+    pub fn start_model_switcher(
+        &mut self,
+        quick: Vec<String>,
+        live: Vec<String>,
+        details: std::collections::HashMap<String, String>,
+        current_quick: Option<String>,
+        current_model: String,
+    ) {
+        let mut picker = crate::ui::pickers::switcher::ModelSwitcher::new();
+        picker.set_monochrome(self.monochrome);
+        picker.set_groups(quick, live);
+        picker.set_details(details);
+        picker.set_current(current_quick, current_model);
+        picker.activate();
+        self.picker = Some(Picker::ModelSwitcher(picker));
+    }
+
+    /// Open the immediate-apply Prompt switcher (`Alt+P`). Modal: typing
+    /// filters, Enter applies via `/prompt <name>`, Esc cancels.
+    pub fn start_prompt_switcher(
+        &mut self,
+        items: Vec<String>,
+        details: std::collections::HashMap<String, String>,
+        current: Option<String>,
+    ) {
+        let mut picker = crate::ui::pickers::switcher::PromptSwitcher::new();
+        picker.set_monochrome(self.monochrome);
+        picker.set_items(items);
+        picker.set_details(details);
+        picker.set_current(current);
+        picker.activate();
+        self.picker = Some(Picker::PromptSwitcher(picker));
+    }
+
+    /// Take a resolved switcher outcome, if either switcher finished.
+    /// Clears the picker so the input box returns to normal.
+    pub fn take_switcher_outcome(
+        &mut self,
+    ) -> Option<crate::ui::pickers::switcher::SwitcherResult> {
+        use crate::ui::pickers::switcher::{SwitcherOutcome, SwitcherResult};
+        let result = match self.picker.as_mut() {
+            Some(Picker::ModelSwitcher(p)) => match p.take_outcome() {
+                Some(SwitcherOutcome::Confirmed(name)) => Some(SwitcherResult::Model(name)),
+                Some(SwitcherOutcome::Cancelled) => Some(SwitcherResult::Cancelled),
+                None => None,
+            },
+            Some(Picker::PromptSwitcher(p)) => match p.take_outcome() {
+                Some(SwitcherOutcome::Confirmed(name)) => Some(SwitcherResult::Prompt(name)),
+                Some(SwitcherOutcome::Cancelled) => Some(SwitcherResult::Cancelled),
+                None => None,
+            },
+            _ => None,
+        };
+        if result.is_some() {
+            self.picker = None;
+        }
+        result
+    }
+
+    #[cfg(test)]
+    pub fn switcher_kind(&self) -> Option<&'static str> {
+        match self.picker {
+            Some(Picker::ModelSwitcher(_)) => Some("model"),
+            Some(Picker::PromptSwitcher(_)) => Some("prompt"),
+            _ => None,
+        }
+    }
+
     pub fn start_prompt_picker(&mut self) {
         let mut picker = ListPicker::new();
         picker.set_monochrome(self.monochrome);
@@ -240,42 +309,13 @@ impl InputEditor {
 
         let _ = std::fs::write(&tmp, self.buffer.as_bytes());
 
-        let _ = crossterm::terminal::disable_raw_mode();
-        let mut stdout = std::io::stdout();
-        if self.mouse_capture {
-            let _ = crossterm::ExecutableCommand::execute(
-                &mut stdout,
-                crossterm::event::DisableMouseCapture,
-            );
-        }
-        let _ = crossterm::ExecutableCommand::execute(
-            &mut stdout,
-            crossterm::terminal::LeaveAlternateScreen,
-        );
-        let _ = stdout.flush();
-
-        let _ = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!("{} \"$1\"", editor))
-            .arg("sh")
-            .arg(&tmp)
-            .status();
-
-        let _ = crossterm::ExecutableCommand::execute(
-            &mut stdout,
-            crossterm::terminal::EnterAlternateScreen,
-        );
-        let _ = crossterm::ExecutableCommand::execute(
-            &mut stdout,
-            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-        );
-        if self.mouse_capture {
-            let _ = crossterm::ExecutableCommand::execute(
-                &mut stdout,
-                crossterm::event::EnableMouseCapture,
-            );
-        }
-        let _ = crossterm::terminal::enable_raw_mode();
+        crate::ui::terminal::suspend_tui(self.mouse_capture, || {
+            let (prog, args) = crate::ui::terminal::parse_editor_command(&editor);
+            let _ = std::process::Command::new(prog)
+                .args(args)
+                .arg(&tmp)
+                .status();
+        });
 
         if let Ok(content) = std::fs::read_to_string(&tmp) {
             self.buffer = CompactString::new(content.trim_end());

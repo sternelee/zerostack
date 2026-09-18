@@ -41,6 +41,8 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_tools: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub no_context_files: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
@@ -547,14 +549,14 @@ pub enum ResolvedShowToolDetails {
 
 /// Convenience: resolves temperature with all sources (CLI, quick model, global config).
 pub fn resolve_temperature(cli: &crate::cli::Cli, cfg: &Config, model_id: &str) -> Option<f64> {
-    let qm = quick_models_map(cfg);
-    cfg.resolve_temperature(cli, model_id, &qm)
+    let qm = quick_models_map_ref(cfg);
+    cfg.resolve_temperature(cli, model_id, qm)
 }
 
 /// Convenience: resolves extra body params (quick model, global config).
 pub fn resolve_extra_body(cfg: &Config, model_id: &str) -> Option<serde_json::Value> {
-    let qm = quick_models_map(cfg);
-    cfg.resolve_extra_body(model_id, &qm)
+    let qm = quick_models_map_ref(cfg);
+    cfg.resolve_extra_body(model_id, qm)
 }
 
 impl ShowToolDetails {

@@ -892,6 +892,7 @@ fn bak_files_never_surface_in_list_or_search() {
     cleanup(&m);
 }
 
+#[cfg(feature = "subagents")]
 #[test]
 fn subagent_memory_tool_set_excludes_memory_edit() {
     use crate::extras::memory::MemoryEdit;

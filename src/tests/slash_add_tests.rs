@@ -15,6 +15,10 @@ fn test_resolve_path_relative_root() {
 
 #[test]
 fn test_resolve_path_relative_is_under_cwd() {
+    // CWD-reader: hold the shared CWD lock (see tests::acquire_cwd) so a
+    // concurrent chdir by another test cannot move the directory — or delete
+    // it — between `current_dir` and the assertion.
+    let _lock = crate::tests::acquire_cwd();
     let result = resolve_path("bar.txt");
     let expected = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -24,6 +28,7 @@ fn test_resolve_path_relative_is_under_cwd() {
 
 #[test]
 fn test_resolve_path_empty_joins_cwd() {
+    let _lock = crate::tests::acquire_cwd();
     let result = resolve_path("");
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     assert_eq!(result, cwd);

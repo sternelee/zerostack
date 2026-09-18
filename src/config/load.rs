@@ -99,6 +99,14 @@ pub fn quick_models_map(cfg: &Config) -> HashMap<String, QuickModelConfig> {
     cfg.quick_models.clone().unwrap_or_default()
 }
 
+/// Borrowed view of `quick_models` without cloning. Returns an empty map when
+/// none is configured. Prefer this over `quick_models_map` in hot paths.
+pub fn quick_models_map_ref(cfg: &Config) -> &HashMap<String, QuickModelConfig> {
+    static EMPTY: std::sync::LazyLock<HashMap<String, QuickModelConfig>> =
+        std::sync::LazyLock::new(HashMap::new);
+    cfg.quick_models.as_ref().unwrap_or(&EMPTY)
+}
+
 pub fn save_quick_model(
     name: &str,
     provider: &str,
@@ -583,12 +591,12 @@ pub fn save_config(cfg: &Config) -> io::Result<()> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("toml") => {
             let content = toml::to_string(&cfg).map_err(io::Error::other)?;
-            std::fs::write(&path, content)?;
+            atomic_config_write(&path, &content)?;
         }
-        _ => std::fs::write(
-            &path,
-            serde_yaml_ng::to_string(&cfg).map_err(io::Error::other)?,
-        )?,
+        _ => {
+            let content = serde_yaml_ng::to_string(&cfg).map_err(io::Error::other)?;
+            atomic_config_write(&path, &content)?;
+        }
     }
     tracing::debug!("config saved to {}", path.display());
     Ok(())

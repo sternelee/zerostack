@@ -52,7 +52,7 @@ The main agent has a new tool called `task`. It accepts:
 |------------|-------------------------------|
 | `read`     | Read file contents            |
 | `grep`     | Regex search in files         |
-| `find_files` | Find files by glob pattern |
+| `find_files` | Find files by regex on filename |
 | `list_dir` | List directory contents       |
 | `todo`     | Track exploration steps       |
 

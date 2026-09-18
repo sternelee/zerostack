@@ -30,7 +30,7 @@ impl Tool for FindFilesTool {
     type Output = String;
 
     fn description(&self) -> String {
-        "Recursively find files matching a regex pattern in their filename. Respects .gitignore. Skips node_modules and target.".to_string()
+        "Recursively find files matching a regex pattern on the filename (e.g. `.*\\.rs$`, `config.*\\.toml`). Respects .gitignore. Skips node_modules and target.".to_string()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -39,7 +39,7 @@ impl Tool for FindFilesTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Regex pattern to match file names against"
+                    "description": "Regex pattern matched against the filename (e.g. `.*\\.rs$`). Not a glob — escape dots, use `.*` for wildcards."
                 },
                 "path": {
                     "type": "string",

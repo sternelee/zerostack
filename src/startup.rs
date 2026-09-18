@@ -12,6 +12,20 @@ use crate::provider::{self, AnyClient};
 use crate::sandbox::Sandbox;
 use crate::session::{self, MessageRole, PromptRef, Session};
 
+/// Async y/N prompt that does not block the tokio runtime.
+/// Uses `spawn_blocking` so `stdin.read_line` runs on the blocking pool.
+async fn prompt_yn_async(question: &str) -> anyhow::Result<bool> {
+    let q = question.to_string();
+    let input = tokio::task::spawn_blocking(move || {
+        eprint!("{q}");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        let mut s = String::new();
+        std::io::stdin().read_line(&mut s).map(|_| s)
+    })
+    .await??;
+    Ok(matches!(input.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
 #[cfg(feature = "advisor")]
 use crate::session::SessionMessage;
 
@@ -96,7 +110,7 @@ fn apply_startup_prompt_model(
         Some(name) => name,
         None => return,
     };
-    let qm = config::quick_models_map(cfg);
+    let qm = config::quick_models_map_ref(cfg);
     let Some(qmc) = qm.get(qm_name) else {
         return;
     };
@@ -109,7 +123,7 @@ fn apply_startup_prompt_model(
     session.update_context_window(cfg.resolve_context_window(
         &session.provider,
         &session.model,
-        &qm,
+        qm,
     ));
 }
 
@@ -117,6 +131,8 @@ fn apply_startup_prompt_model(
 /// the TUI (`ui::ensure_mcp_manager`), headless has no alt-screen to protect,
 /// so connection failures are printed to stderr instead of staying silent
 /// until surfaced by the renderer.
+/// The whole connect is bounded by a 10s outer timeout so a wedged server
+/// cannot stall `-p` time-to-first-token.
 #[cfg(feature = "mcp")]
 pub(crate) async fn connect_headless_mcp(
     cfg: &Config,
@@ -125,7 +141,18 @@ pub(crate) async fn connect_headless_mcp(
     if servers.is_empty() {
         return None;
     }
-    let manager = crate::extras::mcp::McpClientManager::connect_all(servers).await;
+    let manager = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        crate::extras::mcp::McpClientManager::connect_all(servers),
+    )
+    .await
+    {
+        Ok(m) => m,
+        Err(_) => {
+            eprintln!("MCP connect timed out after 10s (servers may be unreachable)");
+            return None;
+        }
+    };
     for notice in &manager.notices {
         eprintln!("{}", notice);
     }
@@ -170,7 +197,21 @@ impl Startup {
         is_interactive: bool,
     ) -> anyhow::Result<Self> {
         // Load context first so prompts/themes are available early.
-        let context = context::load(cli.resolve_no_context_files(&cfg));
+        // Extra CLI prompts dirs layer over `.zerostack/prompts/` at the
+        // highest precedence.
+        let extra_prompts_dirs = cli.resolve_prompts_dirs();
+        for dir in &extra_prompts_dirs {
+            if !dir.exists() {
+                eprintln!(
+                    "warning: --prompts-dir '{}' does not exist (skipped)",
+                    dir.display()
+                );
+            }
+        }
+        let context = context::load_with_prompts_dirs(
+            cli.resolve_no_context_files(&cfg),
+            &extra_prompts_dirs,
+        );
 
         let mut provider = cli.resolve_provider(&cfg);
         let mut model = cli.resolve_model(&cfg);
@@ -321,7 +362,7 @@ impl Startup {
         #[cfg(feature = "subagents")]
         {
             let task_max_turns = self.cfg.task_max_turns.unwrap_or(20);
-            let qm = config::quick_models_map(&self.cfg);
+            let qm = config::quick_models_map_ref(&self.cfg);
 
             // Resolve subagent model: subagent_model config > subagent_provider + model > main model
             let (sub_provider, mut sub_model) = if let Some(sa_model) = &self.cfg.subagent_model {
@@ -371,7 +412,8 @@ impl Startup {
                 sub_client,
                 sub_model.to_string(),
                 task_max_turns,
-                self.cfg.clone(),
+                std::sync::Arc::new(self.cfg.clone()),
+                self.cli.resolve_tools(&self.cfg),
                 #[cfg(feature = "archmd")]
                 self.context.architecture.clone(),
             );
@@ -381,6 +423,11 @@ impl Startup {
         // and the context meter work from the first turn. Applies to the
         // built-in openrouter and to any custom provider exposing an
         // OpenRouter-style `GET {base_url}/models` (e.g. laroute).
+        // Bounded by a 5s timeout so a slow DNS/TLS does not stall startup;
+        // the baked catalog (models_catalog) is the fallback and the TUI
+        // remains interactive. The metadata client itself carries an 8s
+        // per-attempt deadline (provider::HttpPurpose::Metadata), but the
+        // outer timeout caps the whole fetch tightly.
         let live_info_provider = self.provider == "openrouter"
             || self
                 .cfg
@@ -391,22 +438,26 @@ impl Startup {
                 self.session.input_token_cost == 0.0 && self.session.output_token_cost == 0.0;
             let need_ctx = self.cfg.context_window.is_none()
                 && Config::catalog_context_window(&self.provider, self.model.as_str()).is_none();
-            if (need_pricing || need_ctx)
-                && let Ok(infos) = provider::fetch_live_model_info(
+            if need_pricing || need_ctx {
+                let custom_map = self.cfg.custom_providers_map();
+                let api_keys = self.cfg.api_keys.as_ref();
+                let fut = provider::fetch_live_model_info(
                     &self.provider,
                     self.cli.api_key.as_deref(),
-                    &self.cfg.custom_providers_map(),
-                    self.cfg.api_keys.as_ref(),
-                )
-                .await
-                && let Some(info) = infos.get(self.model.as_str())
-            {
-                if need_pricing {
-                    self.session.input_token_cost = info.input_cost;
-                    self.session.output_token_cost = info.output_cost;
-                }
-                if need_ctx && let Some(cw) = info.context_length {
-                    self.session.update_context_window(cw);
+                    &custom_map,
+                    api_keys,
+                );
+                if let Ok(Ok(infos)) =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), fut).await
+                    && let Some(info) = infos.get(self.model.as_str())
+                {
+                    if need_pricing {
+                        self.session.input_token_cost = info.input_cost;
+                        self.session.output_token_cost = info.output_cost;
+                    }
+                    if need_ctx && let Some(cw) = info.context_length {
+                        self.session.update_context_window(cw);
+                    }
                 }
             }
         }
@@ -467,7 +518,7 @@ impl Startup {
             let max_uses = self.cli.resolve_advisor_max_uses(&self.cfg);
             let kilobytes_limit = self.cli.resolve_advisor_kilobytes_limit(&self.cfg);
 
-            let qm = config::quick_models_map(&self.cfg);
+            let qm = config::quick_models_map_ref(&self.cfg);
             let (advisor_provider, advisor_model) =
                 if let Some(q) = qm.get(advisor_model_name.as_str()) {
                     (q.provider.to_string(), q.model.to_string())
@@ -567,15 +618,11 @@ impl Startup {
                                 "Prompts",
                                 " (first launch)",
                             );
-                        } else {
-                            let mut input = String::new();
-                            eprint!("Update prompts{}? [y/N] ", suffix);
-                            let _ = std::io::Write::flush(&mut std::io::stderr());
-                            std::io::stdin().read_line(&mut input)?;
-                            if matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
-                                regenerated |=
-                                    regen_resource(context::prompts::regen, "Prompts", &suffix);
-                            }
+                        } else if prompt_yn_async(&format!("Update prompts{}? [y/N] ", suffix))
+                            .await?
+                        {
+                            regenerated |=
+                                regen_resource(context::prompts::regen, "Prompts", &suffix);
                         }
                     }
                 }
@@ -593,22 +640,21 @@ impl Startup {
                         if !themes_dir.exists() {
                             regenerated |=
                                 regen_resource(context::themes::regen, "Themes", " (first launch)");
-                        } else {
-                            let mut input = String::new();
-                            eprint!("Update themes{}? [y/N] ", suffix);
-                            let _ = std::io::Write::flush(&mut std::io::stderr());
-                            std::io::stdin().read_line(&mut input)?;
-                            if matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
-                                regenerated |=
-                                    regen_resource(context::themes::regen, "Themes", &suffix);
-                            }
+                        } else if prompt_yn_async(&format!("Update themes{}? [y/N] ", suffix))
+                            .await?
+                        {
+                            regenerated |=
+                                regen_resource(context::themes::regen, "Themes", &suffix);
                         }
                     }
                 }
             }
 
             if regenerated {
-                self.context = context::load(self.cli.resolve_no_context_files(&self.cfg));
+                self.context = context::load_with_prompts_dirs(
+                    self.cli.resolve_no_context_files(&self.cfg),
+                    &self.cli.resolve_prompts_dirs(),
+                );
             }
         }
 
@@ -619,24 +665,20 @@ impl Startup {
                 self.cfg.enable_context7_mcp.is_none() || self.cfg.enable_grepapp_mcp.is_none();
             if prompted {
                 if self.cfg.enable_context7_mcp.is_none() {
-                    let mut input = String::new();
-                    eprint!("Enable Context7 MCP (documentation and code context lookup)? [y/N] ");
-                    let _ = std::io::Write::flush(&mut std::io::stderr());
-                    std::io::stdin().read_line(&mut input)?;
-                    let enable = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
+                    let enable = prompt_yn_async(
+                        "Enable Context7 MCP (documentation and code context lookup)? [y/N] ",
+                    )
+                    .await?;
                     self.cfg.enable_context7_mcp = Some(enable);
                     if enable {
                         eprintln!("Context7 MCP enabled.");
                     }
                 }
                 if self.cfg.enable_grepapp_mcp.is_none() {
-                    let mut input = String::new();
-                    eprint!(
-                        "Enable Grep.app MCP (semantic code search across repositories)? [y/N] "
-                    );
-                    let _ = std::io::Write::flush(&mut std::io::stderr());
-                    std::io::stdin().read_line(&mut input)?;
-                    let enable = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
+                    let enable = prompt_yn_async(
+                        "Enable Grep.app MCP (semantic code search across repositories)? [y/N] ",
+                    )
+                    .await?;
                     self.cfg.enable_grepapp_mcp = Some(enable);
                     if enable {
                         eprintln!("Grep.app MCP enabled.");
@@ -666,15 +708,17 @@ impl Startup {
             );
         }
 
-        // ARCHITECTURE.md prompt
+        // ARCHITECTURE.md prompt (spawn_blocking via async helper)
         #[cfg(feature = "archmd")]
         let arch_created = if !self.cli.resolve_no_context_files(&self.cfg) {
             let cwd = std::env::current_dir().ok();
-            if let Some(ref cwd) = cwd {
-                crate::extras::archmd::ask_and_create(cwd).unwrap_or_else(|e| {
-                    tracing::warn!("Architecture.md prompt failed: {e}");
-                    false
-                })
+            if let Some(cwd) = cwd {
+                crate::extras::archmd::ask_and_create_async(cwd)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("Architecture.md prompt failed: {e}");
+                        false
+                    })
             } else {
                 false
             }
@@ -716,7 +760,10 @@ impl Startup {
                 self.context.current_prompt_name = Some(default_prompt.to_string());
                 self.session.prompt = Some(PromptRef {
                     name: CompactString::new(default_prompt),
-                    source: context::prompts::source_of(default_prompt),
+                    source: context::prompts::source_of_with_extra(
+                        default_prompt,
+                        &self.cli.resolve_prompts_dirs(),
+                    ),
                 });
 
                 apply_startup_prompt_model(
@@ -756,7 +803,10 @@ impl Startup {
                 self.context.current_prompt_name = Some(name.clone());
                 self.session.prompt = Some(PromptRef {
                     name: CompactString::new(name.as_str()),
-                    source: context::prompts::source_of(name),
+                    source: context::prompts::source_of_with_extra(
+                        name,
+                        &self.cli.resolve_prompts_dirs(),
+                    ),
                 });
 
                 apply_startup_prompt_model(

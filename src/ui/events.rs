@@ -225,6 +225,8 @@ pub fn show_welcome(renderer: &mut Renderer) -> std::io::Result<()> {
     feed.push_line(BlockStyle::Plain, "    Ctrl+G     Open input in $EDITOR");
     feed.push_line(BlockStyle::Plain, "    Ctrl+H     Launch lazygit");
     feed.push_line(BlockStyle::Plain, "    Ctrl+S     Save session");
+    feed.push_line(BlockStyle::Plain, "    Alt+M      Quick-model switcher");
+    feed.push_line(BlockStyle::Plain, "    Alt+P      Prompt switcher");
     feed.push_line(
         BlockStyle::Plain,
         "    Tab        File picker / auto-complete",

@@ -6,6 +6,7 @@ mod cli;
 mod config;
 mod context;
 mod docs;
+pub mod engine;
 mod event;
 #[cfg(feature = "extensions")]
 mod extension;
@@ -78,6 +79,13 @@ async fn run() -> anyhow::Result<()> {
 
     let (mut cfg, is_first_startup) = config::load();
 
+    // CLI MCP flags override config; parse errors exit before anything runs.
+    #[cfg(feature = "mcp")]
+    if let Err(e) = cli.merge_cli_mcp(&mut cfg) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+
     if cli.print_config {
         print::print_config(&cli, &cfg);
         return Ok(());
@@ -117,10 +125,9 @@ async fn run() -> anyhow::Result<()> {
     // model call.
     #[cfg(feature = "hooks")]
     {
-        crate::extras::hooks::init_dispatcher(crate::extras::hooks::trust::load_dispatcher(
-            cli.no_hooks,
-            !is_interactive,
-        ));
+        crate::extras::hooks::init_dispatcher(
+            crate::extras::hooks::trust::load_dispatcher_async(cli.no_hooks, !is_interactive).await,
+        );
 
         if let Some(tool_name) = &cli.hooks_test {
             let tool_input: serde_json::Value = cli

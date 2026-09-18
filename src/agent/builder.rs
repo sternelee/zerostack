@@ -153,11 +153,10 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
     // Add extra files content to preamble budget. Cap each file to prevent a
     // huge file from blowing up the system prompt past the context window.
     const MAX_EXTRA_FILE_BYTES: usize = 524_288;
-    let extra_files_content: Vec<String> = context
-        .extra_files
-        .iter()
-        .filter_map(|p| {
-            let content = std::fs::read_to_string(p).ok()?;
+    let mut extra_files_direct: Vec<(String, String)> = Vec::new();
+    let mut extra_files_len: usize = 0;
+    for p in &context.extra_files {
+        if let Ok(content) = std::fs::read_to_string(p) {
             let truncated = if content.len() > MAX_EXTRA_FILE_BYTES {
                 tracing::warn!(
                     "extra file {} exceeds {} bytes, truncated for preamble",
@@ -174,10 +173,11 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
             } else {
                 content
             };
-            Some(format!("Content of {}:\n{}", p.display(), truncated))
-        })
-        .collect();
-    let extra_files_len: usize = extra_files_content.iter().map(|s| s.len() + 2).sum();
+            let header = format!("Content of {}:\n", p.display());
+            extra_files_len += header.len() + truncated.len() + 4; // "\n\n---\n\n"
+            extra_files_direct.push((header, truncated));
+        }
+    }
     let total_len = total_len + extra_files_len;
 
     let mut preamble = String::with_capacity(total_len);
@@ -233,9 +233,10 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
             preamble.push_str(&block);
         }
     }
-    for content in &extra_files_content {
+    for (header, truncated) in &extra_files_direct {
         preamble.push_str("\n\n---\n\n");
-        preamble.push_str(content);
+        preamble.push_str(header);
+        preamble.push_str(truncated);
     }
     #[cfg(feature = "memory")]
     {
@@ -268,24 +269,59 @@ fn collect_external_dirs() -> Vec<String> {
 
 /// Retain only the tools whose names appear in `allowlist`. An empty
 /// allowlist passes everything through unchanged. Unrecognized names are
-/// logged as warnings and ignored.
+/// reported via `eprintln` and `tracing::warn`, with a case-insensitive
+/// suggestion when applicable.
 pub(crate) fn filter_tools_by_allowlist(
     tools: Vec<Box<dyn rig::tool::ToolDyn>>,
     allowlist: &[String],
 ) -> Vec<Box<dyn rig::tool::ToolDyn>> {
-    if allowlist.is_empty() {
+    let cleaned: Vec<String> = allowlist
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if cleaned.is_empty() {
         return tools;
     }
-    let allowed: HashSet<&str> = allowlist.iter().map(|s| s.as_str()).collect();
+    let allowed: HashSet<String> = cleaned.iter().cloned().collect();
+    let available: Vec<String> = tools.iter().map(|t| t.name()).collect();
     for name in &allowed {
-        if !tools.iter().any(|t| t.name() == *name) {
+        if !available.iter().any(|t| t == name) {
+            let suggestion = available
+                .iter()
+                .find(|t| t.eq_ignore_ascii_case(name))
+                .map(|s| format!(" (did you mean '{s}'?)"))
+                .unwrap_or_default();
+            eprintln!("warning: --tools: unknown tool '{name}'{suggestion} (ignored)");
             tracing::warn!("--tools: unknown tool '{name}' (ignored)");
         }
     }
-    tools
+    if tracing::enabled!(tracing::Level::WARN) {
+        // Also list available tools when filtering leaves empty, to help typo discovery.
+        let filtered: Vec<_> = tools
+            .iter()
+            .filter(|t| allowed.contains(&t.name()))
+            .collect();
+        if filtered.is_empty() {
+            tracing::warn!(
+                "--tools: filter left no tools (allowlist: {:?}); available: {:?}",
+                allowed,
+                available
+            );
+        }
+    }
+    let allowed_ref: HashSet<&str> = allowed.iter().map(|s| s.as_str()).collect();
+    let filtered: Vec<Box<dyn rig::tool::ToolDyn>> = tools
         .into_iter()
-        .filter(|t| allowed.contains(t.name().as_str()))
-        .collect()
+        .filter(|t| allowed_ref.contains(t.name().as_str()))
+        .collect();
+    if filtered.is_empty() && !allowed_ref.is_empty() {
+        eprintln!(
+            "warning: --tools filter left no tools; available: {}",
+            available.join(", ")
+        );
+    }
+    filtered
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -304,7 +340,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
     // `None` for providers that need no extra routing.
     additional_params: Option<serde_json::Value>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
-) -> Agent<M> {
+) -> Agent<crate::agent::image_relay::ImageRelayModel<M>> {
     #[cfg(feature = "lsp")]
     let lsp_manager = if cli.resolve_no_tools(cfg) {
         None
@@ -332,7 +368,8 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
         preamble.push_str(crate::agent::prompt::RTK_PROMPT);
     }
 
-    let mut builder = AgentBuilder::new(model).preamble(&preamble);
+    let mut builder = AgentBuilder::new(crate::agent::image_relay::ImageRelayModel::new(model))
+        .preamble(&preamble);
 
     if let Some(params) = additional_params {
         builder = builder.additional_params(params);
@@ -458,7 +495,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
         }
 
         #[cfg(feature = "advisor")]
-        if crate::extras::advisor::with_config(|c| c.enabled) {
+        if crate::extras::advisor::is_enabled() {
             use crate::extras::advisor::AdvisorTool;
             all_tools.push(Box::new(AdvisorTool::new()));
         }
@@ -475,7 +512,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
             all_tools.push(Box::new(tools::lsp::LspTool::new(lsp.clone())));
         }
 
-        let all_tools = filter_tools_by_allowlist(all_tools, &cli.tools);
+        let all_tools = filter_tools_by_allowlist(all_tools, &cli.resolve_tools(cfg));
 
         #[cfg(feature = "hooks")]
         let all_tools = crate::extras::hooks::wrap_from_global(all_tools, permission.clone());
@@ -530,7 +567,7 @@ pub fn build_btw_agent_inner<M: CompletionModel + 'static>(
     temperature: Option<f64>,
     // See `build_agent_inner`: OpenRouter `provider.order` pin for `anthropic/*`.
     additional_params: Option<serde_json::Value>,
-) -> Agent<M> {
+) -> Agent<crate::agent::image_relay::ImageRelayModel<M>> {
     let cwd = std::env::current_dir()
         .ok()
         .map(|p| p.display().to_string())
@@ -579,7 +616,7 @@ pub fn build_btw_agent_inner<M: CompletionModel + 'static>(
 
     // Honor --no-tools: fall back to a pure-context, single-turn answer.
     if cli.resolve_no_tools(cfg) {
-        let mut builder = AgentBuilder::new(model)
+        let mut builder = AgentBuilder::new(crate::agent::image_relay::ImageRelayModel::new(model))
             .preamble(&preamble)
             .default_max_turns(1)
             .max_tokens(max_tokens);
@@ -595,13 +632,14 @@ pub fn build_btw_agent_inner<M: CompletionModel + 'static>(
     // Read-only tools only (read/grep/find_files/list_dir): a side question can
     // look things up, but has no write/edit/bash, so it still has no side
     // effects to roll back and never mutates the session. Allow multiple turns
-    // so it can read then answer.
+    // so it can read then answer. Respects --tools allowlist as an intersection
+    // (so --tools read,write still only gives read for btw).
     let max_text_file_size = cfg.max_text_file_size;
     let max_read_lines = cfg.resolve_max_read_lines();
     let max_grep_results = cfg.resolve_max_grep_results();
     let max_find_results = cfg.resolve_max_find_results();
     let max_list_dir_entries = cfg.resolve_max_list_dir_entries();
-    let read_tools: Vec<Box<dyn rig::tool::ToolDyn>> = vec![
+    let mut read_tools: Vec<Box<dyn rig::tool::ToolDyn>> = vec![
         Box::new(tools::ReadTool::new(
             permission.clone(),
             ask_tx.clone(),
@@ -624,8 +662,22 @@ pub fn build_btw_agent_inner<M: CompletionModel + 'static>(
             max_list_dir_entries,
         )),
     ];
+    // Respect --tools: intersection with read-only set, silently (no warnings for
+    // valid-but-not-applicable tools like `write`).
+    {
+        let allowlist = cli.resolve_tools(cfg);
+        let cleaned: Vec<String> = allowlist
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !cleaned.is_empty() {
+            let allowed: std::collections::HashSet<String> = cleaned.into_iter().collect();
+            read_tools.retain(|t| allowed.contains(&t.name()));
+        }
+    }
 
-    let mut builder = AgentBuilder::new(model)
+    let mut builder = AgentBuilder::new(crate::agent::image_relay::ImageRelayModel::new(model))
         .preamble(&preamble)
         .default_max_turns(BTW_MAX_TURNS)
         .max_tokens(max_tokens)

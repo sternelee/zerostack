@@ -169,6 +169,9 @@ If you want to use zerostack from scripts, from other programs, or if you just w
 | `--worktree` | Run the agent inside a git worktree (Experimental) |
 | `--parallel` | Run the agent inside a self-managed git worktree (Experimental) |
 | `--load-prompt <prompt>` | Use a specific prompt |
+| `--prompts-dir <path>` | Extra prompts directory, highest precedence (repeatable, last wins; `ZS_PROMPTS_DIR` appends `:`-separated dirs) |
+| `--custom-mcp NAME=cmd args...` | Add a stdio MCP server (repeatable, overrides config) |
+| `--custom-mcp-http NAME=URL` | Add an HTTP MCP server (repeatable, overrides config) |
 
 ## 6. Opt-in features
 

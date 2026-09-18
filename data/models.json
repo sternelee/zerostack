@@ -8,6 +8,13 @@
       "output_price": 50
     },
     {
+      "id": "claude-fable-5-1",
+      "name": "Claude Fable 5.1",
+      "context": 1000000,
+      "input_price": 10,
+      "output_price": 50
+    },
+    {
       "id": "claude-haiku-4-5",
       "name": "Claude Haiku 4.5 (latest)",
       "context": 200000,
@@ -293,8 +300,8 @@
       "id": "gpt-5.6",
       "name": "GPT-5.6",
       "context": 1050000,
-      "input_price": 5,
-      "output_price": 30
+      "input_price": 4,
+      "output_price": 20
     },
     {
       "id": "gpt-5.6-luna",
@@ -307,8 +314,8 @@
       "id": "gpt-5.6-sol",
       "name": "GPT-5.6 Sol",
       "context": 1050000,
-      "input_price": 5,
-      "output_price": 30
+      "input_price": 4,
+      "output_price": 20
     },
     {
       "id": "gpt-5.6-terra",
@@ -316,6 +323,13 @@
       "context": 1050000,
       "input_price": 2,
       "output_price": 12
+    },
+    {
+      "id": "gpt-6-astra",
+      "name": "GPT-6 Astra",
+      "context": 1050000,
+      "input_price": 10,
+      "output_price": 50
     },
     {
       "id": "o1",
@@ -376,20 +390,6 @@
       "output_price": 12
     },
     {
-      "id": "gemini-2.0-flash",
-      "name": "Gemini 2.0 Flash",
-      "context": 1048576,
-      "input_price": 0.1,
-      "output_price": 0.4
-    },
-    {
-      "id": "gemini-2.0-flash-lite",
-      "name": "Gemini 2.0 Flash-Lite",
-      "context": 1048576,
-      "input_price": 0.075,
-      "output_price": 0.3
-    },
-    {
       "id": "gemini-2.5-computer-use-preview-10-2025",
       "name": "Gemini 2.5 Computer Use Preview 10-2025",
       "context": 131072,
@@ -444,13 +444,6 @@
       "context": 131072,
       "input_price": 2,
       "output_price": 120
-    },
-    {
-      "id": "gemini-3-pro-preview",
-      "name": "Gemini 3 Pro Preview",
-      "context": 1048576,
-      "input_price": 2,
-      "output_price": 12
     },
     {
       "id": "gemini-3.1-flash-image",
@@ -533,29 +526,36 @@
       "id": "gemini-3.6-flash",
       "name": "Gemini 3.6 Flash",
       "context": 1048576,
-      "input_price": 1.5,
-      "output_price": 7.5
+      "input_price": 0.75,
+      "output_price": 3.75
+    },
+    {
+      "id": "gemini-3.7-flash",
+      "name": "Gemini 3.7 Flash",
+      "context": 1048576,
+      "input_price": 0.75,
+      "output_price": 3.75
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "name": "Gemini 3.8 Flash",
+      "context": 1048576,
+      "input_price": 0.75,
+      "output_price": 3.75
     },
     {
       "id": "gemini-flash-latest",
       "name": "Gemini Flash Latest",
       "context": 1048576,
-      "input_price": 1.5,
-      "output_price": 9
+      "input_price": 0.75,
+      "output_price": 3.75
     },
     {
       "id": "gemini-flash-lite-latest",
       "name": "Gemini Flash-Lite Latest",
       "context": 1048576,
-      "input_price": 0.25,
-      "output_price": 1.5
-    },
-    {
-      "id": "gemini-robotics-er-1.6-preview",
-      "name": "Gemini Robotics-ER 1.6 Preview",
-      "context": 131072,
-      "input_price": 1,
-      "output_price": 5
+      "input_price": 0.3,
+      "output_price": 2.5
     },
     {
       "id": "gemma-4-26b-a4b-it",
@@ -598,6 +598,11 @@
       "context": 1000000
     },
     {
+      "id": "anthropic/claude-fable-5.1",
+      "name": "Claude Fable 5.1",
+      "context": 1000000
+    },
+    {
       "id": "anthropic/claude-haiku-4.5",
       "name": "Claude Haiku 4.5 (latest)",
       "context": 200000
@@ -628,28 +633,13 @@
       "context": 1000000
     },
     {
-      "id": "anthropic/claude-opus-4.7-fast",
-      "name": "Claude Opus 4.7 (Fast)",
-      "context": 1000000
-    },
-    {
       "id": "anthropic/claude-opus-4.8",
       "name": "Claude Opus 4.8",
       "context": 1000000
     },
     {
-      "id": "anthropic/claude-opus-4.8-fast",
-      "name": "Claude Opus 4.8 (Fast)",
-      "context": 1000000
-    },
-    {
       "id": "anthropic/claude-opus-5",
       "name": "Claude Opus 5",
-      "context": 1000000
-    },
-    {
-      "id": "anthropic/claude-opus-5-fast",
-      "name": "Claude Opus 5 (Fast)",
       "context": 1000000
     },
     {
@@ -690,7 +680,7 @@
     {
       "id": "deepseek/deepseek-r1",
       "name": "DeepSeek-R1",
-      "context": 163840
+      "context": 64000
     },
     {
       "id": "deepseek/deepseek-r1-0528",
@@ -725,11 +715,26 @@
     {
       "id": "deepseek/deepseek-v4-flash-0731",
       "name": "DeepSeek V4 Flash 0731",
+      "context": 1310720
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash-vision-exp",
+      "name": "DeepSeek V4 Flash Vision Exp",
       "context": 1048576
     },
     {
       "id": "deepseek/deepseek-v4-pro",
       "name": "DeepSeek V4 Pro",
+      "context": 1048576
+    },
+    {
+      "id": "deepseek/deepseek-v4-pro-0813",
+      "name": "DeepSeek V4 Pro 0813",
+      "context": 1048576
+    },
+    {
+      "id": "deepseek/deepseek-v4.1-flash",
+      "name": "DeepSeek V4.1 Flash",
       "context": 1048576
     },
     {
@@ -774,7 +779,7 @@
     },
     {
       "id": "google/gemini-3-pro-image-preview",
-      "name": "Nano Banana Pro",
+      "name": "Nano Banana Pro Preview",
       "context": 65536
     },
     {
@@ -784,7 +789,7 @@
     },
     {
       "id": "google/gemini-3.1-flash-image-preview",
-      "name": "Nano Banana 2",
+      "name": "Nano Banana 2 Preview",
       "context": 65536
     },
     {
@@ -828,29 +833,34 @@
       "context": 1048576
     },
     {
+      "id": "google/gemini-3.7-flash",
+      "name": "Gemini 3.7 Flash",
+      "context": 1048576
+    },
+    {
+      "id": "google/gemini-3.8-flash",
+      "name": "Gemini 3.8 Flash",
+      "context": 1048576
+    },
+    {
       "id": "google/gemma-2-27b-it",
       "name": "Gemma 2 27B",
       "context": 8192
     },
     {
       "id": "google/gemma-3-12b-it",
-      "name": "Gemma 3 12B",
+      "name": "Gemma 3 12B IT",
       "context": 131072
     },
     {
       "id": "google/gemma-3-27b-it",
-      "name": "Gemma 3 27B",
-      "context": 262144
-    },
-    {
-      "id": "google/gemma-3-4b-it",
-      "name": "Gemma 3 4B",
+      "name": "Gemma 3 27B IT",
       "context": 131072
     },
     {
-      "id": "google/gemma-3n-e4b-it",
-      "name": "Gemma 3n 4B",
-      "context": 32768
+      "id": "google/gemma-3-4b-it",
+      "name": "Gemma 3 4B IT",
+      "context": 131072
     },
     {
       "id": "google/gemma-4-26b-a4b-it",
@@ -884,12 +894,12 @@
     },
     {
       "id": "meta-llama/llama-3.1-70b-instruct",
-      "name": "Llama 3.1 70B Instruct",
+      "name": "Llama-3.1-70B-Instruct",
       "context": 131072
     },
     {
       "id": "meta-llama/llama-3.1-8b-instruct",
-      "name": "Llama 3.1 8B Instruct",
+      "name": "Llama-3.1-8B-Instruct",
       "context": 131072
     },
     {
@@ -920,12 +930,17 @@
     {
       "id": "meta-llama/llama-guard-4-12b",
       "name": "Llama Guard 4 12B",
-      "context": 1048576
+      "context": 163840
     },
     {
       "id": "mistralai/codestral-2508",
       "name": "Codestral 2508",
       "context": 256000
+    },
+    {
+      "id": "mistralai/devstral-2512",
+      "name": "Devstral 2",
+      "context": 262144
     },
     {
       "id": "mistralai/ministral-14b-2512",
@@ -1010,7 +1025,7 @@
     {
       "id": "mistralai/voxtral-small-24b-2507",
       "name": "Voxtral Small 24B 2507",
-      "context": 32000
+      "context": 32768
     },
     {
       "id": "moonshotai/kimi-k2",
@@ -1198,11 +1213,6 @@
       "context": 400000
     },
     {
-      "id": "openai/gpt-5.3-chat",
-      "name": "GPT-5.3 Chat",
-      "context": 128000
-    },
-    {
       "id": "openai/gpt-5.3-codex",
       "name": "GPT-5.3 Codex",
       "context": 400000
@@ -1273,6 +1283,16 @@
       "context": 1050000
     },
     {
+      "id": "openai/gpt-6-astra",
+      "name": "GPT-6 Astra",
+      "context": 1050000
+    },
+    {
+      "id": "openai/gpt-6-astra-pro",
+      "name": "GPT-6 Astra Pro",
+      "context": 1050000
+    },
+    {
       "id": "openai/gpt-chat-latest",
       "name": "GPT Chat Latest",
       "context": 400000
@@ -1288,13 +1308,8 @@
       "context": 131072
     },
     {
-      "id": "openai/gpt-oss-20b:free",
-      "name": "gpt-oss-20b (free)",
-      "context": 131072
-    },
-    {
       "id": "openai/gpt-oss-safeguard-20b",
-      "name": "gpt-oss-safeguard-20b",
+      "name": "GPT OSS Safeguard 20B",
       "context": 131072
     },
     {
@@ -1363,11 +1378,6 @@
       "context": 1000000
     },
     {
-      "id": "qwen/qwen-plus-2025-07-28:thinking",
-      "name": "Qwen Plus 0728 (thinking)",
-      "context": 1000000
-    },
-    {
       "id": "qwen/qwen2.5-vl-72b-instruct",
       "name": "Qwen2.5 VL 72B Instruct",
       "context": 128000
@@ -1390,7 +1400,7 @@
     {
       "id": "qwen/qwen3-235b-a22b-thinking-2507",
       "name": "Qwen3 235B A22B Thinking 2507",
-      "context": 262144
+      "context": 131072
     },
     {
       "id": "qwen/qwen3-30b-a3b",
@@ -1578,8 +1588,23 @@
       "context": 1000000
     },
     {
-      "id": "qwen/qwen3.8-max",
-      "name": "Qwen3.8 Max",
+      "id": "qwen/qwen3.8-2.4t-a95b",
+      "name": "Qwen3.8 2.4T A95B",
+      "context": 1048576
+    },
+    {
+      "id": "qwen/qwen3.8-27b",
+      "name": "Qwen3.8 27B",
+      "context": 1000000
+    },
+    {
+      "id": "qwen/qwen3.8-flash",
+      "name": "Qwen3.8 Flash",
+      "context": 1000000
+    },
+    {
+      "id": "qwen/qwen3.8-max-0902",
+      "name": "Qwen3.8 Max 0902",
       "context": 1000000
     },
     {
@@ -1600,6 +1625,11 @@
     {
       "id": "x-ai/grok-4.5",
       "name": "Grok 4.5",
+      "context": 500000
+    },
+    {
+      "id": "x-ai/grok-4.6",
+      "name": "Grok 4.6",
       "context": 500000
     },
     {
@@ -1640,7 +1670,7 @@
     {
       "id": "z-ai/glm-4.7-flash",
       "name": "GLM-4.7-Flash",
-      "context": 202752
+      "context": 200000
     },
     {
       "id": "z-ai/glm-5",
@@ -1661,6 +1691,16 @@
       "id": "z-ai/glm-5.2",
       "name": "GLM-5.2",
       "context": 1048576
+    },
+    {
+      "id": "z-ai/glm-5.3",
+      "name": "GLM-5.3",
+      "context": 1310720
+    },
+    {
+      "id": "z-ai/glm-5.3-flash",
+      "name": "GLM-5.3-Flash",
+      "context": 1310720
     },
     {
       "id": "z-ai/glm-5v-turbo",

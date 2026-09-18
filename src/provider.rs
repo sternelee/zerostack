@@ -11,6 +11,7 @@ use rig::streaming::StreamingChat;
 use tokio::sync::mpsc;
 
 use crate::agent::builder;
+use crate::agent::image_relay::ImageRelayModel;
 use crate::agent::prompt;
 use crate::agent::runner::{self, AgentRunner};
 use crate::auth::{AuthResolver, ProviderKind};
@@ -91,7 +92,7 @@ pub(crate) fn default_model_for_provider(
     }
     // Deterministic: prefer the alphabetically-first quick model for this provider
     // (HashMap iteration order would otherwise be unstable).
-    let qm = crate::config::quick_models_map(cfg);
+    let qm = crate::config::quick_models_map_ref(cfg);
     let mut names: Vec<&String> = qm.keys().collect();
     names.sort();
     for name in names {
@@ -150,8 +151,8 @@ pub enum OpenAiModel {
 
 #[derive(Clone)]
 pub enum OpenAiAgent {
-    Responses(Agent<openai::responses_api::ResponsesCompletionModel>),
-    Completions(Agent<openai::completion::CompletionModel>),
+    Responses(Agent<ImageRelayModel<openai::responses_api::ResponsesCompletionModel>>),
+    Completions(Agent<ImageRelayModel<openai::completion::CompletionModel>>),
 }
 
 #[derive(Clone)]
@@ -357,12 +358,27 @@ struct ManualModelsItem {
 }
 
 /// Custom / OpenAI-compatible gateway: best-effort GET {base}/models.
+#[allow(dead_code)]
 pub async fn list_models_manual(
     provider_name: &str,
     cli_key: Option<&str>,
     custom_providers: &std::collections::HashMap<String, CustomProviderConfig>,
     config_api_keys: Option<&std::collections::HashMap<String, String>>,
 ) -> anyhow::Result<Vec<ModelEntry>> {
+    let (models, _) =
+        fetch_custom_models_raw(provider_name, cli_key, custom_providers, config_api_keys).await?;
+    Ok(models)
+}
+
+/// Single GET for custom gateways that returns both model list and pricing.
+/// Avoids the duplicate `GET /models` that `fetch_models_cached` previously
+/// did (one for listing, one for `fetch_live_model_info`).
+pub(crate) async fn fetch_custom_models_raw(
+    provider_name: &str,
+    cli_key: Option<&str>,
+    custom_providers: &std::collections::HashMap<String, CustomProviderConfig>,
+    config_api_keys: Option<&std::collections::HashMap<String, String>>,
+) -> anyhow::Result<(Vec<ModelEntry>, HashMap<String, OpenRouterModelInfo>)> {
     let config = resolve_provider_config(provider_name, custom_providers)?;
     let base = config
         .base_url
@@ -381,15 +397,20 @@ pub async fn list_models_manual(
         config.danger_accept_invalid_certs,
         custom,
         Some(&base),
+        HttpPurpose::Metadata,
     )?;
     let url = format!("{}/models", base.trim_end_matches('/'));
     tracing::debug!("list_models_manual: GET {}", url);
-    let mut req = http.get(url);
-    if let Some(k) = key.as_deref().filter(|k| !k.is_empty()) {
-        req = req.bearer_auth(k);
-    }
-    let body = req.send().await?.error_for_status()?.bytes().await?;
-    parse_manual_models(&body)
+    let bearer = key
+        .as_deref()
+        .filter(|k| !k.is_empty())
+        .map(|k| k.to_string());
+    let body = get_bytes_with_retry(http, url, bearer).await?;
+    let models = parse_manual_models(&body)?;
+    // Best-effort pricing from same payload — ignore parse errors for pricing,
+    // keep models even if pricing shape mismatches.
+    let pricing = parse_model_infos(&body).unwrap_or_default();
+    Ok((models, pricing))
 }
 
 /// Parse a `GET {base}/models` payload from a custom / OpenAI-compatible
@@ -447,13 +468,14 @@ pub async fn fetch_live_model_info(
         config.danger_accept_invalid_certs,
         custom,
         Some(&base),
+        HttpPurpose::Metadata,
     )?;
     let url = format!("{}/models", base.trim_end_matches('/'));
-    let mut req = http.get(url);
-    if let Some(k) = key.as_deref().filter(|k| !k.is_empty()) {
-        req = req.bearer_auth(k);
-    }
-    let body = req.send().await?.error_for_status()?.bytes().await?;
+    let bearer = key
+        .as_deref()
+        .filter(|k| !k.is_empty())
+        .map(|k| k.to_string());
+    let body = get_bytes_with_retry(http, url, bearer).await?;
     parse_model_infos(&body)
 }
 
@@ -615,11 +637,11 @@ pub enum AnyModel {
 
 #[derive(Clone)]
 pub enum AnyAgent {
-    OpenRouter(Agent<openrouter::completion::CompletionModel>),
+    OpenRouter(Agent<ImageRelayModel<openrouter::completion::CompletionModel>>),
     OpenAI(OpenAiAgent),
-    Anthropic(Agent<anthropic::completion::CompletionModel>),
-    Gemini(Agent<gemini::completion::CompletionModel>),
-    Ollama(Agent<ollama::CompletionModel>),
+    Anthropic(Agent<ImageRelayModel<anthropic::completion::CompletionModel>>),
+    Gemini(Agent<ImageRelayModel<gemini::completion::CompletionModel>>),
+    Ollama(Agent<ImageRelayModel<ollama::CompletionModel>>),
     /// Scripted test double (`rig::test_utils::MockCompletionModel`), used by
     /// headless main-loop integration tests; never constructed in production.
     #[cfg(test)]
@@ -916,20 +938,117 @@ pub(crate) fn expand_env(value: &str) -> anyhow::Result<String> {
     }
 }
 
-/// Builds a shared reqwest client, combining:
+/// What an HTTP client is for. The two kinds of traffic need opposite
+/// deadlines, so the purpose picks them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HttpPurpose {
+    /// Completion traffic handed to rig. A streamed reply legitimately runs
+    /// for minutes, so it gets no whole-request deadline; a total deadline
+    /// here cuts every reply longer than it mid-stream (reqwest reports that
+    /// as "error decoding response body"). Only silence is bounded: no bytes
+    /// for [`COMPLETION_IDLE_TIMEOUT`] fails the request as a timeout, which
+    /// the runner's retry recognises.
+    Completion,
+    /// Metadata requests zerostack issues itself (`GET /models` at startup
+    /// and from `/provider`), capped per attempt by
+    /// [`DEFAULT_METADATA_TIMEOUT`] so a stalled DNS, TLS handshake, or
+    /// server cannot hold the caller.
+    Metadata,
+}
+
+/// Connect-phase cap shared by every client.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Whole-request deadline for [`HttpPurpose::Metadata`] when the provider
+/// sets no `timeout_secs`.
+pub(crate) const DEFAULT_METADATA_TIMEOUT: Duration = Duration::from_secs(8);
+/// Idle cap for [`HttpPurpose::Completion`]: a stream that sends nothing for
+/// this long is dead. Long reasoning turns are silent for a while, so this is
+/// generous; it matches the stream idle timeout the Codex CLI uses.
+const COMPLETION_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Whole-request deadline to apply, if any: an explicit `timeout_secs` wins
+/// for both purposes; otherwise metadata requests get
+/// [`DEFAULT_METADATA_TIMEOUT`] and completions get none (their connect
+/// phase is still capped by `connect_timeout`).
+pub(crate) fn http_total_timeout(
+    purpose: HttpPurpose,
+    custom: Option<&CustomProviderConfig>,
+) -> Option<Duration> {
+    match (purpose, custom.and_then(|c| c.timeout_secs)) {
+        (_, Some(secs)) => Some(Duration::from_secs(secs)),
+        (HttpPurpose::Metadata, None) => Some(DEFAULT_METADATA_TIMEOUT),
+        (HttpPurpose::Completion, None) => None,
+    }
+}
+
+/// Builder with the defaults every provider client shares: user agent,
+/// keepalive, pool sizing, and the connect cap.
+fn base_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .user_agent(format!(
+            "zerostack/{} (https://github.com/gi-dellav/zerostack)",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .tcp_keepalive(Duration::from_secs(30))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(8)
+        .connect_timeout(CONNECT_TIMEOUT)
+}
+
+/// Apply the settings that differ by purpose: the whole-request deadline
+/// from [`http_total_timeout`], and the idle cap on completion streams.
+fn apply_purpose(
+    builder: reqwest::ClientBuilder,
+    purpose: HttpPurpose,
+    custom: Option<&CustomProviderConfig>,
+) -> reqwest::ClientBuilder {
+    let builder = match http_total_timeout(purpose, custom) {
+        Some(deadline) => builder.timeout(deadline),
+        None => builder,
+    };
+    match purpose {
+        HttpPurpose::Completion => builder.read_timeout(COMPLETION_IDLE_TIMEOUT),
+        HttpPurpose::Metadata => builder,
+    }
+}
+
+/// Shared pooled clients for built-in providers with default settings, one
+/// per purpose so the metadata deadline never reaches completion streams.
+static BUILTIN_COMPLETION_CLIENT: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(|| {
+        apply_purpose(base_client_builder(), HttpPurpose::Completion, None)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
+
+static BUILTIN_METADATA_CLIENT: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(|| {
+        apply_purpose(base_client_builder(), HttpPurpose::Metadata, None)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
+
+/// Builds a reqwest client for `purpose`, combining:
 /// - `danger_accept_invalid_certs` (from #62; the TLS toggle shared by all providers)
 /// - a custom provider's `headers` (values support `${ENV_VAR}` expansion) and `timeout_secs`
+/// - the per-purpose deadline from [`http_total_timeout`]
 ///
-/// When the provider is not custom (`custom == None`) and TLS is not disabled,
-/// the resulting client is equivalent to `reqwest::Client::default()`, so the
-/// behavior of existing providers is unchanged.
+/// Built-in providers with default settings share one pooled client per
+/// purpose instead of opening a new connection pool per request.
 pub(crate) fn build_http_client(
     provider_name: &str,
     danger_accept_invalid_certs: bool,
     custom: Option<&CustomProviderConfig>,
     base_url: Option<&str>,
+    purpose: HttpPurpose,
 ) -> anyhow::Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder();
+    if custom.is_none() && !danger_accept_invalid_certs && !is_localhost(base_url) {
+        return Ok(match purpose {
+            HttpPurpose::Completion => BUILTIN_COMPLETION_CLIENT.clone(),
+            HttpPurpose::Metadata => BUILTIN_METADATA_CLIENT.clone(),
+        });
+    }
+    let mut builder = base_client_builder();
     if is_localhost(base_url) {
         // Disable connection pooling for local LLM servers (notably
         // llama.cpp's cpp-httplib) which close idle keep-alive
@@ -938,23 +1057,19 @@ pub(crate) fn build_http_client(
         builder = builder.pool_max_idle_per_host(0);
     }
 
-    if let Some(cfg) = custom {
-        if !cfg.headers.is_empty() {
-            let mut headers = HeaderMap::new();
-            for (name, raw_value) in &cfg.headers {
-                let value = expand_env(raw_value)?;
-                let header_name = HeaderName::from_bytes(name.as_bytes())
-                    .map_err(|e| anyhow::anyhow!("Invalid header name '{name}': {e}"))?;
-                let header_value = HeaderValue::from_str(&value)
-                    .map_err(|e| anyhow::anyhow!("Invalid value for header '{name}': {e}"))?;
-                headers.insert(header_name, header_value);
-            }
-            builder = builder.default_headers(headers);
+    if let Some(cfg) = custom.filter(|cfg| !cfg.headers.is_empty()) {
+        let mut headers = HeaderMap::new();
+        for (name, raw_value) in &cfg.headers {
+            let value = expand_env(raw_value)?;
+            let header_name = HeaderName::from_bytes(name.as_bytes())
+                .map_err(|e| anyhow::anyhow!("Invalid header name '{name}': {e}"))?;
+            let header_value = HeaderValue::from_str(&value)
+                .map_err(|e| anyhow::anyhow!("Invalid value for header '{name}': {e}"))?;
+            headers.insert(header_name, header_value);
         }
-        if let Some(secs) = cfg.timeout_secs {
-            builder = builder.timeout(Duration::from_secs(secs));
-        }
+        builder = builder.default_headers(headers);
     }
+    builder = apply_purpose(builder, purpose, custom);
 
     if danger_accept_invalid_certs {
         tracing::warn!(
@@ -974,6 +1089,71 @@ fn is_localhost(url: Option<&str>) -> bool {
             || u.starts_with("http://127.")
             || u.starts_with("http://[::1]")
     })
+}
+
+/// GET with retry, handling 429/5xx + `Retry-After` and pooling reuse.
+/// Clones the request for each attempt (GET has no body, so clone is cheap).
+async fn get_bytes_with_retry(
+    client: reqwest::Client,
+    url: String,
+    bearer: Option<String>,
+) -> anyhow::Result<Vec<u8>> {
+    let cfg = RetryConfig {
+        max_attempts: 3,
+        initial_backoff_ms: 500,
+        max_backoff_ms: 5_000,
+    };
+    let bytes = retry::with_retry(&cfg, || {
+        let client = client.clone();
+        let url = url.clone();
+        let bearer = bearer.clone();
+        async move {
+            let mut req = client.get(&url);
+            if let Some(k) = bearer.as_deref().filter(|k| !k.is_empty()) {
+                req = req.bearer_auth(k);
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let status = resp.status();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+                let retry_after = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                let msg = if retry_after.is_empty() {
+                    format!(
+                        "HTTP {} {}",
+                        status.as_u16(),
+                        status.canonical_reason().unwrap_or("")
+                    )
+                } else {
+                    format!("HTTP {} retry-after: {}", status.as_u16(), retry_after)
+                };
+                return Err(std::io::Error::other(msg));
+            }
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                // 4xx except 429 is not retryable — use NotFound kind so
+                // `is_retryable` returns false.
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("HTTP {}: {}", status, text.trim()),
+                ));
+            }
+            let b = resp
+                .bytes()
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            Ok(b.to_vec())
+        }
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    Ok(bytes)
 }
 
 /// Determines which API style the OpenAI family should use:
@@ -1059,6 +1239,7 @@ pub fn create_client(
                 config.danger_accept_invalid_certs,
                 custom,
                 base_url.as_deref(),
+                HttpPurpose::Completion,
             )?;
             Ok(AnyClient::OpenAI(build_openai_client(
                 &key,

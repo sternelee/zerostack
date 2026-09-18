@@ -5,6 +5,7 @@ use crate::ui::pickers::handlers;
 use crate::ui::pickers::list::ListPicker;
 use crate::ui::pickers::models::ModelsPicker;
 use crate::ui::pickers::rewind::RewindPicker;
+use crate::ui::pickers::switcher::{ModelSwitcher, PromptSwitcher};
 
 pub enum Picker {
     File(FilePicker),
@@ -12,6 +13,8 @@ pub enum Picker {
     Prefixed(ListPicker, &'static str),
     Models(ModelsPicker),
     Rewind(RewindPicker),
+    ModelSwitcher(ModelSwitcher),
+    PromptSwitcher(PromptSwitcher),
 }
 
 impl Picker {
@@ -22,6 +25,8 @@ impl Picker {
             Picker::Prefixed(p, _) => p.active,
             Picker::Models(p) => p.active,
             Picker::Rewind(p) => p.active(),
+            Picker::ModelSwitcher(p) => p.active(),
+            Picker::PromptSwitcher(p) => p.active(),
         }
     }
 
@@ -32,6 +37,8 @@ impl Picker {
             Picker::Prefixed(p, _) => p.set_monochrome(monochrome),
             Picker::Models(p) => p.set_monochrome(monochrome),
             Picker::Rewind(p) => p.set_monochrome(monochrome),
+            Picker::ModelSwitcher(p) => p.set_monochrome(monochrome),
+            Picker::PromptSwitcher(p) => p.set_monochrome(monochrome),
         }
     }
 
@@ -49,6 +56,8 @@ impl Picker {
             }
             Picker::Models(p) => p.draw(),
             Picker::Rewind(p) => p.draw(),
+            Picker::ModelSwitcher(p) => p.draw(),
+            Picker::PromptSwitcher(p) => p.draw(),
         }
     }
 }
@@ -83,6 +92,8 @@ impl InputEditor {
                 handlers::handle_models_key(&mut self.buffer, &mut self.cursor, p, key)
             }
             Some(Picker::Rewind(p)) => p.handle(key),
+            Some(Picker::ModelSwitcher(p)) => p.handle(key),
+            Some(Picker::PromptSwitcher(p)) => p.handle(key),
             None => false,
         };
         if handled {

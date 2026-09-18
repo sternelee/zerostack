@@ -44,7 +44,14 @@ overriding earlier ones for same-named files:
 1. Embedded at compile time
 2. `~/.local/share/zerostack/prompts/` (global, user-level)
 3. `prompts/` (project-local, relative to CWD)
-4. `.zerostack/prompts/` (project-level config, highest priority)
+4. `.zerostack/prompts/` (project-level config)
+5. `--prompts-dir <path>` / `ZS_PROMPTS_DIR` (CLI, highest priority; repeatable, last wins)
+
+Extra CLI prompts dirs load `.md` files like the other tiers: same-named
+prompts override everything below, new names are added. Missing dirs are
+skipped with a warning. `ZS_PROMPTS_DIR` (`:`-separated, e.g.
+`ZS_PROMPTS_DIR=./shared:./team`) appends after the `--prompts-dir` flags,
+so the env's last entry wins overall.
 
 **Themes** (priority low to high):
 1. Embedded at compile time
@@ -185,7 +192,7 @@ Accepted top-level keys:
 | `auto-update-prompts`     | boolean | When `true`, update prompt files that changed in the new version without asking. When `false`, never update. When unset, asks interactively. Nothing happens when the installed prompts already match the embedded defaults. |
 | `auto-update-themes`      | boolean | When `true`, update theme files that changed in the new version without asking. When `false`, never update. When unset, asks interactively. Nothing happens when the installed themes already match the embedded defaults. |
 | `edit_system`             | string  | Edit system mode: `"similarity"` (SEARCH/REPLACE with fuzzy matching, default) or `"hashedit"` (CRC-32 tag-based CAS edits). See Edit System Modes below.                     |
-| `custom_providers`        | object  | Map of provider aliases to `{ "provider_type", "base_url", "api_key_env", "api_style", "headers", "danger_accept_invalid_certs", "timeout_secs" }`. `provider_type` must resolve to a built-in provider type; `api_key_env` is optional. For OpenAI providers, `api_style` selects `"responses"` or `"completions"`, `headers` sets custom HTTP headers (values support `${ENV_VAR}` expansion), and `timeout_secs` overrides the HTTP timeout. `danger_accept_invalid_certs` disables TLS verification. See the OpenAI API styles section below. |
+| `custom_providers`        | object  | Map of provider aliases to `{ "provider_type", "base_url", "api_key_env", "api_style", "headers", "danger_accept_invalid_certs", "timeout_secs" }`. `provider_type` must resolve to a built-in provider type; `api_key_env` is optional. For OpenAI providers, `api_style` selects `"responses"` or `"completions"`, `headers` sets custom HTTP headers (values support `${ENV_VAR}` expansion), and `timeout_secs` sets a whole-request deadline (leave unset to let long streamed replies run). `danger_accept_invalid_certs` disables TLS verification. See the OpenAI API styles section below. |
 | `permission`              | object  | Permission rules using glob patterns; see the permission config notes below.                                |
 | `permission-regex`        | object  | Same structure as `permission` but patterns are interpreted as regex instead of glob.                       |
 | `permission-allow`        | object  | Map of tool names to lists of glob patterns to allow. Works alongside the `permission` field. See below.    |
@@ -559,8 +566,14 @@ config file:
 }
 ```
 
-The optional `timeout_secs` field overrides the default HTTP timeout for the
-provider. TLS certificate verification can be disabled with
+The optional `timeout_secs` field is a whole-request deadline in seconds, and
+it covers the streamed reply: a completion still running when it elapses is
+cut off. Leave it unset unless a gateway needs one. By default completion
+requests have no deadline beyond a 5s connect cap and fail only after 300s
+without a byte, while the `GET /models` requests zerostack issues itself (at
+startup and from `/provider`) are capped at 8s per attempt. Like `headers`,
+this applies to `provider_type: openai`; other provider types take rig's
+default client. TLS certificate verification can be disabled with
 `"danger_accept_invalid_certs": true` (for self-signed or internal-CA
 gateways) — use with care, as it makes the connection vulnerable to MITM.
 
@@ -744,16 +757,15 @@ Available items:
 | `separator`           | Literal text from `text` (default a space). Trimmed around hidden items. |
 | `flex_separator`      | Expands to fill the remaining width; several split the space evenly. |
 
-The `git_changes` and `git_status` items run `git status` once a second (only
+The `git_changes` and `git_status` items run `git status` on focus and after bash tool calls (only
 when one of them is used). All other items are read from the session.
 
 ## Status signals
 
 Requires the `status-signals` feature (included in the default build). Pass
-`--status-socket <path>` to have zerostack emit `start`, `stop`, and
-`git-conflict` events over a Unix domain socket at `<path>`, for external
-status bars or tooling to watch. This is separate from the in-TUI status bar
-above.
+`--status-socket <path>` to have zerostack report its run state over a Unix
+domain socket at `<path>`, for external status bars or tooling to watch. See
+[STATUS_SIGNALS.md](STATUS_SIGNALS.md) for the full protocol.
 
 ## Colors
 
@@ -861,7 +873,21 @@ permission-regex:
 When compiled with MCP support, `mcp_servers` accepts command-based and URL-based
 servers. Servers can also be added per project via `.zerostack/config.toml`
 (see *Project-local override* above); project servers merge with — and can
-override — global ones by name.
+override — global ones by name. Ephemeral servers can be added on the command
+line without touching any config file:
+
+```sh
+# stdio server: NAME=command args... (repeatable; shell quoting honored)
+zerostack --custom-mcp 'local-fs=npx -y @modelcontextprotocol/server-filesystem .'
+# HTTP server: NAME=https://... (repeatable)
+zerostack --custom-mcp-http 'exa=https://mcp.exa.ai/mcp'
+```
+
+CLI servers override same-named config entries; a repeated name keeps the
+last flag. Names must be non-empty with no whitespace, `=`, or `__` (they
+become `mcp__<server>__<tool>` allowlist keys). Invalid entries abort startup
+with an error. Only command/URL servers are expressible on the CLI — `env`,
+headers, OAuth, and timeouts require the config file.
 
 ```json
 {

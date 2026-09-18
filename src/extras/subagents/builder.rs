@@ -30,7 +30,7 @@ fn build_explore_agent_inner<M: CompletionModel + 'static>(
     // OpenRouter `provider.order` pin for `anthropic/*` (see `AnyClient::completion_model`).
     additional_params: Option<serde_json::Value>,
     #[cfg(feature = "archmd")] architecture: Option<&str>,
-) -> Agent<M> {
+) -> Agent<crate::agent::image_relay::ImageRelayModel<M>> {
     let mut preamble = prompt::explore_prompt();
 
     #[cfg(feature = "archmd")]
@@ -58,16 +58,32 @@ fn build_explore_agent_inner<M: CompletionModel + 'static>(
         Box::new(tools::ListDirTool::new(None, None, max_list_dir_entries)),
     ];
     #[cfg(feature = "memory")]
-    let tools = {
+    let mut tools = {
         let mut tools = tools;
         tools.extend(subagent_memory_tools());
         tools
     };
+    #[cfg(not(feature = "memory"))]
+    let mut tools = tools;
+
+    // Respect --tools allowlist (intersection, no warnings for valid-but-not-applicable tools)
+    {
+        let allowlist = crate::extras::subagents::tools_allowlist_or_default();
+        let cleaned: Vec<String> = allowlist
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !cleaned.is_empty() {
+            let allowed: std::collections::HashSet<String> = cleaned.into_iter().collect();
+            tools.retain(|t| allowed.contains(&t.name()));
+        }
+    }
 
     #[cfg(feature = "hooks")]
     let tools = crate::extras::hooks::wrap_from_global(tools, None);
 
-    let mut builder = AgentBuilder::new(model)
+    let mut builder = AgentBuilder::new(crate::agent::image_relay::ImageRelayModel::new(model))
         .preamble(&preamble)
         .default_max_turns(max_turns)
         .tools(tools);

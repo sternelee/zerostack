@@ -19,12 +19,19 @@ pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()
 
 fn handle_compress(_parts: &[&str], _ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
     let instructions = if _parts.len() > 1 {
-        Some(_parts[1..].join(" "))
+        let s = _parts[1..].join(" ");
+        let trimmed = s.trim();
+        if trimmed.is_empty() || trimmed == "(none)" {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
     } else {
         None
     };
-    let instr_str = instructions.unwrap_or_default();
-    Err(anyhow::anyhow!("DEFER_COMPRESS:{}", instr_str))
+    Err(anyhow::Error::new(
+        crate::ui::slash::SlashOutcome::DeferCompress { instructions },
+    ))
 }
 
 #[cfg(feature = "loop")]
@@ -85,10 +92,13 @@ async fn handle_worktree(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Resu
         return Ok(());
     }
     let name = parts[1].trim();
-    if name.is_empty() || name.contains(' ') || name.contains('/') {
+    if let Err(e) = crate::extras::git_worktree::validate_branch_name(name) {
         write_error(
             ctx.renderer,
-            "invalid name: use a single word without spaces or slashes",
+            format!(
+                "{}. Use a single word without spaces, slashes, or leading dashes.",
+                e
+            ),
         );
         return Ok(());
     }

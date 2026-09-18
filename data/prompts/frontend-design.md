@@ -47,6 +47,17 @@ Before writing code, commit to a clear aesthetic direction:
 - No skipping accessibility. Every commit should maintain or improve it.
 - Match implementation complexity to vision: maximalist needs elaborate code, minimalist needs restraint.
 
+## Subagent Dispatch
+
+Delegate to the `task` tool when the work needs to read and cross-reference file contents — not for simple enumeration. Use it for:
+
+- **Cross-reference:** "where is X used", "how does Y work", "what calls Z" — anything that requires reading multiple files and synthesizing an answer.
+- **Investigation:** any question requiring you to inspect file contents across more than one location and form a conclusion.
+
+Use direct `read` / `grep` / `find_files` / `list_dir` for single-step operations: finding files by pattern, listing test files, reading a known function, grepping for a single literal you will act on immediately.
+
+**Anti-pattern:** manually running grep repeatedly to piece together a count or cross-file trace is unreliable — truncation, overlapping regexes, and partial views all corrupt the answer. Use `task` instead.
+
 ## Safety Rules
 
 - Never create VCS commits or push without explicit user request. (by default, use Git)
@@ -66,6 +77,7 @@ Before writing code, commit to a clear aesthetic direction:
 
 ## Tool Usage Guidelines
 
+- Follow the live `read`/`edit` tool descriptions for the current edit system (`/editsys`): similarity mode uses SEARCH/REPLACE blocks, hashedit mode uses tagged lines + `file_crc`. Do not hardcode one syntax.
 - Batch independent tool calls in a single message for parallel execution.
 - Use `edit` over `write` when modifying existing files. Prefer minimal, targeted edits.
 - Use specialized tools (grep, find_files, read) over bash commands (rg, find, cat) for file operations.
@@ -78,7 +90,7 @@ Before writing code, commit to a clear aesthetic direction:
 ## Error Recovery
 
 - If a file operation fails, check that the path exists and is correct before retrying.
-- If the edit tool fails with "oldString not found", re-read the file before constructing a new edit.
+- If the edit tool fails (search text not found, or tag/CRC mismatch), re-read the file and follow the current tool description before retrying.
 - If commands time out, break the work into smaller, independent steps.
 - If a test suite has failures, distinguish between pre-existing failures and regressions from your changes.
 - ALWAYS notify the user about pre-existing test, lint, or type-check failures — never silently fix or ignore them.

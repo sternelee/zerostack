@@ -73,7 +73,8 @@ async fn headless_app(turns: Vec<Vec<&str>>) -> (App<'static>, FakeModel) {
         200_000,
         "tui-loop-test",
     )));
-    let context: &'static mut ContextFiles = Box::leak(Box::new(crate::context::load(true)));
+    let context: &'static mut ContextFiles =
+        Box::leak(Box::new(crate::context::load_with_prompts_dirs(true, &[])));
     let client =
         crate::provider::create_client("anthropic", Some("test-key"), &HashMap::new(), None)
             .expect("create test client");
@@ -456,6 +457,106 @@ async fn ctrl_r_toggles_reasoning_visibility() {
         a.feed_text().contains("reasoning visibility: off")
     })
     .await;
+
+    app.teardown().await;
+}
+
+/// Build a headless app with two quick models on the same provider, so
+/// `Alt+M` switching stays local (no client rebuild, no network).
+async fn headless_app_with_quick_models() -> App<'static> {
+    isolate_data_dirs();
+    let mut quick = HashMap::new();
+    quick.insert(
+        "fast".to_string(),
+        crate::config::QuickModelConfig {
+            provider: compact_str::CompactString::new("anthropic"),
+            model: compact_str::CompactString::new("claude-fast-test"),
+            input_token_cost: 1.0,
+            output_token_cost: 2.0,
+            reserve_tokens: None,
+            temperature: None,
+            extra_body: None,
+            context_window: None,
+        },
+    );
+    quick.insert(
+        "pro".to_string(),
+        crate::config::QuickModelConfig {
+            provider: compact_str::CompactString::new("anthropic"),
+            model: compact_str::CompactString::new("claude-pro-test"),
+            input_token_cost: 3.0,
+            output_token_cost: 4.0,
+            reserve_tokens: None,
+            temperature: None,
+            extra_body: None,
+            context_window: None,
+        },
+    );
+    let cfg: &'static Config = Box::leak(Box::new(Config {
+        quick_models: Some(quick),
+        ..Default::default()
+    }));
+    let cli: &'static Cli = Box::leak(Box::new(Cli {
+        api_key: Some("test-key".to_string()),
+        no_session: true,
+        no_color: true,
+        ..Default::default()
+    }));
+    let session: &'static mut Session = Box::leak(Box::new(Session::new(
+        "anthropic",
+        "claude-sonnet-4-5",
+        200_000,
+        "tui-switcher-test",
+    )));
+    let context: &'static mut ContextFiles =
+        Box::leak(Box::new(crate::context::load_with_prompts_dirs(true, &[])));
+    let client =
+        crate::provider::create_client("anthropic", Some("test-key"), &HashMap::new(), None)
+            .expect("create test client");
+    let ui = UiContext::new(
+        cli,
+        cfg,
+        session,
+        context,
+        client,
+        None,
+        None,
+        Sandbox::new(false, "bwrap"),
+        None,
+    );
+    let model = fake_model::text_turns(Vec::<Vec<&str>>::new());
+    let agent = AnyAgent::Mock(rig::agent::AgentBuilder::new(model).build());
+    App::new_headless(
+        ui,
+        Some(agent),
+        None,
+        None,
+        Box::new(FakeBackend::new(80, 24)),
+    )
+    .await
+    .expect("build headless app")
+}
+
+fn alt_key(c: char) -> UserEvent {
+    UserEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT))
+}
+
+fn esc_key() -> UserEvent {
+    UserEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+}
+
+#[tokio::test]
+async fn alt_m_switcher_esc_cancels_without_switching() {
+    let _guard = acquire();
+    let mut app = headless_app_with_quick_models().await;
+    let before = app.session().model.to_string();
+
+    app.inject(alt_key('m')).await;
+    step_until(&mut app, |a| a.switcher_kind() == Some("model")).await;
+    app.inject(esc_key()).await;
+    step_until(&mut app, |a| a.switcher_kind().is_none()).await;
+
+    assert_eq!(app.session().model.as_str(), before);
 
     app.teardown().await;
 }
